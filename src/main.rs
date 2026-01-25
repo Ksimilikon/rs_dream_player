@@ -1,8 +1,8 @@
 use std::io::Cursor;
 
-use rodio::{Decoder, OutputStream};
+use rodio::Decoder;
 
-use crate::audio::track::Track;
+use crate::audio::{playlist::Playlist, song::track::Track};
 
 mod audio;
 mod cmd_docmsg;
@@ -17,13 +17,10 @@ fn main() {
     }
 
     let song_path = &args[1];
-    let track = match Track::from_file(song_path) {
-        Ok(track) => track,
-        Err(e) => {
-            println!("Error::read file={}, {}", song_path, e.to_string());
-            return;
-        }
-    };
+    let mut playlist = Playlist::from_dir(song_path).unwrap();
+    playlist.prev();
+    playlist.prev();
+    let track = playlist.get_song();
     println!(
         "Трек загружен: {} Mбайт",
         track.get().len() as f32 / 1024. / 1024.

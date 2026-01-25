@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use super::{playlist::Playlist, song::Song, types::Volume};
+use super::{playlist::Playlist, types::Volume};
 
 #[derive(Debug)]
 pub struct PlayerState {

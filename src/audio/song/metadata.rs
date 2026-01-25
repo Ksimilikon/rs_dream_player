@@ -4,9 +4,7 @@ use std::{
 };
 
 use audiotags::Tag;
-use serde::{Deserialize, Serialize};
-
-use crate::audio::types::Volume;
+use serde::Serialize;
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "kebab-case")]
@@ -20,12 +18,6 @@ pub struct SongMetaData {
     // cover_album: Option<>
     #[serde(rename = "xesam:artist")]
     artist: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Song {
-    sources: Vec<String>,
-    volume: Option<Volume>,
 }
 impl SongMetaData {
     pub fn new(path: &String) -> Result<Self, Box<dyn Error>> {

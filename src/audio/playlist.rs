@@ -67,6 +67,7 @@ impl Playlist {
 }
 
 /// debug
+// TODO: make caching
 #[cfg(debug_assertions)]
 impl Playlist {
     pub fn debug_songs_size(&self) {

@@ -23,8 +23,8 @@ pub struct VirtualSong {
     volume: Volume,
     metadata: Metadata,
     track: Option<Track>,
+    cover_art: Option<Vec<u8>>,
 }
-
 impl VirtualSong {
     pub fn from_file(path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
@@ -32,6 +32,7 @@ impl VirtualSong {
             volume: Volume::MAX,
             metadata: Track::from_file(path).unwrap().get_metadata()?,
             track: None,
+            cover_art: None,
         })
     }
     // pub fn from_out();

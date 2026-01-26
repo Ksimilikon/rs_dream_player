@@ -17,6 +17,8 @@ use crate::audio::song::metadata::Metadata;
 /// contain byte-sequencea
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Track {
+    // TODO: make field with type file music
+    // type: TypeFile
     data: Vec<u8>,
 }
 impl Track {

@@ -10,7 +10,7 @@ mod traits;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() > 2 {
+    if args.len() < 2 {
         // show --help
         println!("Welcome dream player");
         return;
@@ -18,19 +18,14 @@ fn main() {
 
     let song_path = &args[1];
     let mut playlist = Playlist::from_dir(song_path).unwrap();
-    playlist.prev();
-    playlist.prev();
-    let track = playlist.get_song();
-    println!(
-        "Трек загружен: {} Mбайт",
-        track.get().len() as f32 / 1024. / 1024.
-    );
+    playlist.debug_songs_size();
+    playlist.next();
 
     let stream_handle = rodio::OutputStreamBuilder::open_default_stream().unwrap();
     let sink = rodio::Sink::connect_new(&stream_handle.mixer());
-    let cursor = Cursor::new(track.get().clone());
-    let source = Decoder::new(cursor).unwrap();
 
-    sink.append(source);
+    playlist.play(&sink);
+    playlist.debug_songs_size();
+
     sink.sleep_until_end();
 }

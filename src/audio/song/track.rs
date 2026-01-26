@@ -1,9 +1,21 @@
-use std::{error::Error, fs::File, io::Read, path::Path};
+use std::{
+    error::Error,
+    fs::File,
+    io::{Cursor, Read},
+    path::Path,
+};
 
+use lofty::{
+    file::{AudioFile, TaggedFileExt},
+    probe::Probe,
+    tag::Accessor,
+};
 use serde::{Deserialize, Serialize};
 
+use crate::audio::song::metadata::Metadata;
+
 /// contain byte-sequencea
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Track {
     data: Vec<u8>,
 }
@@ -26,6 +38,41 @@ impl Track {
 
     pub fn get(&self) -> &Vec<u8> {
         self.data.as_ref()
+    }
+    pub fn get_metadata(&self) -> Result<Metadata, Box<dyn Error>> {
+        let mut reader = Cursor::new(&self.data);
+
+        let probed = Probe::new(&mut reader).guess_file_type()?;
+        let tagged_file = probed.read()?;
+
+        let properties = tagged_file.properties();
+
+        let tag = tagged_file
+            .primary_tag()
+            .or_else(|| tagged_file.first_tag())
+            .unwrap();
+
+        Ok(Metadata {
+            title: tag.title().map_or("Unknown".into(), |v| v.to_string()),
+            artist: tag.artist().map_or("Unknown".into(), |v| v.to_string()),
+            album: tag.album().map_or("Unknown".into(), |v| v.to_string()),
+            duration_sec: properties.duration().as_secs(),
+            sample_rate: properties.sample_rate().unwrap_or(0),
+            bitrate: properties.audio_bitrate().unwrap_or(0),
+            track_number: tag.track(),
+        })
+    }
+    pub fn get_cover_art(&self) -> Option<Vec<u8>> {
+        let mut reader = Cursor::new(&self.data);
+
+        let probed = Probe::new(&mut reader).guess_file_type().unwrap();
+        let tagged_file = probed.read().unwrap();
+        let tag = tagged_file
+            .primary_tag()
+            .or_else(|| tagged_file.first_tag())
+            .unwrap();
+
+        tag.pictures().first().map(|p| p.data().to_vec())
     }
 }
 
@@ -54,5 +101,12 @@ impl Track {
         let is_m4a = bytes.len() > 11 && &bytes[4..11] == b"ftypM4A";
 
         is_mp3 || is_wav || is_flac || is_ogg || is_midi || is_m4a
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Track {
+    pub fn debug_get(&self) -> &Vec<u8> {
+        &self.data
     }
 }

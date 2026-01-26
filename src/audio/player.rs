@@ -2,12 +2,12 @@ use std::time::Duration;
 
 use super::{playlist::Playlist, types::Volume};
 
-#[derive(Debug)]
-pub struct PlayerState {
+pub struct Player {
     cur_playlist: Option<Playlist>,
     is_playing: bool,
     volume: Volume,
     position: Duration,
+    preset: Vec<String>,
 }
 
 // impl PlayerAgentOS for PlayerState {

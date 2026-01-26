@@ -1,19 +1,19 @@
-use std::{error::Error, fs::File, path::Path};
+use std::{error::Error, fs::File, io::Cursor, path::Path};
 
+use get_size::GetSize;
+use rodio::{Decoder, Sink};
 use serde::{Deserialize, Serialize};
 
 use crate::audio::song::{track::Track, virtual_song::VirtualSong};
 
-#[derive(Debug, Serialize, Deserialize)]
 pub struct Playlist {
     // songs: Vec<VirtualSong>,
-    songs: Box<Vec<Track>>,
+    songs: Vec<VirtualSong>,
     cur_song: usize,
 }
-
 impl Playlist {
     pub fn from_dir<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn Error>> {
-        let mut audio_files = Box::new(Vec::new());
+        let mut audio_files = Vec::new();
         let dir = path.as_ref();
         if !dir.is_dir() {
             return Err(format!("'{}' isnt dirictory", dir.display()).into());
@@ -27,7 +27,7 @@ impl Playlist {
                 continue;
             }
 
-            match Track::from_file(path) {
+            match VirtualSong::from_file(path) {
                 Ok(s) => audio_files.push(s),
                 Err(e) => println!("{}", e),
             }
@@ -38,8 +38,16 @@ impl Playlist {
         })
     }
 
-    pub fn get_song(&self) -> &Track {
-        &self.songs[self.cur_song]
+    pub fn play(&mut self, sink: &Sink) -> Result<(), Box<dyn Error>> {
+        let mut visong = &mut self.songs[self.cur_song];
+        visong.load_track();
+        let track = visong.get_track()?;
+        let cursor = Cursor::new(track.get().clone());
+        let source = Decoder::new(cursor).unwrap();
+
+        sink.append(source);
+
+        Ok(())
     }
     pub fn next(&mut self) {
         let temp = self.cur_song + 1;
@@ -55,5 +63,29 @@ impl Playlist {
         } else {
             self.cur_song -= 1;
         }
+    }
+}
+
+/// debug
+#[cfg(debug_assertions)]
+impl Playlist {
+    pub fn debug_songs_size(&self) {
+        let list_structure_size = self.songs.capacity() * std::mem::size_of::<Track>();
+
+        let total_audio_data: usize = self
+            .songs
+            .iter()
+            .map(|visong| visong.debug_get_size())
+            .sum();
+
+        println!(
+            "Структуры в списке: {} MB",
+            list_structure_size as f32 / 1024. / 1024.
+        );
+        println!(
+            "Чистые аудио-данные в куче: {} MB",
+            total_audio_data as f32 / 1024. / 1024.
+        );
+        println!("Итого: {} bytes", list_structure_size + total_audio_data);
     }
 }

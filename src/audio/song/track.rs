@@ -14,6 +14,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::audio::song::metadata::Metadata;
 
+#[derive(Debug)]
+pub struct ErrorIsntMusic(String);
+impl std::fmt::Display for ErrorIsntMusic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl Error for ErrorIsntMusic {}
+
 /// contain byte-sequencea
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Track {
@@ -32,7 +41,10 @@ impl Track {
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
         if !Self::is_music(&buf) {
-            return Err(format!("{} isnt music", path.as_ref().display()).into());
+            return Err(Box::new(ErrorIsntMusic(format!(
+                "{}: isnt music",
+                path.as_ref().display()
+            ))));
         }
 
         Ok(Track { data: buf })
@@ -76,6 +88,8 @@ impl Track {
 
         tag.pictures().first().map(|p| p.data().to_vec())
     }
+    /// TODO:
+    pub fn get_lyrics(&self) {}
 }
 
 impl Track {

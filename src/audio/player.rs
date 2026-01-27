@@ -33,7 +33,7 @@ impl Player {
         self.cur_playlist
             .as_mut()
             .unwrap()
-            .play(&self.sink)
+            .play(&self.sink, self.volume)
             .unwrap();
     }
 }

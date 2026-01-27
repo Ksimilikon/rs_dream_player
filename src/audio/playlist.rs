@@ -4,7 +4,13 @@ use get_size::GetSize;
 use rodio::{Decoder, Sink};
 use serde::{Deserialize, Serialize};
 
-use crate::audio::song::{track::Track, virtual_song::VirtualSong};
+use crate::audio::{
+    song::{
+        track::{ErrorIsntMusic, Track},
+        virtual_song::VirtualSong,
+    },
+    types::Volume,
+};
 
 pub struct Playlist {
     // songs: Vec<VirtualSong>,
@@ -29,7 +35,13 @@ impl Playlist {
 
             match VirtualSong::from_file(path) {
                 Ok(s) => audio_files.push(s),
-                Err(e) => println!("{}", e),
+                Err(e) => {
+                    if let Some(_e) = e.downcast_ref::<ErrorIsntMusic>() {
+                        continue;
+                    } else {
+                        return Err(e);
+                    }
+                }
             }
         }
         Ok(Self {
@@ -38,12 +50,14 @@ impl Playlist {
         })
     }
 
-    pub fn play(&mut self, sink: &Sink) -> Result<(), Box<dyn Error>> {
+    pub fn play(&mut self, sink: &Sink, volume: Volume) -> Result<(), Box<dyn Error>> {
         let mut visong = &mut self.songs[self.cur_song];
         visong.load_track();
         let track = visong.get_track()?;
         let cursor = Cursor::new(track.get().clone());
         let source = Decoder::new(cursor).unwrap();
+
+        sink.set_volume(volume * visong.volume);
 
         sink.append(source);
 

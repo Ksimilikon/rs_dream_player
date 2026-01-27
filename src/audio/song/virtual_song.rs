@@ -4,8 +4,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
-
 use crate::audio::{
     song::{metadata::Metadata, track::Track},
     types::Volume,
@@ -20,17 +18,18 @@ enum TypeSource {
 
 pub struct VirtualSong {
     id: TypeSource,
-    volume: Volume,
+    pub volume: Volume,
     metadata: Metadata,
     track: Option<Track>,
     cover_art: Option<Vec<u8>>,
 }
 impl VirtualSong {
     pub fn from_file(path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+        let track = Track::from_file(&path)?;
         Ok(Self {
             id: TypeSource::Inner(path.clone()),
-            volume: Volume::MAX,
-            metadata: Track::from_file(path).unwrap().get_metadata()?,
+            volume: 1.,
+            metadata: track.get_metadata()?,
             track: None,
             cover_art: None,
         })

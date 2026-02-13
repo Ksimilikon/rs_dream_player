@@ -10,7 +10,6 @@ use lofty::{
     probe::Probe,
     tag::Accessor,
 };
-use serde::{Deserialize, Serialize};
 
 use crate::audio::song::metadata::Metadata;
 
@@ -24,7 +23,7 @@ impl std::fmt::Display for ErrorIsntMusic {
 impl Error for ErrorIsntMusic {}
 
 /// contain byte-sequencea
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct Track {
     // TODO: make field with type file music
     // type: TypeFile

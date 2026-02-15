@@ -7,7 +7,7 @@ mod cmd_docmsg;
 mod config;
 mod traits;
 
-pub const NAME: &str = "org.mpris.dream_player";
+pub const NAME: &str = "org.mpris.MediaPlayer2.DreamPlayer";
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {

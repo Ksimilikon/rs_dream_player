@@ -1,3 +1,4 @@
+use crate::NAME;
 #[cfg(target_os = "linux")]
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -14,7 +15,7 @@ pub struct DbusInteraface {
 pub struct Dbus {}
 
 #[cfg(target_os = "linux")]
-#[zbus::interface(name = "org.dream_player.music_player")]
+#[zbus::interface(name = "org.mpris.MediaPlayer2.Player")]
 impl DbusInteraface {
     async fn play(&self) {
         let mut player = self.player.lock().unwrap();
@@ -36,6 +37,30 @@ impl DbusInteraface {
         }
     }
     #[zbus(property)]
+    fn playback_status(&self) -> &str {
+        "Playing"
+    }
+    #[zbus(property)]
+    fn can_go_next(&self) -> bool {
+        false
+    }
+    #[zbus(property)]
+    fn can_go_previous(&self) -> bool {
+        false
+    }
+    #[zbus(property)]
+    fn can_play(&self) -> bool {
+        true
+    }
+    #[zbus(property)]
+    fn can_pause(&self) -> bool {
+        true
+    }
+    #[zbus(property)]
+    fn can_control(&self) -> bool {
+        true
+    }
+    #[zbus(property)]
     async fn send_title(&self) -> String {
         "ttttttt".to_string()
     }
@@ -51,20 +76,14 @@ impl Dbus {
                 .unwrap();
 
             runtime.block_on(async move {
-                use crate::NAME;
+                use zbus::blocking::connection;
 
-                let mpris = mpris_server::Player::builder(NAME)
-                    .can_go_next(true)
-                    .can_pause(true)
-                    .can_go_previous(true)
-                    .build()
-                    .await
-                    .unwrap();
-
-                let metadata = mpris_server::Metadata::builder().title("test data").build();
-
-                mpris.set_metadata(metadata).await.unwrap();
-                mpris.run().await;
+                let conn = connection::Builder::session()
+                    .unwrap()
+                    .name(NAME)
+                    .serve
+                while let Ok(title) = rx.recv() {}
+                // tokio::task::spawn_blocking(move || while let Ok(title) = rx.recv() {});
                 std::future::pending::<()>().await;
             })
         });

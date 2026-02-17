@@ -7,7 +7,6 @@ mod cmd_docmsg;
 mod config;
 mod traits;
 
-pub const NAME: &str = "org.mpris.MediaPlayer2.DreamPlayer";
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
@@ -16,14 +15,15 @@ fn main() {
         return;
     }
 
-    let (tx, rx) = mpsc::channel::<String>();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(16);
 
     let song_path = &args[1];
     let playlist = Playlist::from_dir(song_path).unwrap();
     let player = Arc::new(Mutex::new(Player::new(Some(tx))));
     // player.set_playlist(playlist);
     // player.play();
-    Dbus::start_server(Arc::clone(&player), rx);
+    Dbus::start_server(rx);
+    println!("start_server");
     player.lock().unwrap().set_playlist(playlist);
     player.lock().unwrap().play();
     // only for test

@@ -12,7 +12,6 @@ tokio = { version = "1.49.0", features = ["full"] }
 get-size = "0.1.4"
 
 zbus = "5.13.2"
-mpris-server = "0.9.0"
 
 # [target.'cfg(target_os="linux")'.dependencied]
 # zbus = "5.13.1"

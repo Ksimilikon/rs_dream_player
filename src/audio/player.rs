@@ -2,8 +2,6 @@ use std::{sync::mpsc, time::Duration};
 
 use rodio::{OutputStream, Sink};
 
-use crate::audio::dbus::Dbus;
-
 use super::{playlist::Playlist, types::Volume};
 
 pub struct Player {
@@ -11,10 +9,10 @@ pub struct Player {
     volume: Volume,
     sink: Sink,
     _stream: OutputStream,
-    _dbus_tx: Option<mpsc::Sender<String>>,
+    _dbus_tx: Option<tokio::sync::mpsc::Sender<String>>,
 }
 impl Player {
-    pub fn new(dbus_tx: Option<mpsc::Sender<String>>) -> Self {
+    pub fn new(dbus_tx: Option<tokio::sync::mpsc::Sender<String>>) -> Self {
         let _stream = rodio::OutputStreamBuilder::open_default_stream().unwrap();
         let sink = Sink::connect_new(_stream.mixer());
         sink.set_volume(1.0);

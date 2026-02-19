@@ -1,5 +1,3 @@
-#[derive(Debug)]
-#[allow(dead_code)]
 pub struct Metadata {
     pub title: String,
     pub artist: String,

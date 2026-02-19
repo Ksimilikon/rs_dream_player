@@ -9,6 +9,8 @@ use zbus::{
     zvariant::{ObjectPath, Value},
 };
 
+use crate::audio::metadata::Metadata;
+
 pub mod linux;
 
 pub const DBUS_NAME: &str = "org.mpris.MediaPlayer2.dream_player";
@@ -16,7 +18,7 @@ pub const DBUS_PATH: &str = "/org/mpris/MediaPlayer2";
 #[derive(Default)]
 pub struct DbusData {
     pub title: String,
-    pub artist: String,
+    pub artist: Vec<String>,
     pub cover_art: Option<Vec<u8>>,
 }
 pub struct DbusPlayer {
@@ -32,7 +34,7 @@ pub struct Dbus {}
 
 impl Dbus {
     pub fn start_server(
-        mut rx: tokio::sync::mpsc::Receiver<String>,
+        mut rx: tokio::sync::mpsc::Receiver<Metadata>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let t = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -42,14 +44,14 @@ impl Dbus {
             rt.block_on(async {
                 let data = Arc::new(Mutex::new(DbusData::default()));
                 let dbus_player = DbusPlayer { data: data.clone() };
-                // let root = DbusRoot::default();
+                let root = DbusRoot::default();
                 // WARN: unwrap
                 let _conn = zbus::connection::Builder::session()
                     .unwrap()
                     .name(DBUS_NAME)
                     .unwrap()
-                    // .serve_at(DBUS_PATH, root)
-                    // .unwrap()
+                    .serve_at(DBUS_PATH, root)
+                    .unwrap()
                     .serve_at(DBUS_PATH, dbus_player)
                     .unwrap()
                     .build()
@@ -62,20 +64,23 @@ impl Dbus {
                     .unwrap();
 
                 // WARN: block
-                while let Some(title) = rx.recv().await {
-                    println!("send title {}", title);
-                    {
-                        let mut guard = data.lock().unwrap();
-                        guard.title = title;
+                loop {
+                    if let Some(meta) = rx.recv().await {
+                        println!("send title {}", meta.title);
+                        {
+                            let mut guard = data.lock().unwrap();
+                            guard.title = meta.title;
+                            guard.artist = meta.artist;
+                        }
+                        let ctx = interface_ref.signal_emitter();
+                        interface_ref
+                            .get()
+                            .await
+                            .metadata_changed(ctx)
+                            .await
+                            .unwrap();
+                        println!("signal post");
                     }
-                    let ctx = interface_ref.signal_emitter();
-                    interface_ref
-                        .get()
-                        .await
-                        .metadata_changed(ctx)
-                        .await
-                        .unwrap();
-                    println!("signal post");
                 }
             });
         });
@@ -105,6 +110,19 @@ impl DbusRoot {
     fn has_track_list(&self) -> bool {
         self.has_track_list
     }
+    #[zbus(property)]
+    fn supported_uri_schemes(&self) -> Vec<String> {
+        vec!["file".to_string(), "http".to_string(), "https".to_string()]
+    }
+
+    #[zbus(property)]
+    fn supported_mime_types(&self) -> Vec<String> {
+        vec![
+            "audio/mpeg".to_string(),
+            "audio/ogg".to_string(),
+            "audio/flac".to_string(),
+        ]
+    }
 }
 impl Default for DbusRoot {
     fn default() -> Self {
@@ -122,17 +140,28 @@ impl DbusPlayer {
     fn play(&self) {
         println!("Команда: Play");
     }
-
     fn pause(&self) {
         println!("Команда: Pause");
     }
-
     fn stop(&self) {
         println!("Команда: Stop");
     }
-
     fn next(&self) {
         println!("Команда: Next");
+    }
+
+    fn previous(&self) {
+        println!("Команда: Previous");
+    }
+
+    // Это самая часто используемая команда в виджетах Linux
+    fn play_pause(&self) {
+        println!("Команда: PlayPause");
+        // Логика переключения здесь
+    }
+
+    fn seek(&self, offset: i64) {
+        println!("Команда: Seek на {} мкс", offset);
     }
 
     // --- Свойства (Properties) ---
@@ -154,10 +183,7 @@ impl DbusPlayer {
 
         m.insert("xesam:title".to_string(), Value::from(data.title.clone()));
 
-        m.insert(
-            "xesam:artist".to_string(),
-            Value::from(vec![data.artist.clone()]), // Артисты передаются списком
-        );
+        m.insert("xesam:artist".to_string(), Value::from(data.artist.clone()));
 
         m
     }
@@ -179,6 +205,15 @@ impl DbusPlayer {
 
     #[zbus(property)]
     fn can_control(&self) -> bool {
+        true
+    }
+    #[zbus(property)]
+    fn can_seek(&self) -> bool {
+        true
+    }
+
+    #[zbus(property)]
+    fn can_go_previous(&self) -> bool {
         true
     }
 }

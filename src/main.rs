@@ -15,7 +15,7 @@ fn main() {
         return;
     }
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(16);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<audio::metadata::Metadata>(16);
 
     let song_path = &args[1];
     let playlist = Playlist::from_dir(song_path).unwrap();
@@ -24,8 +24,10 @@ fn main() {
     // player.play();
     Dbus::start_server(rx);
     println!("start_server");
+    println!("player lock main");
     player.lock().unwrap().set_playlist(playlist);
     player.lock().unwrap().play();
+    println!("player unlock main");
     // only for test
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();

@@ -2,6 +2,7 @@ use std::{
     error::Error,
     hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use crate::audio::{
@@ -19,7 +20,7 @@ enum TypeSource {
 pub struct VirtualSong {
     id: TypeSource,
     pub volume: Volume,
-    metadata: Metadata,
+    metadata: Arc<Metadata>,
     track: Option<Track>,
     cover_art: Option<Vec<u8>>,
 }
@@ -29,7 +30,7 @@ impl VirtualSong {
         Ok(Self {
             id: TypeSource::Inner(path.clone()),
             volume: 1.,
-            metadata: track.get_metadata()?,
+            metadata: Arc::new(track.get_metadata()?),
             track: None,
             cover_art: None,
         })
@@ -57,8 +58,12 @@ impl VirtualSong {
     pub fn unload_track(&mut self) {
         self.track = None;
     }
+    pub fn get_metadata(&self) -> Arc<Metadata> {
+        self.metadata.clone()
+    }
 }
 
+////////// debug
 impl VirtualSong {
     pub fn debug_get_size(&self) -> usize {
         match &self.track {

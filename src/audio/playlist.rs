@@ -1,4 +1,4 @@
-use std::{error::Error, fs::File, io::Cursor, path::Path};
+use std::{error::Error, fs::File, io::Cursor, path::Path, sync::Arc};
 
 use get_size::GetSize;
 use rodio::{Decoder, Sink};
@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::audio::{
     song::{
+        metadata::Metadata,
         track::{ErrorIsntMusic, Track},
         virtual_song::VirtualSong,
     },
@@ -51,7 +52,7 @@ impl Playlist {
     }
 
     pub fn play(&mut self, sink: &Sink, volume: Volume) -> Result<(), Box<dyn Error>> {
-        let mut visong = &mut self.songs[self.cur_song];
+        let visong = &mut self.songs[self.cur_song];
         visong.load_track();
         let track = visong.get_track()?;
         let cursor = Cursor::new(track.get().clone());
@@ -60,8 +61,10 @@ impl Playlist {
         sink.set_volume(volume * visong.volume);
 
         sink.append(source);
-
         Ok(())
+    }
+    pub fn get_metadata(&self) -> Arc<Metadata> {
+        self.songs[self.cur_song].get_metadata()
     }
     pub fn next(&mut self) {
         let temp = self.cur_song + 1;

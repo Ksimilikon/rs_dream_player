@@ -4,12 +4,11 @@ use std::{
 };
 
 use zbus::{
-    blocking::connection,
     interface,
     zvariant::{ObjectPath, Value},
 };
 
-use crate::audio::metadata::Metadata;
+use crate::audio::{player::Player, song::metadata::Metadata};
 
 pub mod linux;
 
@@ -23,6 +22,7 @@ pub struct DbusData {
 }
 pub struct DbusPlayer {
     pub data: Arc<Mutex<DbusData>>,
+    player: Arc<Mutex<Player>>,
 }
 pub struct DbusRoot {
     can_quit: bool,
@@ -34,7 +34,8 @@ pub struct Dbus {}
 
 impl Dbus {
     pub fn start_server(
-        mut rx: tokio::sync::mpsc::Receiver<Metadata>,
+        player: Arc<Mutex<Player>>,
+        mut rx: tokio::sync::mpsc::Receiver<Arc<Metadata>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let t = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -43,7 +44,10 @@ impl Dbus {
                 .unwrap();
             rt.block_on(async {
                 let data = Arc::new(Mutex::new(DbusData::default()));
-                let dbus_player = DbusPlayer { data: data.clone() };
+                let dbus_player = DbusPlayer {
+                    data: data.clone(),
+                    player,
+                };
                 let root = DbusRoot::default();
                 // WARN: unwrap
                 let _conn = zbus::connection::Builder::session()
@@ -69,8 +73,9 @@ impl Dbus {
                         println!("send title {}", meta.title);
                         {
                             let mut guard = data.lock().unwrap();
-                            guard.title = meta.title;
-                            guard.artist = meta.artist;
+                            guard.title = meta.title.clone();
+                            guard.artist = meta.artist.clone();
+                            println!("{}", meta);
                         }
                         let ctx = interface_ref.signal_emitter();
                         interface_ref
@@ -139,25 +144,29 @@ impl Default for DbusRoot {
 impl DbusPlayer {
     fn play(&self) {
         println!("Команда: Play");
+        // self.player.lock().as_mut().pa
     }
     fn pause(&self) {
         println!("Команда: Pause");
+        // let a = self.player.lock().unwrap().play;
     }
     fn stop(&self) {
         println!("Команда: Stop");
     }
     fn next(&self) {
         println!("Команда: Next");
+        self.player.lock().unwrap().next();
     }
 
     fn previous(&self) {
         println!("Команда: Previous");
+        self.player.lock().unwrap().prev();
     }
 
-    // Это самая часто используемая команда в виджетах Linux
     fn play_pause(&self) {
         println!("Команда: PlayPause");
-        // Логика переключения здесь
+        // WARN: unwrap
+        self.player.lock().unwrap().play_pause();
     }
 
     fn seek(&self, offset: i64) {

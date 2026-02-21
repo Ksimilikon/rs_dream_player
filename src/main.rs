@@ -15,14 +15,14 @@ fn main() {
         return;
     }
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<audio::metadata::Metadata>(16);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Arc<audio::song::metadata::Metadata>>(16);
 
     let song_path = &args[1];
     let playlist = Playlist::from_dir(song_path).unwrap();
     let player = Arc::new(Mutex::new(Player::new(Some(tx))));
     // player.set_playlist(playlist);
     // player.play();
-    Dbus::start_server(rx);
+    let _ = Dbus::start_server(player.clone(), rx);
     println!("start_server");
     println!("player lock main");
     player.lock().unwrap().set_playlist(playlist);

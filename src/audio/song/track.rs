@@ -8,7 +8,7 @@ use std::{
 use lofty::{
     file::{AudioFile, TaggedFileExt},
     probe::Probe,
-    tag::Accessor,
+    tag::{Accessor, ItemKey},
 };
 
 use crate::audio::song::metadata::Metadata;
@@ -53,6 +53,7 @@ impl Track {
         self.data.as_ref()
     }
     pub fn get_metadata(&self) -> Result<Metadata, Box<dyn Error>> {
+        // TODO: fill data only empty
         let mut reader = Cursor::new(&self.data);
 
         let probed = Probe::new(&mut reader).guess_file_type()?;
@@ -63,16 +64,29 @@ impl Track {
         let tag = tagged_file
             .primary_tag()
             .or_else(|| tagged_file.first_tag())
-            .unwrap();
+            .ok_or("No tags found")?;
+
+        let cover_art = tag.pictures().first().map(|p| p.data().to_vec());
+
+        let mut artists: Vec<String> = tag
+            .get_strings(&ItemKey::TrackArtist)
+            .map(|s| s.to_string())
+            .collect();
+
+        if artists.is_empty() {
+            artists.push("Unknown".into());
+        }
 
         Ok(Metadata {
             title: tag.title().map_or("Unknown".into(), |v| v.to_string()),
-            artist: tag.artist().map_or("Unknown".into(), |v| v.to_string()),
-            album: tag.album().map_or("Unknown".into(), |v| v.to_string()),
+            artist: artists,
+            album: tag.album().map(|v| v.to_string()),
             duration_sec: properties.duration().as_secs(),
             sample_rate: properties.sample_rate().unwrap_or(0),
             bitrate: properties.audio_bitrate().unwrap_or(0),
             track_number: tag.track(),
+
+            cover_art,
         })
     }
     pub fn get_cover_art(&self) -> Option<Vec<u8>> {

@@ -19,7 +19,7 @@ fn main() {
 
     let song_path = &args[1];
     let playlist = Playlist::from_dir(song_path).unwrap();
-    let player = Arc::new(Mutex::new(Player::new(Some(tx))));
+    let player = Player::new(Some(tx));
     // player.set_playlist(playlist);
     // player.play();
     let _ = Dbus::start_server(player.clone(), rx);

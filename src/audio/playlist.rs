@@ -1,6 +1,5 @@
 use std::{error::Error, fs::File, io::Cursor, path::Path, sync::Arc};
 
-use get_size::GetSize;
 use rodio::{Decoder, Sink};
 use serde::{Deserialize, Serialize};
 

@@ -22,7 +22,6 @@ pub struct VirtualSong {
     pub volume: Volume,
     metadata: Arc<Metadata>,
     track: Option<Track>,
-    cover_art: Option<Vec<u8>>,
 }
 impl VirtualSong {
     pub fn from_file(path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
@@ -32,7 +31,6 @@ impl VirtualSong {
             volume: 1.,
             metadata: Arc::new(track.get_metadata()?),
             track: None,
-            cover_art: None,
         })
     }
     // pub fn from_out();

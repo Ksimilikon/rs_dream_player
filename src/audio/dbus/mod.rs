@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Mutex},
 };
 
 use zbus::{
@@ -37,7 +37,7 @@ impl Dbus {
         player: Arc<Mutex<Player>>,
         mut rx: tokio::sync::mpsc::Receiver<Arc<Metadata>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let t = std::thread::spawn(move || {
+        let _ = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()

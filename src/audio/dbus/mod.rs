@@ -75,7 +75,7 @@ impl Dbus {
                             let mut guard = data.lock().unwrap();
                             guard.title = meta.title.clone();
                             guard.artist = meta.artist.clone();
-                            println!("{}", meta);
+                            println!("{:#?}", meta);
                         }
                         let ctx = interface_ref.signal_emitter();
                         interface_ref

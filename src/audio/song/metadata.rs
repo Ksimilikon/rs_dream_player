@@ -1,5 +1,6 @@
 use std::fmt;
 
+#[derive(Debug)]
 pub struct Metadata {
     pub title: String,
     pub artist: Vec<String>,
@@ -30,7 +31,7 @@ impl fmt::Display for Metadata {
             self.album.as_deref().unwrap_or("None"),
             self.duration_sec,
             self.sample_rate,
-            self.bitrate / 1000,
+            self.bitrate,
             self.track_number
                 .map_or("None".to_string(), |t| t.to_string()),
             self.cover_art

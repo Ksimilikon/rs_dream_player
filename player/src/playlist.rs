@@ -1,14 +1,9 @@
-use std::{error::Error, fs::File, io::Cursor, path::Path, sync::Arc};
+use std::{error::Error, io::Cursor, path::Path, sync::Arc};
 
 use rodio::{Decoder, Sink};
-use serde::{Deserialize, Serialize};
 
-use crate::audio::{
-    song::{
-        metadata::Metadata,
-        track::{ErrorIsntMusic, Track},
-        virtual_song::VirtualSong,
-    },
+use crate::{
+    song::{metadata::Metadata, track::ErrorIsntMusic, virtual_song::VirtualSong},
     types::Volume,
 };
 
@@ -87,6 +82,8 @@ impl Playlist {
 #[cfg(debug_assertions)]
 impl Playlist {
     pub fn debug_songs_size(&self) {
+        use crate::song::track::Track;
+
         let list_structure_size = self.songs.capacity() * std::mem::size_of::<Track>();
 
         let total_audio_data: usize = self

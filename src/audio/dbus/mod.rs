@@ -3,13 +3,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use player::player::Player;
+use player::song::metadata::Metadata;
 use zbus::{
     interface,
     zvariant::{ObjectPath, Value},
 };
-
-use crate::audio::{player::Player, song::metadata::Metadata};
-
 pub mod linux;
 
 pub const DBUS_NAME: &str = "org.mpris.MediaPlayer2.dream_player";

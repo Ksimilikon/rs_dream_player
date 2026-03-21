@@ -11,7 +11,7 @@ use lofty::{
     tag::{Accessor, ItemKey},
 };
 
-use crate::audio::song::metadata::Metadata;
+use super::metadata::Metadata;
 
 #[derive(Debug)]
 pub struct ErrorIsntMusic(String);
@@ -69,7 +69,7 @@ impl Track {
         let cover_art = tag.pictures().first().map(|p| p.data().to_vec());
 
         let mut artists: Vec<String> = tag
-            .get_strings(&ItemKey::TrackArtist)
+            .get_strings(ItemKey::TrackArtist)
             .map(|s| s.to_string())
             .collect();
 

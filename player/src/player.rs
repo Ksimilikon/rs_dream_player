@@ -1,12 +1,8 @@
-use std::{
-    io::sink,
-    sync::{Arc, Mutex, mpsc},
-    time::Duration,
-};
+use std::sync::{Arc, Mutex};
 
 use rodio::{OutputStream, Sink};
 
-use crate::audio::{self, audio_event::AudioEvent, song::metadata::Metadata};
+use crate::song::{audio_event::AudioEvent, metadata::Metadata};
 
 use super::{playlist::Playlist, types::Volume};
 

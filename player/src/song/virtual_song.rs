@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::audio::{
+use crate::{
     song::{metadata::Metadata, track::Track},
     types::Volume,
 };

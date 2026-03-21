@@ -1,8 +1,11 @@
 use std::{path::PathBuf, sync::Arc};
 
 use clap::Parser;
+use player::song::metadata::Metadata;
 
-use crate::audio::{dbus::Dbus, player::Player, playlist::Playlist};
+use crate::audio::dbus::Dbus;
+use player::player::Player;
+use player::playlist::Playlist;
 
 mod audio;
 mod cmd_docmsg;
@@ -18,11 +21,14 @@ struct Args {
 }
 fn main() {
     let args = Args::parse();
+    let config = config::Config::default();
 
-    let (tx, rx) = tokio::sync::mpsc::channel::<Arc<audio::song::metadata::Metadata>>(16);
+    let mut mod_manager = api::ModManager::new();
+    let _ = mod_manager.load_mods("mods");
+    println!("{:#?}", mod_manager);
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Arc<Metadata>>(16);
     let player = Player::new(Some(tx));
-    // player.set_playlist(playlist);
-    // player.play();
 
     if let Some(path) = args.path {
         let playlist = Playlist::from_dir(path).unwrap();

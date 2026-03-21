@@ -10,6 +10,8 @@ serde_json = "1.0.149"
 lofty = "0.22.4"
 tokio = { version = "1.49.0", features = ["full"] }
 clap = { version = "4.5.60", features = ["derive"] }
+api = { path = "api" }
+player = { path = "player" }
 
 zbus = "5.13.2"
 

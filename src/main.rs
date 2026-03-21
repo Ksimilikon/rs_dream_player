@@ -8,7 +8,6 @@ use player::player::Player;
 use player::playlist::Playlist;
 
 mod audio;
-mod cmd_docmsg;
 mod config;
 mod traits;
 // NOTE: need add logger
@@ -29,6 +28,7 @@ fn main() {
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Arc<Metadata>>(16);
     let player = Player::new(Some(tx));
+    api::player::init(player.clone());
 
     if let Some(path) = args.path {
         let playlist = Playlist::from_dir(path).unwrap();

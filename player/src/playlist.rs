@@ -8,7 +8,6 @@ use crate::{
 };
 
 pub struct Playlist {
-    // songs: Vec<VirtualSong>,
     songs: Vec<VirtualSong>,
     cur_song: usize,
 }
@@ -74,6 +73,19 @@ impl Playlist {
         } else {
             self.cur_song -= 1;
         }
+    }
+    pub fn set_song(&mut self, id: u32) -> Result<(), Box<dyn std::error::Error>> {
+        if self.songs.len() >= id as usize {
+            self.cur_song = id as usize;
+            return Ok(());
+        }
+        Err("song isnt exist".into())
+    }
+    pub fn get_songs(&self) -> &[VirtualSong] {
+        &self.songs
+    }
+    pub fn get_cur_song(&self) -> usize {
+        self.cur_song
     }
 }
 

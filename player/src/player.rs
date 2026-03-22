@@ -47,7 +47,7 @@ impl Player {
     pub fn play(&mut self) {
         // WARN:
         if let Some(playlist) = self.cur_playlist.as_mut() {
-            playlist.play(&self.sink, self.volume);
+            let _ = playlist.play(&self.sink, self.volume);
             let tx = self._playungap_tx.clone();
             self.sink
                 .append(rodio::source::EmptyCallback::new(Box::new(move || {
@@ -93,5 +93,13 @@ impl Player {
     }
     pub fn is_pause(&self) -> bool {
         self.sink.is_paused()
+    }
+    // WARN: error is ignored
+    pub fn select_song(&mut self, id: u32) {
+        if let Some(playlist) = self.cur_playlist.as_mut() {
+            self.sink.stop();
+            let _ = playlist.set_song(id);
+            self.play();
+        }
     }
 }

@@ -22,10 +22,6 @@ fn main() {
     let args = Args::parse();
     let config = config::Config::default();
 
-    let mut mod_manager = api::ModManager::new();
-    let _ = mod_manager.load_mods("mods");
-    println!("{:#?}", mod_manager);
-
     let (tx, rx) = tokio::sync::mpsc::channel::<Arc<Metadata>>(16);
     let player = Player::new(Some(tx));
     api::player::init(player.clone());
@@ -38,6 +34,10 @@ fn main() {
     }
 
     let _ = Dbus::start_server(player.clone(), rx);
+
+    let mut mod_manager = api::ModManager::new();
+    let _ = mod_manager.load_mods("mods");
+    println!("{:#?}", mod_manager);
     // only for test
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();

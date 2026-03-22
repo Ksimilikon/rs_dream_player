@@ -131,6 +131,9 @@ impl Track {
 
         is_mp3 || is_wav || is_flac || is_ogg || is_midi || is_m4a
     }
+    pub fn get_copy_data(&self) -> Vec<u8> {
+        self.data.clone()
+    }
 }
 
 #[cfg(debug_assertions)]

@@ -2,6 +2,7 @@ use std::{path::PathBuf, sync::Arc, thread};
 
 use libloading::{Library, Symbol};
 pub mod player;
+pub mod playlist;
 
 extern "C" fn on_mod_close() {
     println!("[Core] Модуль сообщил о закрытии окна.");

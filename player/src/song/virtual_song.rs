@@ -59,6 +59,12 @@ impl VirtualSong {
     pub fn get_metadata(&self) -> Arc<Metadata> {
         self.metadata.clone()
     }
+    pub fn get_track_copy(&self) -> Option<&Track> {
+        match &self.track {
+            Some(track) => Some(track),
+            None => None,
+        }
+    }
 }
 
 ////////// debug

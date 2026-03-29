@@ -4,6 +4,9 @@ use libloading::{Library, Symbol};
 pub mod player;
 pub mod playlist;
 
+// TODO: need const path for dir with mods
+// and special path for android/ios (other private systems)
+
 extern "C" fn on_mod_close() {
     println!("[Core] Модуль сообщил о закрытии окна.");
 }

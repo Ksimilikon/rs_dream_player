@@ -16,7 +16,7 @@ impl Playlist {
         let mut audio_files = Vec::new();
         let dir = path.as_ref();
         if !dir.is_dir() {
-            return Err(format!("'{}' isnt dirictory", dir.display()).into());
+            return Err(format!("'{}' isnt directory", dir.display()).into());
         }
 
         for entry in std::fs::read_dir(dir)? {
@@ -114,4 +114,7 @@ impl Playlist {
         );
         println!("Итого: {} bytes", list_structure_size + total_audio_data);
     }
+}
+impl Playlist {
+    // pub fn from_index(playlist_index: index)->Self{}
 }

@@ -45,13 +45,14 @@ pub unsafe extern "C" fn apply_playlist() {}
 impl MetadataFFI {
     pub fn from_core(core: &Metadata) -> Self {
         let title = CString::new(core.title.clone()).unwrap().into_raw();
+
+        // Берем первый альбом из списка (т.к. FFI ждет один mb_album)
         let mb_album = core
-            .album
-            .as_ref()
+            .albums
+            .first()
             .map(|s| CString::new(s.clone()).unwrap().into_raw())
             .unwrap_or(std::ptr::null_mut());
 
-        // Превращаем Vec<String> в массив char**
         let artist_c_strs: Vec<*mut c_char> = core
             .artist
             .iter()
@@ -60,22 +61,45 @@ impl MetadataFFI {
         let artist_len = artist_c_strs.len();
         let artist = Box::into_raw(artist_c_strs.into_boxed_slice()) as *mut *mut c_char;
 
-        let (cover_art, cover_art_len) = core
-            .cover_art
-            .as_ref()
-            .map(|v| (v.clone().as_mut_ptr(), v.len()))
-            .unwrap_or((std::ptr::null_mut(), 0));
+        // Извлекаем параметры, если они есть, иначе используем дефолты
+        let (
+            duration_sec,
+            sample_rate,
+            bitrate,
+            track_number,
+            has_track_number,
+            cover_art,
+            cover_art_len,
+        ) = if let Some(p) = &core.params {
+            let (ptr, len) = p
+                .cover_art
+                .as_ref()
+                .map(|v| (v.clone().as_mut_ptr(), v.len()))
+                .unwrap_or((std::ptr::null_mut(), 0));
+
+            (
+                p.duration_sec,
+                p.sample_rate,
+                p.bitrate,
+                p.track_number.unwrap_or(0),
+                p.track_number.is_some(),
+                ptr,
+                len,
+            )
+        } else {
+            (0, 0, 0, 0, false, std::ptr::null_mut(), 0)
+        };
 
         Self {
             title,
             artist,
             artist_len,
             mb_album,
-            duration_sec: core.duration_sec,
-            sample_rate: core.sample_rate,
-            bitrate: core.bitrate,
-            track_number: core.track_number.unwrap_or(0),
-            has_track_number: core.track_number.is_some(),
+            duration_sec,
+            sample_rate,
+            bitrate,
+            track_number,
+            has_track_number,
             cover_art,
             cover_art_len,
         }

@@ -11,6 +11,8 @@ use lofty::{
     tag::{Accessor, ItemKey},
 };
 
+use crate::song::metadata::MetadataParams;
+
 use super::metadata::Metadata;
 
 #[derive(Debug)]
@@ -76,17 +78,18 @@ impl Track {
         if artists.is_empty() {
             artists.push("Unknown".into());
         }
-
         Ok(Metadata {
             title: tag.title().map_or("Unknown".into(), |v| v.to_string()),
             artist: artists,
-            album: tag.album().map(|v| v.to_string()),
-            duration_sec: properties.duration().as_secs(),
-            sample_rate: properties.sample_rate().unwrap_or(0),
-            bitrate: properties.audio_bitrate().unwrap_or(0),
-            track_number: tag.track(),
-
-            cover_art,
+            // Превращаем Option<&str> в Vec<String>
+            albums: tag.album().map(|v| vec![v.to_string()]).unwrap_or_default(),
+            params: Some(MetadataParams {
+                duration_sec: properties.duration().as_secs(),
+                sample_rate: properties.sample_rate().unwrap_or(0),
+                bitrate: properties.audio_bitrate().unwrap_or(0),
+                track_number: tag.track(),
+                cover_art,
+            }),
         })
     }
     pub fn get_cover_art(&self) -> Option<Vec<u8>> {

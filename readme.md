@@ -12,11 +12,11 @@ The core development philosophy focuses on minimal resource consumption without 
 The core provides an API for third-party library integration (app mods), allowing users to extend and customize functionality to meet their specific needs.
 
 # TODO 
-[ ] Storage
-[ ] Indexing musics
-[ ] Import/Export config and musics 
-[ ] Sync config and musics with other device (wifi/usb)
-[ ] FFI 
+- [ ] Storage
+- [ ] Indexing musics
+- [ ] Import/Export config and musics 
+- [ ] Sync config and musics with other device (wifi/usb)
+- [ ] FFI 
 
 # Future features 
 - Передача структуры плейлистов между устройствами (через любой доступный интерфейс обмена между устройствами) и возможность скачивать (на время передачи для прослушивания или навсегда сохранять у себя) песни с другого устройства. Также можно передавать целые плейлисты.

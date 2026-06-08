@@ -5,16 +5,15 @@ use std::{
     path::Path,
 };
 
+use crate::song::track_metadata::TrackMetadataParams;
+
+use super::track_metadata::TrackMetadata;
 use lofty::{
     file::{AudioFile, TaggedFileExt},
     probe::Probe,
     tag::{Accessor, ItemKey},
 };
-
-use crate::song::metadata::MetadataParams;
-
-use super::metadata::Metadata;
-
+// TODO: move
 #[derive(Debug)]
 pub struct ErrorIsntMusic(String);
 impl std::fmt::Display for ErrorIsntMusic {
@@ -24,6 +23,7 @@ impl std::fmt::Display for ErrorIsntMusic {
 }
 impl Error for ErrorIsntMusic {}
 
+// for raw data
 /// contain byte-sequencea
 #[derive(Debug, Clone)]
 pub struct Track {
@@ -54,7 +54,7 @@ impl Track {
     pub fn get(&self) -> &Vec<u8> {
         self.data.as_ref()
     }
-    pub fn get_metadata(&self) -> Result<Metadata, Box<dyn Error>> {
+    pub fn get_metadata(&self) -> Result<TrackMetadata, Box<dyn Error>> {
         // TODO: fill data only empty
         let mut reader = Cursor::new(&self.data);
 
@@ -78,16 +78,15 @@ impl Track {
         if artists.is_empty() {
             artists.push("Unknown".into());
         }
-        Ok(Metadata {
+        Ok(TrackMetadata {
             title: tag.title().map_or("Unknown".into(), |v| v.to_string()),
             artist: artists,
             // Превращаем Option<&str> в Vec<String>
             albums: tag.album().map(|v| vec![v.to_string()]).unwrap_or_default(),
-            params: Some(MetadataParams {
+            params: Some(TrackMetadataParams {
                 duration_sec: properties.duration().as_secs(),
                 sample_rate: properties.sample_rate().unwrap_or(0),
                 bitrate: properties.audio_bitrate().unwrap_or(0),
-                track_number: tag.track(),
                 cover_art,
             }),
         })

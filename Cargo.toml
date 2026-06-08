@@ -3,14 +3,20 @@ name = "dream_player"
 version = "0.1.1"
 edition = "2024"
 
+[workspace]
+members = ["audio", "selfrun", "api"]
+resolver = "2"
+
 [dependencies]
 tokio = { version = "1.50.0", features = ["full"] }
 clap = { version = "4.6.0", features = ["derive"] }
-api = { path = "api" }
-player = { path = "player" }
 directories = "6.0.0"
 
 zbus = "5.13.2"
+
+api = { path = "api" }
+audio = { path = "audio" }
+selfrun = { path = "selfrun" }
 
 # [target.'cfg(target_os="linux")'.dependencied]
 # zbus = "5.13.1"

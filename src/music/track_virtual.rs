@@ -1,7 +1,7 @@
 use std::{error::Error, path::PathBuf, sync::Arc};
 
 use crate::{
-    song::{track::Track, track_metadata::TrackMetadata},
+    music::{track::Track, track_metadata::TrackMetadata},
     types::Volume,
 };
 
@@ -47,18 +47,16 @@ impl TrackVirtual {
         })
     }
 
-    // TODO: async
     pub fn get_track(&self) -> Result<&Track, ErrorTrackUnload> {
         match &self.track {
             Some(t) => Ok(t),
             None => Err(ErrorTrackUnload("track is unload".into())),
         }
     }
-    // TODO: async
     // TODO: finish impl
     pub fn load_track(&mut self) -> Result<(), Box<dyn Error>> {
         match &self.src {
-            TypeSource::Index(p) => {}
+            TypeSource::Index(p) => self.track = Some(Track::from_file(p)?),
             TypeSource::Out(s) => {}
             TypeSource::File(p) => self.track = Some(Track::from_file(p)?),
         }

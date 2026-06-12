@@ -5,15 +5,12 @@ use std::{
     path::Path,
 };
 
-use crate::song::track_metadata::TrackMetadataParams;
-
-use super::track_metadata::TrackMetadata;
+use super::track_metadata::{TrackMetadata, TrackMetadataParams};
 use lofty::{
     file::{AudioFile, TaggedFileExt},
     probe::Probe,
     tag::{Accessor, ItemKey},
 };
-// TODO: move
 #[derive(Debug)]
 pub struct ErrorIsntMusic(String);
 impl std::fmt::Display for ErrorIsntMusic {

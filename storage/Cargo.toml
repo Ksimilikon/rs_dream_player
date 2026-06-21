@@ -1,8 +1,7 @@
 [package]
-name = "audio"
+name = "storage"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-lofty = "0.24.0"
-rodio = "0.22.2"
+audio_structs = { path = "audio_structs" }

@@ -1,0 +1,6 @@
+# Export the binary's dynamic symbols so mods loaded at runtime via libloading
+# (dlopen) can resolve the `extern "C"` API functions (next, prev, get_playlist,
+# ...). Without this the symbols stay private to the executable and mods fail to
+# link against them.
+[target.'cfg(unix)']
+rustflags = ["-C", "link-args=-rdynamic"]

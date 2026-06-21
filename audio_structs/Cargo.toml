@@ -1,8 +1,8 @@
 [package]
-name = "audio"
+name = "audio_structs"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+fastrand = "2.4.1"
 lofty = "0.24.0"
-rodio = "0.22.2"

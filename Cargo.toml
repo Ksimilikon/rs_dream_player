@@ -4,8 +4,12 @@ version = "0.1.1"
 edition = "2024"
 
 [workspace]
-members = ["audio", "api"]
+members = ["audio", "api", "audio_structs", "dbus", "storage", "tui"]
 resolver = "2"
+
+[features]
+default = []
+with_tui = []
 
 [dependencies]
 tokio = { version = "1.50.0", features = ["full"] }
@@ -17,6 +21,10 @@ zbus = "5.13.2"
 
 api = { path = "api" }
 audio = { path = "audio" }
+audio_structs = { path = "audio_structs" }
+dbus = { path = "dbus" }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+fastrand = "2.4.1"
 
 # [target.'cfg(target_os="linux")'.dependencied]
 # zbus = "5.13.1"

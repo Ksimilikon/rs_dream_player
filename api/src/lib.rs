@@ -1,6 +1,7 @@
 use std::{path::PathBuf, sync::Arc, thread};
 
 use libloading::{Library, Symbol};
+pub mod bridge;
 pub mod player;
 pub mod playlist;
 

@@ -1,7 +1,7 @@
 use std::{
     error::Error,
     fs::File,
-    io::{Cursor, Read},
+    io::{self, Cursor, Read},
     path::Path,
 };
 
@@ -65,8 +65,6 @@ impl Track {
             .or_else(|| tagged_file.first_tag())
             .ok_or("No tags found")?;
 
-        let cover_art = tag.pictures().first().map(|p| p.data().to_vec());
-
         let mut artists: Vec<String> = tag
             .get_strings(ItemKey::TrackArtist)
             .map(|s| s.to_string())
@@ -79,24 +77,25 @@ impl Track {
             title: tag.title().map_or("Unknown".into(), |v| v.to_string()),
             artist: artists,
             // Превращаем Option<&str> в Vec<String>
-            albums: tag.album().map(|v| vec![v.to_string()]).unwrap_or_default(),
             params: Some(TrackMetadataParams {
                 duration_sec: properties.duration().as_secs(),
                 sample_rate: properties.sample_rate().unwrap_or(0),
                 bitrate: properties.audio_bitrate().unwrap_or(0),
-                cover_art,
+                // path-based cover art is filled in by the indexer, not here
+                cover_art: None,
             }),
         })
     }
+    /// raw bytes of the embedded cover picture, if any. Used by the indexer
+    /// to validate the image type and save it to disk as `cover_art` path.
     pub fn get_cover_art(&self) -> Option<Vec<u8>> {
         let mut reader = Cursor::new(&self.data);
 
-        let probed = Probe::new(&mut reader).guess_file_type().unwrap();
-        let tagged_file = probed.read().unwrap();
+        let probed = Probe::new(&mut reader).guess_file_type().ok()?;
+        let tagged_file = probed.read().ok()?;
         let tag = tagged_file
             .primary_tag()
-            .or_else(|| tagged_file.first_tag())
-            .unwrap();
+            .or_else(|| tagged_file.first_tag())?;
 
         tag.pictures().first().map(|p| p.data().to_vec())
     }
@@ -132,6 +131,14 @@ impl Track {
     }
     pub fn get_copy_data(&self) -> Vec<u8> {
         self.data.clone()
+    }
+    /// cheaply checks whether `path` looks like a music file by reading only
+    /// its first few bytes, without loading the whole file into memory.
+    pub fn is_music_file<P: AsRef<Path>>(path: P) -> io::Result<bool> {
+        let mut file = File::open(path)?;
+        let mut buf = [0u8; 16];
+        let n = file.read(&mut buf)?;
+        Ok(Self::is_music(&buf[..n]))
     }
 }
 

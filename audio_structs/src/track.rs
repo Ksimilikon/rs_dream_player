@@ -20,21 +20,11 @@ impl std::fmt::Display for ErrorIsntMusic {
 }
 impl Error for ErrorIsntMusic {}
 
-// for raw data
-/// contain byte-sequencea
+/// struct for prepare and handle raw track data in Vec<u8>
 #[derive(Debug, Clone)]
-pub struct Track {
-    // TODO: make field with type file music
-    // type: TypeFile
-    data: Vec<u8>,
-}
+pub struct Track {}
 impl Track {
-    pub fn new(bytes: &[u8]) -> Self {
-        Track {
-            data: bytes.to_vec(),
-        }
-    }
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn Error>> {
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Vec<u8>, Box<dyn Error>> {
         let mut file = File::open(path.as_ref())?;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
@@ -45,15 +35,12 @@ impl Track {
             ))));
         }
 
-        Ok(Track { data: buf })
+        Ok(buf)
     }
 
-    pub fn get(&self) -> &Vec<u8> {
-        self.data.as_ref()
-    }
-    pub fn get_metadata(&self) -> Result<TrackMetadata, Box<dyn Error>> {
+    pub fn get_metadata(raw: &[u8]) -> Result<TrackMetadata, Box<dyn Error>> {
         // TODO: fill data only empty
-        let mut reader = Cursor::new(&self.data);
+        let mut reader = Cursor::new(raw);
 
         let probed = Probe::new(&mut reader).guess_file_type()?;
         let tagged_file = probed.read()?;
@@ -88,8 +75,8 @@ impl Track {
     }
     /// raw bytes of the embedded cover picture, if any. Used by the indexer
     /// to validate the image type and save it to disk as `cover_art` path.
-    pub fn get_cover_art(&self) -> Option<Vec<u8>> {
-        let mut reader = Cursor::new(&self.data);
+    pub fn get_cover_art(raw: &[u8]) -> Option<Vec<u8>> {
+        let mut reader = Cursor::new(raw);
 
         let probed = Probe::new(&mut reader).guess_file_type().ok()?;
         let tagged_file = probed.read().ok()?;
@@ -100,7 +87,9 @@ impl Track {
         tag.pictures().first().map(|p| p.data().to_vec())
     }
     /// TODO:
-    pub fn get_lyrics(&self) {}
+    pub fn get_lyrics(raw: &[u8]) -> String {
+        String::new()
+    }
 }
 
 impl Track {
@@ -129,9 +118,6 @@ impl Track {
 
         is_mp3 || is_wav || is_flac || is_ogg || is_midi || is_m4a
     }
-    pub fn get_copy_data(&self) -> Vec<u8> {
-        self.data.clone()
-    }
     /// cheaply checks whether `path` looks like a music file by reading only
     /// its first few bytes, without loading the whole file into memory.
     pub fn is_music_file<P: AsRef<Path>>(path: P) -> io::Result<bool> {
@@ -139,12 +125,5 @@ impl Track {
         let mut buf = [0u8; 16];
         let n = file.read(&mut buf)?;
         Ok(Self::is_music(&buf[..n]))
-    }
-}
-
-#[cfg(debug_assertions)]
-impl Track {
-    pub fn debug_get(&self) -> &Vec<u8> {
-        &self.data
     }
 }

@@ -14,7 +14,7 @@ use crate::{track::Track, track_metadata::TrackMetadata, types::Volume};
 pub struct TrackVirtual {
     src: TypeSource,
     metadata: Option<Arc<TrackMetadata>>,
-    track: Option<Track>,
+    track: Option<Vec<u8>>,
     pub volume: Volume,
 }
 
@@ -76,7 +76,7 @@ impl TrackVirtual {
     pub fn from_file(path: PathBuf, with_load: bool) -> Result<Self, Box<dyn Error>> {
         if with_load {
             let track = Track::from_file(&path)?;
-            let metadata = track.get_metadata()?;
+            let metadata = Track::get_metadata(&track)?;
             Ok(Self {
                 src: TypeSource::File(path),
                 metadata: Some(Arc::new(metadata)),
@@ -97,12 +97,15 @@ impl TrackVirtual {
         }
     }
 
-    pub fn get_track(&self) -> Result<&Track, ErrorTrackUnload> {
-        match &self.track {
+    /// move Vec<u8> and track is unloeded in struct
+    pub fn take_track(&mut self) -> Result<Vec<u8>, ErrorTrackUnload> {
+        match self.track.take() {
             Some(t) => Ok(t),
             None => Err(ErrorTrackUnload("track is unload".into())),
         }
     }
+
+    /// load track Vec<u8> to RAM
     pub fn load_track(&mut self) -> Result<(), Box<dyn Error>> {
         if self.track.is_some() {
             return Ok(());

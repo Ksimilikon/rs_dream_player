@@ -7,6 +7,14 @@ edition = "2024"
 members = ["audio", "api", "audio_structs", "dbus", "storage", "tui"]
 resolver = "2"
 
+[workspace.dependencies]
+api = { path = "api" }
+audio = { path = "audio" }
+audio_structs = { path = "audio_structs" }
+dbus = { path = "dbus" }
+storage = { path = "storage" }
+tui = { path = "tui" }
+
 [features]
 default = []
 with_tui = []
@@ -17,17 +25,16 @@ clap = { version = "4.6.0", features = ["derive"] }
 directories = "6.0.0"
 lofty = "0.24.0"
 
-zbus = "5.13.2"
+api = { workspace = true }
+audio = { workspace = true }
+audio_structs = { workspace = true }
+dbus = { workspace = true }
+storage = { workspace = true }
+tui = { workspace = true }
 
-api = { path = "api" }
-audio = { path = "audio" }
-audio_structs = { path = "audio_structs" }
-dbus = { path = "dbus" }
+
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 fastrand = "2.4.1"
-
-# [target.'cfg(target_os="linux")'.dependencied]
-# zbus = "5.13.1"
 
 [dev-dependencies]
 tempfile = "3.24.0"

@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-audio_structs = { path = "audio_structs" }
+audio_structs = { workspace = true }

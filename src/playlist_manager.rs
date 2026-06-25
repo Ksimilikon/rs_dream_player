@@ -20,11 +20,18 @@ impl fmt::Display for ErrorTrackOutOfRange {
 }
 impl Error for ErrorTrackOutOfRange {}
 
+#[derive(Clone)]
+pub enum PlaybackMode {
+    InfinityPlaylist,
+    /// infinity repeating one track
+    RepeatSingle,
+}
 /// keeps track of the active [`Playlist`] and which of its tracks is
 /// currently selected, loading/unloading raw audio as the selection moves.
 pub struct PlaylistManager {
     playlist: Option<Playlist>,
     cur_track: usize,
+    mode: PlaybackMode,
 }
 
 impl PlaylistManager {
@@ -32,6 +39,7 @@ impl PlaylistManager {
         Self {
             playlist: None,
             cur_track: 0,
+            mode: PlaybackMode::InfinityPlaylist,
         }
     }
 
@@ -47,7 +55,7 @@ impl PlaylistManager {
 
     /// moves to the next track, wrapping around to the start. Unloads the
     /// previous track's raw audio and loads the new one.
-    pub fn next(&mut self) -> Result<Option<&TrackVirtual>, Box<dyn Error>> {
+    pub fn next(&mut self) -> Result<Option<&mut TrackVirtual>, Box<dyn Error>> {
         let count = match &self.playlist {
             Some(p) if p.get_count() > 0 => p.get_count(),
             _ => return Ok(None),
@@ -55,11 +63,11 @@ impl PlaylistManager {
         self.unload(self.cur_track);
         self.cur_track = (self.cur_track + 1) % count;
         self.load(self.cur_track)?;
-        Ok(self.get_track())
+        Ok(self.get_track_mut())
     }
 
     /// moves to the previous track, wrapping around to the end.
-    pub fn prev(&mut self) -> Result<Option<&TrackVirtual>, Box<dyn Error>> {
+    pub fn prev(&mut self) -> Result<Option<&mut TrackVirtual>, Box<dyn Error>> {
         let count = match &self.playlist {
             Some(p) if p.get_count() > 0 => p.get_count(),
             _ => return Ok(None),
@@ -67,7 +75,7 @@ impl PlaylistManager {
         self.unload(self.cur_track);
         self.cur_track = (self.cur_track + count - 1) % count;
         self.load(self.cur_track)?;
-        Ok(self.get_track())
+        Ok(self.get_track_mut())
     }
 
     /// jumps directly to track `number`.
@@ -86,7 +94,9 @@ impl PlaylistManager {
     pub fn get_track(&self) -> Option<&TrackVirtual> {
         self.playlist.as_ref()?.get_track(self.cur_track)
     }
-
+    pub fn get_track_mut(&mut self) -> Option<&mut TrackVirtual> {
+        self.playlist.as_mut()?.get_track_mut(self.cur_track)
+    }
     /// loads metadata and raw audio for track `number` into RAM.
     pub fn load(&mut self, number: usize) -> Result<(), Box<dyn Error>> {
         let playlist = self.playlist.as_mut().ok_or(ErrorNoPlaylist)?;
@@ -122,5 +132,11 @@ impl PlaylistManager {
         if let Some(track) = self.playlist.as_mut().and_then(|p| p.get_track_mut(cur)) {
             track.volume = volume;
         }
+    }
+    pub fn set_mode(&mut self, mode: PlaybackMode) {
+        self.mode = mode;
+    }
+    pub fn get_mode(&self) -> PlaybackMode {
+        self.mode.clone()
     }
 }

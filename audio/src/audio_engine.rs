@@ -5,6 +5,8 @@ use rodio::{
     stream::{DeviceSinkBuilder, MixerDeviceSink},
 };
 
+use crate::source_callback::SourceCallback;
+
 /// thin wrapper around a rodio output device + player, exposing the
 /// playback controls described in the architecture doc: play/pause,
 /// playstop, seek, speed and volume.
@@ -14,6 +16,33 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
+    /// stops whatever is currently playing and queues `data` for playback.
+    /// arg: volume - volume from music
+    pub fn load<F>(
+        &mut self,
+        data: Vec<u8>,
+        volume: f32,
+        f: Option<F>,
+    ) -> Result<(), Box<dyn Error>>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let decoder = Decoder::new(Cursor::new(data))?;
+
+        self.player.stop();
+        self.player.set_volume(volume);
+        match f {
+            Some(cb) => self
+                .player
+                .append(SourceCallback::new(Box::new(decoder), cb)),
+            None => self.player.append(decoder),
+        }
+        self.player.play();
+
+        Ok(())
+    }
+}
+impl AudioEngine {
     pub fn new() -> Result<Self, Box<dyn Error>> {
         let device = DeviceSinkBuilder::open_default_sink()?;
         let player = RodioPlayer::connect_new(device.mixer());
@@ -21,19 +50,6 @@ impl AudioEngine {
             _device: device,
             player,
         })
-    }
-
-    /// stops whatever is currently playing and queues `data` for playback.
-    /// arg: volume - volume from music
-    pub fn load(&mut self, data: Vec<u8>, volume: f32) -> Result<(), Box<dyn Error>> {
-        let decoder = Decoder::new(Cursor::new(data))?;
-
-        self.player.stop();
-        self.player.set_volume(volume);
-        self.player.append(decoder);
-        self.player.play();
-
-        Ok(())
     }
 
     pub fn play(&mut self) {

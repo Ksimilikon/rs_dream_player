@@ -108,6 +108,16 @@ impl PlaylistManager {
         Ok(())
     }
 
+    /// WARN: not safe
+    pub fn load_next(&mut self) -> Result<(), Box<dyn Error>> {
+        let playlist = self.playlist.as_mut().ok_or(ErrorNoPlaylist)?;
+        let number = (self.cur_track + 1) % playlist.get_count();
+        let track = playlist.get_track_mut(number).unwrap();
+        track.load_metadata()?;
+        track.load_track()?;
+        Ok(())
+    }
+
     /// drops the raw audio for track `number` from RAM (metadata stays loaded).
     pub fn unload(&mut self, number: usize) {
         if let Some(playlist) = self.playlist.as_mut() {

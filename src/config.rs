@@ -1,6 +1,33 @@
-use std::{error::Error, fs, path::Path};
+use std::{
+    error::Error,
+    fs,
+    path::{Path, PathBuf},
+};
 
+use directories::{ProjectDirs, UserDirs};
 use serde::{Deserialize, Serialize};
+
+/// каталог конфигов/настроек приложения. На ПК (Linux) = `~/.config/dream_player`;
+/// сюда же кладутся пользовательские настройки.
+pub fn config_dir() -> Option<PathBuf> {
+    ProjectDirs::from("", "", "dream_player").map(|d| d.config_dir().to_path_buf())
+}
+
+/// путь к файлу конфига (`~/.config/dream_player/config.toml`).
+pub fn config_file() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("config.toml"))
+}
+
+/// путь к файлу БД. На Linux всё лежит в каталоге конфига:
+/// `~/.config/dream_player/music_db.sqlite`.
+pub fn db_file() -> Option<PathBuf> {
+    config_dir().map(|d| d.join(storage::DB_FILE_NAME))
+}
+
+/// системный каталог музыки пользователя (`XDG_MUSIC_DIR`, обычно `~/Music`).
+pub fn music_dir() -> Option<PathBuf> {
+    UserDirs::new().and_then(|d| d.audio_dir().map(Path::to_path_buf))
+}
 
 /// пользовательский конфиг приложения, хранящийся в toml-файле.
 ///

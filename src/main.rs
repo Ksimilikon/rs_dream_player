@@ -8,6 +8,7 @@ use audio::AudioEngine;
 use audio_structs::playlist::Playlist;
 use clap::Parser;
 use dbus::{DBus, DBusData, DBusEvent};
+use storage::traits::indexator::Indexator;
 
 use crate::playlist_manager::PlaylistManager;
 
@@ -49,8 +50,25 @@ fn push_meta(tx: &Sender<DBusData>, manager: &PlaylistManager) {
 fn main() {
     let args = Args::parse();
 
-    if let Some(path) = args.path {
-        let playlist: Playlist = Playlist::from_dir(path).unwrap();
+    // конфиг приложения (на ПК = ~/.config/dream_player/config.toml)
+    let _config = match config::config_file() {
+        Some(p) => config::Config::load(&p).unwrap_or_default(),
+        None => config::Config::default(),
+    };
+
+    // источник музыки: --path, иначе системный каталог музыки (~/Music)
+    if let Some(path) = args.path.or_else(config::music_dir) {
+        let db_path = config::db_file().expect("не удалось определить каталог данных");
+        let storage = storage::Db::init(db_path).unwrap();
+
+        // начало индексации: раскладываем найденные в каталоге треки в бд.
+        let mut scanned = Playlist::from_dir(&path).unwrap();
+        while let Some(track) = scanned.remove_track(0) {
+            let _ = storage.save_track(track);
+        }
+
+        // плейлист из всего пула песен библиотеки.
+        let playlist = storage.pool_playlist().unwrap();
 
         let (tx_manager, rx_manager) = channel::<PlaybackEvents>();
         let (tx_engine, rx_engine) = channel::<EngineEvents>();

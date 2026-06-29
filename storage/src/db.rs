@@ -20,7 +20,6 @@ pub struct Db {
     conn: Connection,
     path: PathBuf,
 }
-
 impl Db {
     /// открывает бд по `path`. Если файла нет — создаёт его вместе со всей
     /// структурой. Если структура существующего файла неверна, текущий файл
@@ -230,6 +229,12 @@ impl Db {
             .query_map(params_from_iter(vals), TrackRow::from_row)?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter().map(|row| self.build_track(row)).collect()
+    }
+
+    /// плейлист из всего пула песен библиотеки (все треки таблицы `tracks`).
+    pub fn pool_playlist(&self) -> Result<Playlist, Box<dyn Error>> {
+        let tracks = self.find_track(None, None, None, None)?;
+        Ok(Playlist::from_tracks(tracks))
     }
 }
 

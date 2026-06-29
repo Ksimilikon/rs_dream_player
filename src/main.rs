@@ -1,23 +1,19 @@
 use std::{
     path::PathBuf,
-    sync::{
-        Arc,
-        mpsc::{self, channel},
-    },
+    sync::{Arc, mpsc::Sender, mpsc::channel},
     thread,
-    time::Duration,
 };
 
-use api::bridge::{ApiCommand, NowPlaying};
 use audio::AudioEngine;
 use audio_structs::playlist::Playlist;
 use clap::Parser;
+use dbus::{DBus, DBusData, DBusEvent};
 
 use crate::playlist_manager::PlaylistManager;
 
+mod config;
 mod orchestrator;
 mod playlist_manager;
-mod storage;
 mod traits;
 
 #[derive(clap::Parser, Debug)]
@@ -30,25 +26,72 @@ struct Args {
 enum PlaybackEvents {
     Next,
     Prev,
+    //Select,
 }
 enum EngineEvents {
     Add(Vec<u8>),
     PlayStop,
 }
+
+/// читает метаданные текущего трека и публикует их в MPRIS.
+fn push_meta(tx: &Sender<DBusData>, manager: &PlaylistManager) {
+    if let Some(track) = manager.get_track()
+        && let Ok(meta) = track.get_metadata()
+    {
+        let _ = tx.send(DBusData {
+            title: meta.title.clone(),
+            artists: meta.artist.clone(),
+            art: None,
+        });
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
-    if let (Some(path)) = args.path {
-        let mut playlist: Playlist = Playlist::from_dir(path).unwrap();
+    if let Some(path) = args.path {
+        let playlist: Playlist = Playlist::from_dir(path).unwrap();
 
         let (tx_manager, rx_manager) = channel::<PlaybackEvents>();
         let (tx_engine, rx_engine) = channel::<EngineEvents>();
 
-        let worker_manager = thread::spawn(move || {
+        // каналы dbus-слоя: команды наружу (cmd) и метаданные внутрь (data)
+        let (cmd_tx, cmd_rx) = channel::<DBusEvent>();
+        let (data_tx, data_rx) = channel::<DBusData>();
+
+        // поток с MPRIS-соединением — как остальные воркеры
+        let dbus = DBus::new(cmd_tx, data_rx);
+        thread::spawn(move || {
+            if let Err(e) = dbus.run() {
+                eprintln!("dbus: {e}");
+            }
+        });
+
+        // роутер: команды от DE -> внутренние каналы плеера
+        let tx_manager_dbus = tx_manager.clone();
+        let tx_engine_dbus = tx_engine.clone();
+        thread::spawn(move || {
+            while let Ok(cmd) = cmd_rx.recv() {
+                match cmd {
+                    DBusEvent::Next => {
+                        let _ = tx_manager_dbus.send(PlaybackEvents::Next);
+                    }
+                    DBusEvent::Prev => {
+                        let _ = tx_manager_dbus.send(PlaybackEvents::Prev);
+                    }
+                    DBusEvent::PlayPause | DBusEvent::Play | DBusEvent::Pause | DBusEvent::Stop => {
+                        let _ = tx_engine_dbus.send(EngineEvents::PlayStop);
+                    }
+                }
+            }
+        });
+
+        let _worker_manager = thread::spawn(move || {
             let mut manager = PlaylistManager::new();
-            manager.set_playlist(playlist);
-            manager.load(manager.get_cur_number());
-            tx_engine.send(EngineEvents::Add(
+            let _ = manager.set_playlist(playlist);
+            let _ = manager.load(manager.get_cur_number());
+            push_meta(&data_tx, &manager);
+            let _ = tx_engine.send(EngineEvents::Add(
                 manager.get_track_mut().unwrap().take_track().unwrap(),
             ));
             loop {
@@ -56,22 +99,25 @@ fn main() {
                     match e {
                         PlaybackEvents::Next => {
                             let _ = manager.next();
-                            manager.load(manager.get_cur_number());
+                            let _ = manager.load(manager.get_cur_number());
+                            push_meta(&data_tx, &manager);
                             let raw = manager.get_track_mut().unwrap().take_track().unwrap();
-                            tx_engine.send(EngineEvents::Add(raw));
-                            manager.load_next();
+                            let _ = tx_engine.send(EngineEvents::Add(raw));
+                            let _ = manager.load_next();
                         }
                         PlaybackEvents::Prev => {
                             let _ = manager.prev();
-                            manager.load(manager.get_cur_number());
+                            let _ = manager.load(manager.get_cur_number());
+                            push_meta(&data_tx, &manager);
                             let raw = manager.get_track_mut().unwrap().take_track().unwrap();
-                            tx_engine.send(EngineEvents::Add(raw));
+                            let _ = tx_engine.send(EngineEvents::Add(raw));
                         }
                     }
                 }
             }
         });
-        let worker_engine = thread::spawn(move || {
+
+        let _worker_engine = thread::spawn(move || {
             let mut engine = AudioEngine::new().unwrap();
             let tx = Arc::new(tx_manager);
             loop {
@@ -79,11 +125,11 @@ fn main() {
                     match e {
                         EngineEvents::Add(raw) => {
                             let tx_clone = tx.clone();
-                            engine.load(
+                            let _ = engine.load(
                                 raw,
                                 1.,
                                 Some(move || {
-                                    tx_clone.send(PlaybackEvents::Next);
+                                    let _ = tx_clone.send(PlaybackEvents::Next);
                                 }),
                             );
                         }

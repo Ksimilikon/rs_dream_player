@@ -1,4 +1,7 @@
-use std::{error::Error, path::Path};
+use std::{
+    error::Error,
+    path::{Path, PathBuf},
+};
 
 use crate::track_virtual::TrackVirtual;
 
@@ -7,6 +10,8 @@ pub struct Playlist {
     /// NOTE: using option for anonim playlists
     name: Option<String>,
     tracks: Vec<TrackVirtual>,
+    /// path to the playlist cover art on disk; may be empty.
+    cover_art: Option<PathBuf>,
     updated_at: Option<u64>,
     created_at: Option<u64>,
 }
@@ -21,6 +26,7 @@ impl Playlist {
         Ok(Self {
             name: None,
             tracks,
+            cover_art: None,
             updated_at: None,
             created_at: None,
         })
@@ -43,6 +49,7 @@ impl Playlist {
         Self {
             name: None,
             tracks,
+            cover_art: None,
             updated_at: None,
             created_at: None,
         }
@@ -76,6 +83,14 @@ impl Playlist {
     pub fn get_name(&self) -> Option<String> {
         self.name.clone()
     }
+    /// sets (or clears, with `None`) the playlist cover art path.
+    pub fn set_cover_art(&mut self, cover: Option<PathBuf>) {
+        self.cover_art = cover;
+    }
+    /// path to the playlist cover art, if any.
+    pub fn get_cover_art(&self) -> Option<&Path> {
+        self.cover_art.as_deref()
+    }
     pub fn get_count(&self) -> usize {
         self.tracks.len()
     }
@@ -98,7 +113,13 @@ impl Playlist {
     pub fn set_created_at(&mut self, time: u64) {
         self.created_at = Some(time);
     }
+    pub fn get_created_at(&self) -> Option<u64> {
+        self.created_at
+    }
     pub fn set_updated_at(&mut self, time: u64) {
         self.updated_at = Some(time);
+    }
+    pub fn get_updated_at(&self) -> Option<u64> {
+        self.updated_at
     }
 }

@@ -13,13 +13,29 @@ use rusqlite::Connection;
 /// стандартное имя файла бд.
 pub const DB_FILE_NAME: &str = "music_db.sqlite";
 
-/// таблицы, наличие которых обязательно для рабочей бд.
-const REQUIRED_TABLES: [&str; 5] = [
-    "tracks",
-    "artists",
-    "track_artists",
-    "playlists",
-    "playlist_tracks",
+/// обязательная структура рабочей бд: для каждой таблицы — её обязательные
+/// столбцы. Если таблицы или столбца не хватает, бд считается несовместимой.
+const REQUIRED_SCHEMA: &[(&str, &[&str])] = &[
+    (
+        "tracks",
+        &[
+            "id",
+            "hash",
+            "title",
+            "duration",
+            "cover_art",
+            "path",
+            "source_type",
+            "volume",
+        ],
+    ),
+    ("artists", &["id", "name"]),
+    ("track_artists", &["track_id", "artist_id"]),
+    (
+        "playlists",
+        &["id", "name", "cover_art", "created_at", "updated_at"],
+    ),
+    ("playlist_tracks", &["playlist_id", "song_hash", "position"]),
 ];
 
 /// вся структура бд. Каждое выражение идемпотентно (`IF NOT EXISTS`), поэтому
@@ -32,7 +48,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     duration    INTEGER NOT NULL DEFAULT 0,
     cover_art   TEXT,
     path        TEXT    NOT NULL UNIQUE,
-    source_type TEXT    NOT NULL DEFAULT 'file'
+    source_type TEXT    NOT NULL DEFAULT 'file',
+    volume      REAL    NOT NULL DEFAULT 1.0
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_hash  ON tracks(hash);
 CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
@@ -93,7 +110,7 @@ pub fn verify_structure(conn: &Connection) -> Result<(), InvalidStructure> {
         return Err(InvalidStructure(format!("integrity check: {integrity}")));
     }
 
-    for table in REQUIRED_TABLES {
+    for (table, columns) in REQUIRED_SCHEMA {
         let count: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
@@ -103,6 +120,23 @@ pub fn verify_structure(conn: &Connection) -> Result<(), InvalidStructure> {
             .map_err(|e| InvalidStructure(format!("{e}")))?;
         if count != 1 {
             return Err(InvalidStructure(format!("missing table `{table}`")));
+        }
+
+        // фактические столбцы таблицы (имя — второй столбец PRAGMA table_info).
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(|e| InvalidStructure(format!("{e}")))?;
+        let existing = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .and_then(|rows| rows.collect::<rusqlite::Result<Vec<String>>>())
+            .map_err(|e| InvalidStructure(format!("{e}")))?;
+
+        for col in *columns {
+            if !existing.iter().any(|c| c == col) {
+                return Err(InvalidStructure(format!(
+                    "table `{table}` is missing column `{col}`"
+                )));
+            }
         }
     }
     Ok(())

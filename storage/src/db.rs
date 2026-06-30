@@ -88,13 +88,15 @@ impl Db {
                 cover_art: row.cover_art.map(PathBuf::from),
             }),
         };
-        Ok(TrackVirtual::new(row.id, PathBuf::from(row.path), metadata))
+        let mut track = TrackVirtual::new(row.id, PathBuf::from(row.path), metadata);
+        track.volume = row.volume as f32;
+        Ok(track)
     }
 
     /// загружает упорядоченные треки плейлиста по его id.
     fn load_playlist_tracks(&self, playlist_id: i64) -> Result<Vec<TrackVirtual>, Box<dyn Error>> {
         let mut stmt = self.conn.prepare(
-            "SELECT t.id, t.title, t.duration, t.cover_art, t.path \
+            "SELECT t.id, t.title, t.duration, t.cover_art, t.path, t.volume \
              FROM playlist_tracks pt JOIN tracks t ON t.hash = pt.song_hash \
              WHERE pt.playlist_id = ?1 ORDER BY pt.position",
         )?;
@@ -191,7 +193,7 @@ impl Db {
         hash: Option<String>,
     ) -> Result<Vec<TrackVirtual>, Box<dyn Error>> {
         let mut sql = String::from(
-            "SELECT DISTINCT t.id, t.title, t.duration, t.cover_art, t.path FROM tracks t",
+            "SELECT DISTINCT t.id, t.title, t.duration, t.cover_art, t.path, t.volume FROM tracks t",
         );
         if artist.is_some() {
             sql.push_str(
@@ -231,6 +233,29 @@ impl Db {
         rows.into_iter().map(|row| self.build_track(row)).collect()
     }
 
+    /// индексирует музыкальный каталог `dir` рекурсивно: добавляет в бд все
+    /// найденные песни (нечитаемые/немузыкальные файлы пропускаются) и
+    /// возвращает весь пул библиотеки как плейлист.
+    pub fn index_dir(&self, dir: &Path) -> Result<Playlist, Box<dyn Error>> {
+        // отсутствующий каталог не ошибка — просто нечего индексировать.
+        if dir.is_dir() {
+            self.index_dir_rec(dir)?;
+        }
+        self.pool_playlist()
+    }
+
+    fn index_dir_rec(&self, dir: &Path) -> Result<(), Box<dyn Error>> {
+        for entry in std::fs::read_dir(dir)?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                self.index_dir_rec(&path)?;
+            } else if let Ok(track) = TrackVirtual::from_file(path, false) {
+                upsert_track(&self.conn, &track)?;
+            }
+        }
+        Ok(())
+    }
+
     /// плейлист из всего пула песен библиотеки (все треки таблицы `tracks`).
     pub fn pool_playlist(&self) -> Result<Playlist, Box<dyn Error>> {
         let tracks = self.find_track(None, None, None, None)?;
@@ -247,7 +272,7 @@ impl Indexator for Db {
     /// `key` — хеш песни.
     fn load_track(&self, key: String) -> Result<TrackVirtual, Box<dyn Error>> {
         let row = self.conn.query_row(
-            "SELECT id, title, duration, cover_art, path FROM tracks WHERE hash = ?1",
+            "SELECT id, title, duration, cover_art, path, volume FROM tracks WHERE hash = ?1",
             [&key],
             TrackRow::from_row,
         )?;
@@ -343,6 +368,7 @@ struct TrackRow {
     duration: i64,
     cover_art: Option<String>,
     path: String,
+    volume: f64,
 }
 
 impl TrackRow {
@@ -353,6 +379,7 @@ impl TrackRow {
             duration: r.get(2)?,
             cover_art: r.get(3)?,
             path: r.get(4)?,
+            volume: r.get(5)?,
         })
     }
 }
@@ -383,12 +410,21 @@ fn upsert_track(conn: &Connection, track: &TrackVirtual) -> Result<String, Box<d
     // существующий хеш не трогаем.
     let new_hash = random_hash();
     conn.execute(
-        "INSERT INTO tracks (hash, title, duration, cover_art, path, source_type) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+        "INSERT INTO tracks (hash, title, duration, cover_art, path, source_type, volume) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
          ON CONFLICT(path) DO UPDATE SET \
             title = excluded.title, duration = excluded.duration, \
-            cover_art = excluded.cover_art, source_type = excluded.source_type",
-        params![new_hash, meta.title, duration, cover, path_s, source],
+            cover_art = excluded.cover_art, source_type = excluded.source_type, \
+            volume = excluded.volume",
+        params![
+            new_hash,
+            meta.title,
+            duration,
+            cover,
+            path_s,
+            source,
+            track.volume as f64
+        ],
     )?;
 
     let (id, hash): (i64, String) = conn.query_row(

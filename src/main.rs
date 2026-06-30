@@ -1,16 +1,9 @@
-use std::{
-    path::PathBuf,
-    sync::{Arc, mpsc::Sender, mpsc::channel},
-    thread,
-};
+use std::path::PathBuf;
 
-use audio::AudioEngine;
 use audio_structs::playlist::Playlist;
 use clap::Parser;
-use dbus::{DBus, DBusData, DBusEvent};
-use storage::traits::indexator::Indexator;
 
-use crate::playlist_manager::PlaylistManager;
+use crate::orchestrator::Orchestrator;
 
 mod config;
 mod orchestrator;
@@ -20,31 +13,14 @@ mod traits;
 #[derive(clap::Parser, Debug)]
 #[command(version, about = "cli for music player core")]
 struct Args {
+    /// дефолтная директория музыки для индексации. Без аргумента берётся
+    /// системный каталог музыки (~/Music).
     #[arg(short, long, value_name = "Dir")]
     path: Option<PathBuf>,
-}
-
-enum PlaybackEvents {
-    Next,
-    Prev,
-    //Select,
-}
-enum EngineEvents {
-    Add(Vec<u8>),
-    PlayStop,
-}
-
-/// читает метаданные текущего трека и публикует их в MPRIS.
-fn push_meta(tx: &Sender<DBusData>, manager: &PlaylistManager) {
-    if let Some(track) = manager.get_track()
-        && let Ok(meta) = track.get_metadata()
-    {
-        let _ = tx.send(DBusData {
-            title: meta.title.clone(),
-            artists: meta.artist.clone(),
-            art: None,
-        });
-    }
+    /// директория, из которой собрать плейлист и сразу проиграть его как
+    /// дефолтный. Индексация в бд при этом не выполняется.
+    #[arg(long, value_name = "Dir")]
+    playlist: Option<PathBuf>,
 }
 
 fn main() {
@@ -56,107 +32,107 @@ fn main() {
         None => config::Config::default(),
     };
 
-    // источник музыки: --path, иначе системный каталог музыки (~/Music)
-    if let Some(path) = args.path.or_else(config::music_dir) {
+    // источник плейлиста: --playlist (без индексации) приоритетнее --path.
+    let playlist = if let Some(dir) = args.playlist {
+        // плейлист прямо из директории, в бд ничего не пишем.
+        Playlist::from_dir(&dir).unwrap()
+    } else {
+        // дефолтный режим: всегда работаем через бд и отдаём её общий пул.
         let db_path = config::db_file().expect("не удалось определить каталог данных");
         let storage = storage::Db::init(db_path).unwrap();
 
-        // начало индексации: раскладываем найденные в каталоге треки в бд.
-        let mut scanned = Playlist::from_dir(&path).unwrap();
-        while let Some(track) = scanned.remove_track(0) {
-            let _ = storage.save_track(track);
+        // директория музыки: явный --path используем как есть, иначе системный
+        // каталог по умолчанию (с проверкой существования).
+        let music = match args.path {
+            Some(path) => Some(path),
+            None => ensure_default_music_dir(),
+        };
+        print_dirs(music.as_deref());
+
+        // есть директория — индексируем её; в любом случае берём пул из бд.
+        match music {
+            Some(path) => storage.index_dir(&path).unwrap(),
+            None => storage.pool_playlist().unwrap(),
         }
+    };
 
-        // плейлист из всего пула песен библиотеки.
-        let playlist = storage.pool_playlist().unwrap();
+    print_playlist(&playlist);
+    Orchestrator::run(playlist);
 
-        let (tx_manager, rx_manager) = channel::<PlaybackEvents>();
-        let (tx_engine, rx_engine) = channel::<EngineEvents>();
+    let _ = std::io::stdin().read_line(&mut String::new());
+}
 
-        // каналы dbus-слоя: команды наружу (cmd) и метаданные внутрь (data)
-        let (cmd_tx, cmd_rx) = channel::<DBusEvent>();
-        let (data_tx, data_rx) = channel::<DBusData>();
+/// каталоги приложения: настроек, конфигов (пока совпадает с настройками)
+/// и музыки (может отсутствовать — тогда `—`).
+fn print_dirs(music: Option<&std::path::Path>) {
+    let fmt = |d: Option<PathBuf>| {
+        d.map(|p| p.display().to_string())
+            .unwrap_or_else(|| "—".into())
+    };
+    println!("settings dir: {}", fmt(config::settings_dir()));
+    println!("config dir:   {}", fmt(config::config_dir()));
+    println!("music dir:    {}", fmt(music.map(|p| p.to_path_buf())));
+}
 
-        // поток с MPRIS-соединением — как остальные воркеры
-        let dbus = DBus::new(cmd_tx, data_rx);
-        thread::spawn(move || {
-            if let Err(e) = dbus.run() {
-                eprintln!("dbus: {e}");
-            }
-        });
+/// определяет системный каталог музыки по умолчанию. Если его нет на диске —
+/// объясняет варианты и предлагает создать его. Возвращает каталог, только
+/// если он существует или был создан по согласию пользователя.
+fn ensure_default_music_dir() -> Option<PathBuf> {
+    let dir = config::music_dir()?;
+    if dir.is_dir() {
+        return Some(dir);
+    }
 
-        // роутер: команды от DE -> внутренние каналы плеера
-        let tx_manager_dbus = tx_manager.clone();
-        let tx_engine_dbus = tx_engine.clone();
-        thread::spawn(move || {
-            while let Ok(cmd) = cmd_rx.recv() {
-                match cmd {
-                    DBusEvent::Next => {
-                        let _ = tx_manager_dbus.send(PlaybackEvents::Next);
-                    }
-                    DBusEvent::Prev => {
-                        let _ = tx_manager_dbus.send(PlaybackEvents::Prev);
-                    }
-                    DBusEvent::PlayPause | DBusEvent::Play | DBusEvent::Pause | DBusEvent::Stop => {
-                        let _ = tx_engine_dbus.send(EngineEvents::PlayStop);
-                    }
-                }
-            }
-        });
+    println!("каталог музыки по умолчанию не найден: {}", dir.display());
+    println!("варианты:");
+    println!("  - создать этот каталог;");
+    #[cfg(target_os = "linux")]
+    println!("  - задать XDG_MUSIC_DIR (~/.config/user-dirs.dirs);");
+    println!("  - указать каталог самому через аргумент --path <Dir>.");
 
-        let _worker_manager = thread::spawn(move || {
-            let mut manager = PlaylistManager::new();
-            let _ = manager.set_playlist(playlist);
-            let _ = manager.load(manager.get_cur_number());
-            push_meta(&data_tx, &manager);
-            let _ = tx_engine.send(EngineEvents::Add(
-                manager.get_track_mut().unwrap().take_track().unwrap(),
-            ));
-            loop {
-                if let Ok(e) = rx_manager.recv() {
-                    match e {
-                        PlaybackEvents::Next => {
-                            let _ = manager.next();
-                            let _ = manager.load(manager.get_cur_number());
-                            push_meta(&data_tx, &manager);
-                            let raw = manager.get_track_mut().unwrap().take_track().unwrap();
-                            let _ = tx_engine.send(EngineEvents::Add(raw));
-                            let _ = manager.load_next();
-                        }
-                        PlaybackEvents::Prev => {
-                            let _ = manager.prev();
-                            let _ = manager.load(manager.get_cur_number());
-                            push_meta(&data_tx, &manager);
-                            let raw = manager.get_track_mut().unwrap().take_track().unwrap();
-                            let _ = tx_engine.send(EngineEvents::Add(raw));
-                        }
-                    }
-                }
-            }
-        });
+    if !prompt_yes_no(&format!(
+        "создать каталог по умолчанию ({})? [y/N]:",
+        dir.display()
+    )) {
+        return None;
+    }
 
-        let _worker_engine = thread::spawn(move || {
-            let mut engine = AudioEngine::new().unwrap();
-            let tx = Arc::new(tx_manager);
-            loop {
-                if let Ok(e) = rx_engine.recv() {
-                    match e {
-                        EngineEvents::Add(raw) => {
-                            let tx_clone = tx.clone();
-                            let _ = engine.load(
-                                raw,
-                                1.,
-                                Some(move || {
-                                    let _ = tx_clone.send(PlaybackEvents::Next);
-                                }),
-                            );
-                        }
-                        EngineEvents::PlayStop => engine.play_pause(),
-                    }
-                }
-            }
-        });
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => Some(dir),
+        Err(e) => {
+            println!("не удалось создать каталог: {e}");
+            None
+        }
+    }
+}
 
-        let _ = std::io::stdin().read_line(&mut String::new());
+/// задаёт вопрос и читает ответ из stdin. По умолчанию (пустой ввод / ошибка) —
+/// «нет»; «да» только при `y`/`Y`.
+fn prompt_yes_no(question: &str) -> bool {
+    use std::io::Write;
+    print!("{question} ");
+    let _ = std::io::stdout().flush();
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+    matches!(input.trim(), "y" | "Y")
+}
+
+/// компактный вывод плейлиста: номер, название, исполнители и громкость.
+fn print_playlist(playlist: &Playlist) {
+    println!("\nplaylist ({} tracks):", playlist.get_count());
+    for (i, track) in playlist.tracks().iter().enumerate() {
+        let (title, artists) = match track.get_metadata() {
+            Ok(meta) => (meta.title.clone(), meta.artist.join(", ")),
+            Err(_) => ("Unknown".to_string(), String::new()),
+        };
+        println!(
+            "  {:>2}. {} — {} [vol {:.2}]",
+            i + 1,
+            title,
+            artists,
+            track.volume
+        );
     }
 }

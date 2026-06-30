@@ -13,6 +13,13 @@ pub fn config_dir() -> Option<PathBuf> {
     ProjectDirs::from("", "", "dream_player").map(|d| d.config_dir().to_path_buf())
 }
 
+/// каталог пользовательских настроек. Пока совпадает с [`config_dir`]
+/// (всё лежит в одном месте), но вынесен отдельно — позже настройки и конфиг
+/// могут разъехаться по разным каталогам.
+pub fn settings_dir() -> Option<PathBuf> {
+    config_dir()
+}
+
 /// путь к файлу конфига (`~/.config/dream_player/config.toml`).
 pub fn config_file() -> Option<PathBuf> {
     config_dir().map(|d| d.join("config.toml"))
@@ -24,9 +31,15 @@ pub fn db_file() -> Option<PathBuf> {
     config_dir().map(|d| d.join(storage::DB_FILE_NAME))
 }
 
-/// системный каталог музыки пользователя (`XDG_MUSIC_DIR`, обычно `~/Music`).
+/// системный каталог музыки пользователя. Сначала пробуем `XDG_MUSIC_DIR`,
+/// а если он не настроен — откатываемся на `~/Music`, чтобы дефолт был всегда.
 pub fn music_dir() -> Option<PathBuf> {
-    UserDirs::new().and_then(|d| d.audio_dir().map(Path::to_path_buf))
+    let dirs = UserDirs::new()?;
+    Some(
+        dirs.audio_dir()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| dirs.home_dir().join("Music")),
+    )
 }
 
 /// пользовательский конфиг приложения, хранящийся в toml-файле.

@@ -13,6 +13,10 @@ use crate::source_callback::SourceCallback;
 pub struct AudioEngine {
     _device: MixerDeviceSink,
     player: RodioPlayer,
+    /// общая громкость (множитель ко всем трекам), 0.0..
+    master: f32,
+    /// громкость текущего трека (без учёта мастера).
+    current_volume: f32,
 }
 
 impl AudioEngine {
@@ -30,7 +34,8 @@ impl AudioEngine {
         let decoder = Decoder::new(Cursor::new(data))?;
 
         self.player.stop();
-        self.player.set_volume(volume);
+        self.current_volume = volume;
+        self.player.set_volume(volume * self.master);
         match f {
             Some(cb) => self
                 .player
@@ -49,6 +54,8 @@ impl AudioEngine {
         Ok(Self {
             _device: device,
             player,
+            master: 1.0,
+            current_volume: 1.0,
         })
     }
 
@@ -83,8 +90,17 @@ impl AudioEngine {
         self.player.set_speed(speed);
     }
 
+    /// volume for current track
+    /// `volume * master`.
     pub fn set_volume(&mut self, volume: f32) {
-        self.player.set_volume(volume);
+        self.current_volume = volume;
+        self.player.set_volume(volume * self.master);
+    }
+
+    /// general volume
+    pub fn set_master(&mut self, master: f32) {
+        self.master = master;
+        self.player.set_volume(self.current_volume * self.master);
     }
 
     pub fn get_pos(&self) -> Duration {

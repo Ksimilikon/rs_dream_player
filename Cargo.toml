@@ -4,7 +4,7 @@ version = "0.1.1"
 edition = "2024"
 
 [workspace]
-members = ["audio", "api", "audio_structs", "dbus", "storage", "tui"]
+members = ["audio", "api", "audio_structs", "dbus", "storage", "tui", "notify_hub"]
 resolver = "2"
 
 [workspace.dependencies]

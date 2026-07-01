@@ -50,18 +50,13 @@ pub fn music_dir() -> Option<PathBuf> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// заглушка №1.
-    pub stub_one: String,
-    /// заглушка №2.
-    pub stub_two: u32,
+    /// общая (мастер-) громкость плеера, 0.0..=1.0.
+    pub master_volume: f32,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self {
-            stub_one: String::new(),
-            stub_two: 0,
-        }
+        Self { master_volume: 1.0 }
     }
 }
 
@@ -81,10 +76,10 @@ impl Config {
     /// сохраняет конфиг в `path`, создавая файл (и недостающие родительские
     /// каталоги). Файл конфига появляется только при этом вызове.
     pub fn save(&self, path: &Path) -> Result<(), Box<dyn Error>> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
         }
         let text = toml::to_string_pretty(self)?;
         fs::write(path, text)?;
@@ -102,8 +97,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let cfg = Config::load(&path).unwrap();
-        assert_eq!(cfg.stub_one, "");
-        assert_eq!(cfg.stub_two, 0);
+        assert_eq!(cfg.master_volume, 1.0);
         // загрузка не должна создавать файл.
         assert!(!path.exists());
     }
@@ -112,11 +106,10 @@ mod tests {
     fn missing_field_falls_back_to_default() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        // в файле только одно поле — второе должно стать дефолтным.
-        fs::write(&path, "stub_two = 7\n").unwrap();
+        // в файле нет полей — они должны стать дефолтными.
+        fs::write(&path, "\n").unwrap();
         let cfg = Config::load(&path).unwrap();
-        assert_eq!(cfg.stub_two, 7);
-        assert_eq!(cfg.stub_one, "");
+        assert_eq!(cfg.master_volume, 1.0);
     }
 
     #[test]
@@ -124,13 +117,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("nested/config.toml");
         let cfg = Config {
-            stub_one: "hi".into(),
-            stub_two: 42,
+            master_volume: 0.42,
         };
         cfg.save(&path).unwrap();
         assert!(path.exists());
         let loaded = Config::load(&path).unwrap();
-        assert_eq!(loaded.stub_one, "hi");
-        assert_eq!(loaded.stub_two, 42);
+        assert_eq!(loaded.master_volume, 0.42);
     }
 }

@@ -27,17 +27,17 @@ fn main() {
     let args = Args::parse();
 
     // конфиг приложения (на ПК = ~/.config/dream_player/config.toml)
-    let _config = match config::config_file() {
+    let mut config = match config::config_file() {
         Some(p) => config::Config::load(&p).unwrap_or_default(),
         None => config::Config::default(),
     };
 
-    // источник плейлиста: --playlist (без индексации) приоритетнее --path.
-    let playlist = if let Some(dir) = args.playlist {
-        // плейлист прямо из директории, в бд ничего не пишем.
-        Playlist::from_dir(&dir).unwrap()
+    // источник: --playlist (из папки, без бд) проигрывается сразу; обычный режим
+    // индексирует каталог и предлагает выбрать плейлист из бд (без авто-старта).
+    // `playlists` — все плейлисты бд с их треками (для левой панели и предпросмотра).
+    let (initial, playlists, db) = if let Some(dir) = args.playlist {
+        (Some(Playlist::from_dir(&dir).unwrap()), Vec::new(), None)
     } else {
-        // дефолтный режим: всегда работаем через бд и отдаём её общий пул.
         let db_path = config::db_file().expect("не удалось определить каталог данных");
         let storage = storage::Db::init(db_path).unwrap();
 
@@ -49,17 +49,92 @@ fn main() {
         };
         print_dirs(music.as_deref());
 
-        // есть директория — индексируем её; в любом случае берём пул из бд.
-        match music {
-            Some(path) => storage.index_dir(&path).unwrap(),
-            None => storage.pool_playlist().unwrap(),
+        // индексируем каталог (наполняем бд); сам пул не запускаем.
+        if let Some(path) = &music {
+            let _ = storage.index_dir(path);
         }
+        // первый пункт — виртуальный плейлист со всем пулом песен.
+        let pool = storage
+            .pool_playlist()
+            .unwrap_or_else(|_| Playlist::from_tracks(Vec::new()));
+        let mut entries = vec![tui::PlaylistEntry {
+            name: "ALL SONGS".to_string(),
+            tracks: track_infos(&pool),
+            pool: true,
+        }];
+        entries.extend(storage.list_playlists().unwrap_or_default().iter().map(|p| {
+            tui::PlaylistEntry {
+                name: p.get_name().unwrap_or_else(|| "---".to_string()),
+                tracks: track_infos(p),
+                pool: false,
+            }
+        }));
+        (None, entries, Some(storage))
     };
 
-    print_playlist(&playlist);
-    Orchestrator::run(playlist);
+    // стартовое состояние «играющего» плейлиста — только для --playlist
+    let (playlist_name, tracks) = match &initial {
+        Some(p) => (p.get_name().unwrap_or_else(|| "---".to_string()), track_infos(p)),
+        None => ("---".to_string(), Vec::new()),
+    };
 
-    let _ = std::io::stdin().read_line(&mut String::new());
+    // оркестратор играет в фоне, главный поток занимает интерфейс
+    let master = config.master_volume;
+    let (updates, controls) = Orchestrator::run(db, initial, master);
+
+    // мост: команды TUI -> управление оркестратором. Мастер-громкость
+    // дополнительно сохраняем в конфиг (песенная сохраняется в бд внутри менеджера).
+    let (tx_ctl, rx_ctl) = std::sync::mpsc::channel::<tui::Control>();
+    let config_path = config::config_file();
+    std::thread::spawn(move || {
+        while let Ok(c) = rx_ctl.recv() {
+            match c {
+                tui::Control::Next => controls.next(),
+                tui::Control::Prev => controls.prev(),
+                tui::Control::PlayPause => controls.play_pause(),
+                tui::Control::Select(i) => controls.select(i),
+                tui::Control::LoadPlaylist(name) => controls.load_playlist(name),
+                tui::Control::LoadPool => controls.load_pool(),
+                tui::Control::SongVolume(v) => controls.set_song_volume(v),
+                tui::Control::MasterVolume(v) => {
+                    controls.set_master_volume(v);
+                    config.master_volume = v;
+                    if let Some(path) = &config_path {
+                        let _ = config.save(path);
+                    }
+                }
+            }
+        }
+    });
+
+    let view = tui::View {
+        playlist_name,
+        tracks,
+        playlists,
+        master_volume: master,
+    };
+    if let Err(e) = tui::run(view, updates, tx_ctl) {
+        eprintln!("tui: {e}");
+    }
+}
+
+/// собирает краткую инфу о треках плейлиста для TUI.
+fn track_infos(playlist: &Playlist) -> Vec<tui::TrackInfo> {
+    playlist
+        .tracks()
+        .iter()
+        .map(|t| {
+            let (title, artists) = match t.get_metadata() {
+                Ok(m) => (m.title.clone(), m.artist.join(", ")),
+                Err(_) => ("Unknown".to_string(), String::new()),
+            };
+            tui::TrackInfo {
+                title,
+                artists,
+                volume: t.volume,
+            }
+        })
+        .collect()
 }
 
 /// каталоги приложения: настроек, конфигов (пока совпадает с настройками)
@@ -119,20 +194,3 @@ fn prompt_yes_no(question: &str) -> bool {
     matches!(input.trim(), "y" | "Y")
 }
 
-/// компактный вывод плейлиста: номер, название, исполнители и громкость.
-fn print_playlist(playlist: &Playlist) {
-    println!("\nplaylist ({} tracks):", playlist.get_count());
-    for (i, track) in playlist.tracks().iter().enumerate() {
-        let (title, artists) = match track.get_metadata() {
-            Ok(meta) => (meta.title.clone(), meta.artist.join(", ")),
-            Err(_) => ("Unknown".to_string(), String::new()),
-        };
-        println!(
-            "  {:>2}. {} — {} [vol {:.2}]",
-            i + 1,
-            title,
-            artists,
-            track.volume
-        );
-    }
-}

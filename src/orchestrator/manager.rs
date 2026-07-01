@@ -5,6 +5,8 @@ use std::sync::{
 
 use audio_structs::playlist::Playlist;
 use dbus::DBusData;
+use storage::{Db, traits::indexator::Indexator};
+use tui::{TrackInfo, Update};
 
 use crate::{orchestrator::engine::EngineEvent, playlist_manager::PlaylistManager};
 
@@ -13,19 +15,29 @@ pub enum PlaylistManagerEvent {
     Prev,
     Select(usize),
     Playlist(Playlist),
+    /// загрузить плейлист по имени из бд.
+    LoadByName(String),
+    /// загрузить виртуальный плейлист со всем пулом песен.
+    LoadPool,
+    /// громкость текущего трека (0.0..=1.0).
+    SetVolume(f32),
 }
+
 pub fn spawn(
     rx: Receiver<PlaylistManagerEvent>,
     tx_engine: Arc<Sender<EngineEvent>>,
     tx_data: Sender<DBusData>,
+    tx_ui: Sender<Update>,
+    db: Option<Db>,
 ) {
     let worker_manager = std::thread::spawn(move || {
-        handler_manager(tx_engine, tx_data, rx);
+        handler_manager(tx_engine, tx_data, tx_ui, db, rx);
     });
 }
 
-/// читает метаданные текущего трека и публикует их в MPRIS.
-fn push_meta(tx_data: &Sender<DBusData>, manager: &PlaylistManager) {
+/// публикует текущий трек: метаданные в MPRIS и его индекс в UI.
+fn push_meta(tx_data: &Sender<DBusData>, tx_ui: &Sender<Update>, manager: &PlaylistManager) {
+    let _ = tx_ui.send(Update::NowPlaying(manager.get_cur_number()));
     if let Some(track) = manager.get_track()
         && let Ok(meta) = track.get_metadata()
     {
@@ -37,87 +49,165 @@ fn push_meta(tx_data: &Sender<DBusData>, manager: &PlaylistManager) {
     }
 }
 
+/// краткий список треков плейлиста для UI.
+fn playlist_view(p: &Playlist) -> Vec<TrackInfo> {
+    p.tracks()
+        .iter()
+        .map(|t| {
+            let (title, artists) = match t.get_metadata() {
+                Ok(m) => (m.title.clone(), m.artist.join(", ")),
+                Err(_) => ("Unknown".to_string(), String::new()),
+            };
+            TrackInfo {
+                title,
+                artists,
+                volume: t.volume,
+            }
+        })
+        .collect()
+}
+
+/// отправляет текущий трек в движок (с его громкостью) и публикует метаданные.
+fn play_current(
+    manager: &mut PlaylistManager,
+    tx_engine: &Sender<EngineEvent>,
+    tx_data: &Sender<DBusData>,
+    tx_ui: &Sender<Update>,
+) {
+    push_meta(tx_data, tx_ui, manager);
+    if let Some(track) = manager.get_track_mut() {
+        let vol = track.volume;
+        if let Ok(b) = track.take_track() {
+            let _ = tx_engine.send(EngineEvent::Add(b, vol));
+        }
+    }
+}
+
 fn handler_manager(
     tx_engine: Arc<Sender<EngineEvent>>,
     tx_data: Sender<DBusData>,
+    tx_ui: Sender<Update>,
+    db: Option<Db>,
     rx: Receiver<PlaylistManagerEvent>,
 ) {
     let mut manager = PlaylistManager::new();
     while let Ok(e) = rx.recv() {
         match e {
             PlaylistManagerEvent::Next => {
-                let res = manager.next();
-                match res {
+                match manager.next() {
                     Err(err) => println!("ERROR::Orchestrator::handler_manager::NEXT::{}", err),
-                    Ok(track_opt) => match track_opt {
-                        None => println!(
-                            "WARN::Orchestrator::handler_manager::NEXT::track is not exist"
-                        ),
-                        Some(track) => {
-                            let res_raw = track.take_track();
-                            if let Ok(b) = res_raw {
-                                tx_engine.send(EngineEvent::Add(b));
-                                push_meta(&tx_data, &manager);
-                                manager.load_next();
-                            } else {
-                                println!(
-                                    "ERROR::Orchestrator::handler_manager::NEXT::track is unloaded"
-                                );
+                    Ok(None) => {
+                        println!("WARN::Orchestrator::handler_manager::NEXT::track is not exist")
+                    }
+                    Ok(Some(track)) => {
+                        let vol = track.volume;
+                        match track.take_track() {
+                            Ok(b) => {
+                                let _ = tx_engine.send(EngineEvent::Add(b, vol));
+                                push_meta(&tx_data, &tx_ui, &manager);
+                                let _ = manager.load_next();
                             }
+                            Err(_) => println!(
+                                "ERROR::Orchestrator::handler_manager::NEXT::track is unloaded"
+                            ),
                         }
-                    },
+                    }
                 }
             }
             PlaylistManagerEvent::Prev => {
-                let res = manager.prev();
-                match res {
+                match manager.prev() {
                     Err(err) => println!("ERROR::Orchestrator::handler_manager::PREV::{}", err),
-                    Ok(track_opt) => match track_opt {
-                        None => println!(
-                            "WARN::Orchestrator::handler_manager::NEXT::track is not exist"
-                        ),
-                        Some(track) => {
-                            let res_raw = track.take_track();
-                            if let Ok(b) = res_raw {
-                                tx_engine.send(EngineEvent::Add(b));
-                                push_meta(&tx_data, &manager);
-                                manager.load_next();
-                            } else {
-                                println!(
-                                    "ERROR::Orchestrator::handler_manager::NEXT::track is unloaded"
-                                );
+                    Ok(None) => {
+                        println!("WARN::Orchestrator::handler_manager::PREV::track is not exist")
+                    }
+                    Ok(Some(track)) => {
+                        let vol = track.volume;
+                        match track.take_track() {
+                            Ok(b) => {
+                                let _ = tx_engine.send(EngineEvent::Add(b, vol));
+                                push_meta(&tx_data, &tx_ui, &manager);
                             }
+                            Err(_) => println!(
+                                "ERROR::Orchestrator::handler_manager::PREV::track is unloaded"
+                            ),
                         }
-                    },
+                    }
                 }
             }
             PlaylistManagerEvent::Select(number) => {
-                let res = manager.select_track(number);
-                if let Err(err) = res {
+                if let Err(err) = manager.select_track(number) {
                     println!(
                         "ERROR::Orchestrator::handler_manager::select_track::{}",
                         err
                     );
                 } else {
-                    push_meta(&tx_data, &manager);
+                    play_current(&mut manager, &tx_engine, &tx_data, &tx_ui);
                 }
             }
             PlaylistManagerEvent::Playlist(p) => {
-                let res = manager.set_playlist(p);
-                if let Err(err) = res {
+                // стартовый плейлист: UI уже знает его треки, вкладку не переключаем.
+                if let Err(err) = manager.set_playlist(p) {
                     println!(
                         "ERROR::Orchestrator::handler_manager::set_playlist::{}",
                         err
                     );
                 } else {
-                    // костыль: сразу отдаём первый трек в движок, чтобы
-                    // воспроизведение стартовало без отдельной команды.
-                    push_meta(&tx_data, &manager);
-                    if let Some(track) = manager.get_track_mut()
-                        && let Ok(b) = track.take_track()
-                    {
-                        let _ = tx_engine.send(EngineEvent::Add(b));
+                    play_current(&mut manager, &tx_engine, &tx_data, &tx_ui);
+                }
+            }
+            PlaylistManagerEvent::LoadByName(name) => {
+                let Some(db) = &db else {
+                    println!("WARN::Orchestrator::handler_manager::LoadByName::no db");
+                    continue;
+                };
+                match db.load_playlist(name) {
+                    Err(err) => {
+                        println!("ERROR::Orchestrator::handler_manager::LoadByName::{}", err)
                     }
+                    Ok(p) => {
+                        let name = p.get_name().unwrap_or_else(|| "---".to_string());
+                        let tracks = playlist_view(&p);
+                        let _ = tx_ui.send(Update::Playlist { name, tracks });
+                        if let Err(err) = manager.set_playlist(p) {
+                            println!(
+                                "ERROR::Orchestrator::handler_manager::LoadByName::set::{}",
+                                err
+                            );
+                        } else {
+                            play_current(&mut manager, &tx_engine, &tx_data, &tx_ui);
+                        }
+                    }
+                }
+            }
+            PlaylistManagerEvent::LoadPool => {
+                let Some(db) = &db else {
+                    println!("WARN::Orchestrator::handler_manager::LoadPool::no db");
+                    continue;
+                };
+                match db.pool_playlist() {
+                    Err(err) => println!("ERROR::Orchestrator::handler_manager::LoadPool::{}", err),
+                    Ok(p) => {
+                        let tracks = playlist_view(&p);
+                        let _ = tx_ui.send(Update::Playlist {
+                            name: "ALL SONGS".to_string(),
+                            tracks,
+                        });
+                        if let Err(err) = manager.set_playlist(p) {
+                            println!("ERROR::Orchestrator::handler_manager::LoadPool::set::{}", err);
+                        } else {
+                            play_current(&mut manager, &tx_engine, &tx_data, &tx_ui);
+                        }
+                    }
+                }
+            }
+            PlaylistManagerEvent::SetVolume(v) => {
+                manager.set_current_volume(v);
+                let _ = tx_engine.send(EngineEvent::SetVolume(v));
+                if let Some(db) = &db
+                    && let Some(track) = manager.get_track()
+                    && let Err(err) = db.set_track_volume(track, v)
+                {
+                    println!("ERROR::Orchestrator::handler_manager::SetVolume::{}", err);
                 }
             }
         }

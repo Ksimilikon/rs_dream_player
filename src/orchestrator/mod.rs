@@ -1,9 +1,53 @@
-use std::sync::{Arc, mpsc::channel};
+use std::sync::{
+    Arc,
+    mpsc::{Receiver, Sender, channel},
+};
 
 use ::dbus::{DBusData, DBusEvent};
 use audio_structs::playlist::Playlist;
+use storage::Db;
+use tui::Update;
 
-use crate::orchestrator::manager::PlaylistManagerEvent;
+use crate::orchestrator::{engine::EngineEvent, manager::PlaylistManagerEvent};
+
+/// ручка управления воспроизведением для внешних слоёв (например, TUI).
+#[derive(Clone)]
+pub struct Controls {
+    tx_manager: Arc<Sender<PlaylistManagerEvent>>,
+    tx_engine: Arc<Sender<EngineEvent>>,
+}
+
+impl Controls {
+    pub fn next(&self) {
+        let _ = self.tx_manager.send(PlaylistManagerEvent::Next);
+    }
+    pub fn prev(&self) {
+        let _ = self.tx_manager.send(PlaylistManagerEvent::Prev);
+    }
+    pub fn play_pause(&self) {
+        let _ = self.tx_engine.send(EngineEvent::PlayPause);
+    }
+    /// выбрать и проиграть трек по индексу.
+    pub fn select(&self, index: usize) {
+        let _ = self.tx_manager.send(PlaylistManagerEvent::Select(index));
+    }
+    /// загрузить плейлист по имени из бд.
+    pub fn load_playlist(&self, name: String) {
+        let _ = self.tx_manager.send(PlaylistManagerEvent::LoadByName(name));
+    }
+    /// загрузить виртуальный плейлист со всем пулом песен.
+    pub fn load_pool(&self) {
+        let _ = self.tx_manager.send(PlaylistManagerEvent::LoadPool);
+    }
+    /// громкость текущей песни.
+    pub fn set_song_volume(&self, volume: f32) {
+        let _ = self.tx_manager.send(PlaylistManagerEvent::SetVolume(volume));
+    }
+    /// общая (мастер-) громкость.
+    pub fn set_master_volume(&self, volume: f32) {
+        let _ = self.tx_engine.send(EngineEvent::SetMaster(volume));
+    }
+}
 
 pub mod dbus;
 pub mod engine;
@@ -12,12 +56,21 @@ pub mod manager;
 
 pub struct Orchestrator {}
 impl Orchestrator {
-    pub fn run(playlist_default: Playlist) {
+    /// поднимает воркеры. `db` уходит во владение менеджеру (загрузка плейлистов
+    /// и сохранение громкости в рантайме), `master` — стартовая общая громкость.
+    /// `initial` проигрывается сразу, если задан (режим `--playlist`); иначе плеер
+    /// ждёт выбора плейлиста из UI. Возвращает канал обновлений и ручку управления.
+    pub fn run(
+        db: Option<Db>,
+        initial: Option<Playlist>,
+        master: f32,
+    ) -> (Receiver<Update>, Controls) {
         let (tx_manager, rx_manager) = channel::<PlaylistManagerEvent>();
         let (tx_engine, rx_engine) = channel::<engine::EngineEvent>();
 
         let (tx_cmd, rx_cmd) = channel::<DBusEvent>();
         let (tx_data, rx_data) = channel::<DBusData>();
+        let (tx_ui, rx_ui) = channel::<Update>();
 
         let arc_tx_manager = Arc::new(tx_manager);
         let arc_tx_engine = Arc::new(tx_engine);
@@ -29,11 +82,18 @@ impl Orchestrator {
             arc_tx_manager.clone(),
             arc_tx_engine.clone(),
         );
-        manager::spawn(rx_manager, arc_tx_engine, tx_data);
-        engine::spawn(rx_engine, arc_tx_manager.clone());
+        manager::spawn(rx_manager, arc_tx_engine.clone(), tx_data, tx_ui, db);
+        engine::spawn(rx_engine, arc_tx_manager.clone(), master);
 
-        // костыль: сразу ставим пул на проигрывание — обработчик Playlist
-        // загрузит первый трек и стартует воспроизведение.
-        let _ = arc_tx_manager.send(PlaylistManagerEvent::Playlist(playlist_default));
+        // явный --playlist стартует сразу; в обычном режиме плеер ждёт выбора.
+        if let Some(playlist) = initial {
+            let _ = arc_tx_manager.send(PlaylistManagerEvent::Playlist(playlist));
+        }
+
+        let controls = Controls {
+            tx_manager: arc_tx_manager,
+            tx_engine: arc_tx_engine,
+        };
+        (rx_ui, controls)
     }
 }

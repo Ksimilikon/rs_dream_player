@@ -256,6 +256,23 @@ impl Db {
         Ok(())
     }
 
+    /// обновляет сохранённую громкость одного трека (идентификация по `path`,
+    /// который уникален). Трек без пути (не из библиотеки) тихо пропускается.
+    pub fn set_track_volume(
+        &self,
+        track: &TrackVirtual,
+        volume: f32,
+    ) -> Result<(), Box<dyn Error>> {
+        let Some(path) = track.get_path() else {
+            return Ok(());
+        };
+        self.conn.execute(
+            "UPDATE tracks SET volume = ?2 WHERE path = ?1",
+            params![path.to_string_lossy(), volume as f64],
+        )?;
+        Ok(())
+    }
+
     /// плейлист из всего пула песен библиотеки (все треки таблицы `tracks`).
     pub fn pool_playlist(&self) -> Result<Playlist, Box<dyn Error>> {
         let tracks = self.find_track(None, None, None, None)?;

@@ -3,17 +3,21 @@
 use ratatui::{
     Frame,
     crossterm::event::KeyEvent,
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     widgets::ListItem,
 };
 
 use crate::model::{Model, TrackInfo};
 
+mod editor;
+mod help;
 mod playlists;
 mod settings;
 mod song;
 
+pub use editor::{EditorOutcome, EditorState};
+pub use help::{help_lines, render_help};
 pub use playlists::PlaylistsTab;
 pub use settings::SettingsTab;
 pub use song::SongTab;
@@ -24,8 +28,14 @@ pub enum Action {
     LoadPlaylist(String),
     /// загрузить виртуальный плейлист со всем пулом песен.
     LoadPool,
+    /// проиграть временный плейлист по id треков (не из бд).
+    PlayTemp(Vec<i64>),
     /// выбрать трек по индексу.
     SelectSong(usize),
+    /// открыть редактор для создания нового плейлиста.
+    NewPlaylist,
+    /// открыть редактор для правки плейлиста под курсором.
+    EditPlaylist(usize),
 }
 
 /// элементы списка песен: всегда с номерами. `playing` — индекс играющего
@@ -39,8 +49,8 @@ fn song_items(
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let marker = if Some(i) == playing { "▶" } else { " " };
-            let line = format!("{marker}{:>2}. {} — {}", i + 1, t.title, t.artists);
+            let marker = if Some(i) == playing { ">" } else { " " };
+            let line = format!("{marker}{:>2}. {} - {}", i + 1, t.title, t.artists);
             let item = ListItem::new(line);
             if Some(i) == cursor {
                 item.style(Style::new().add_modifier(Modifier::REVERSED))
@@ -62,6 +72,26 @@ fn square(area: Rect) -> Rect {
         width: w,
         height: h,
     }
+}
+
+/// центрированный прямоугольник шириной `w` и высотой `h` (в клетках),
+/// обрезанный по границам `area`. Для всплывающих окон (help, промпты).
+fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
+    let w = w.min(area.width);
+    let h = h.min(area.height);
+    let [_, mid, _] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(h),
+        Constraint::Min(0),
+    ])
+    .areas(area);
+    let [_, cell, _] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(w),
+        Constraint::Min(0),
+    ])
+    .areas(mid);
+    cell
 }
 
 /// вкладка интерфейса. Хранит свой курсор, рисует из общего [`Model`] и

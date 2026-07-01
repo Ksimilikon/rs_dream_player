@@ -30,7 +30,8 @@ impl Tab for PlaylistsTab {
             .iter()
             .enumerate()
             .map(|(i, entry)| {
-                let line = format!("{:>2}. {}", i + 1, entry.name);
+                let tag = if entry.temp { " [temp]" } else { "" };
+                let line = format!("{:>2}. {}{tag}", i + 1, entry.name);
                 if i == self.cursor {
                     ListItem::new(line).style(Style::new().add_modifier(Modifier::REVERSED))
                 } else {
@@ -70,10 +71,19 @@ impl Tab for PlaylistsTab {
             KeyCode::Enter => model.playlists.get(self.cursor).map(|e| {
                 if e.pool {
                     Action::LoadPool
+                } else if e.temp {
+                    Action::PlayTemp(e.tracks.iter().map(|t| t.id).collect())
                 } else {
                     Action::LoadPlaylist(e.name.clone())
                 }
             }),
+            // создать новый плейлист (спец-клавиша вкладки).
+            KeyCode::Char('n') | KeyCode::Char('N') => Some(Action::NewPlaylist),
+            // редактировать плейлист под курсором (нельзя пул).
+            KeyCode::Char('e') | KeyCode::Char('E') => match model.playlists.get(self.cursor) {
+                Some(e) if !e.pool => Some(Action::EditPlaylist(self.cursor)),
+                _ => None,
+            },
             _ => None,
         }
     }

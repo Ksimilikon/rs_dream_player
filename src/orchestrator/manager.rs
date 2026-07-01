@@ -2,11 +2,12 @@ use std::sync::{
     Arc,
     mpsc::{Receiver, Sender},
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use audio_structs::playlist::Playlist;
 use dbus::DBusData;
 use storage::{Db, traits::indexator::Indexator};
-use tui::{TrackInfo, Update};
+use tui::{PlaylistEntry, TrackInfo, Update};
 
 use crate::{orchestrator::engine::EngineEvent, playlist_manager::PlaylistManager};
 
@@ -21,6 +22,10 @@ pub enum PlaylistManagerEvent {
     LoadPool,
     /// громкость текущего трека (0.0..=1.0).
     SetVolume(f32),
+    /// сохранить плейлист в бд: имя + упорядоченные id треков.
+    SavePlaylist { name: String, ids: Vec<i64> },
+    /// собрать временный (несохраняемый) плейлист из id треков и проиграть.
+    PlayTemp { ids: Vec<i64> },
 }
 
 pub fn spawn(
@@ -59,12 +64,56 @@ fn playlist_view(p: &Playlist) -> Vec<TrackInfo> {
                 Err(_) => ("Unknown".to_string(), String::new()),
             };
             TrackInfo {
+                id: t.index_id().unwrap_or(-1),
                 title,
                 artists,
                 volume: t.volume,
             }
         })
         .collect()
+}
+
+/// текущее время в секундах эпохи (для меток плейлиста).
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// собирает плейлист из упорядоченных id треков (по общему пулу бд).
+fn playlist_from_ids(db: &Db, ids: &[i64]) -> Playlist {
+    let mut tracks = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Ok(found) = db.find_track(None, None, Some(*id), None)
+            && let Some(track) = found.into_iter().next()
+        {
+            tracks.push(track);
+        }
+    }
+    Playlist::from_tracks(tracks)
+}
+
+/// весь набор плейлистов для UI: пул «ALL SONGS» первым, затем плейлисты бд.
+fn playlist_entries(db: &Db) -> Vec<PlaylistEntry> {
+    let pool = db
+        .pool_playlist()
+        .unwrap_or_else(|_| Playlist::from_tracks(Vec::new()));
+    let mut entries = vec![PlaylistEntry {
+        name: "ALL SONGS".to_string(),
+        tracks: playlist_view(&pool),
+        pool: true,
+        temp: false,
+    }];
+    entries.extend(db.list_playlists().unwrap_or_default().iter().map(|p| {
+        PlaylistEntry {
+            name: p.get_name().unwrap_or_else(|| "---".to_string()),
+            tracks: playlist_view(p),
+            pool: false,
+            temp: false,
+        }
+    }));
+    entries
 }
 
 /// отправляет текущий трек в движок (с его громкостью) и публикует метаданные.
@@ -208,6 +257,44 @@ fn handler_manager(
                     && let Err(err) = db.set_track_volume(track, v)
                 {
                     println!("ERROR::Orchestrator::handler_manager::SetVolume::{}", err);
+                }
+            }
+            PlaylistManagerEvent::SavePlaylist { name, ids } => {
+                let Some(db) = &db else {
+                    println!("WARN::Orchestrator::handler_manager::SavePlaylist::no db");
+                    continue;
+                };
+                let mut playlist = playlist_from_ids(db, &ids);
+                playlist.set_name(name);
+                let now = now_secs();
+                playlist.set_created_at(now);
+                playlist.set_updated_at(now);
+                match db.save_playlist(playlist) {
+                    Err(err) => {
+                        println!("ERROR::Orchestrator::handler_manager::SavePlaylist::{}", err)
+                    }
+                    // список плейлистов изменился — присылаем обновлённый набор в UI.
+                    Ok(()) => {
+                        let _ = tx_ui.send(Update::Playlists(playlist_entries(db)));
+                    }
+                }
+            }
+            PlaylistManagerEvent::PlayTemp { ids } => {
+                let Some(db) = &db else {
+                    println!("WARN::Orchestrator::handler_manager::PlayTemp::no db");
+                    continue;
+                };
+                // анонимный плейлист: в бд не пишется, только проигрывается.
+                let playlist = playlist_from_ids(db, &ids);
+                let tracks = playlist_view(&playlist);
+                let _ = tx_ui.send(Update::Playlist {
+                    name: "(unnamed)".to_string(),
+                    tracks,
+                });
+                if let Err(err) = manager.set_playlist(playlist) {
+                    println!("ERROR::Orchestrator::handler_manager::PlayTemp::set::{}", err);
+                } else {
+                    play_current(&mut manager, &tx_engine, &tx_data, &tx_ui);
                 }
             }
         }

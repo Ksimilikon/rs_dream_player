@@ -38,7 +38,8 @@ impl Tab for SongTab {
         let title = cur.map(|t| t.title.clone()).unwrap_or_default();
         let artists = cur.map(|t| t.artists.clone()).unwrap_or_default();
         frame.render_widget(
-            Paragraph::new(format!("{title}\n{artists}")).block(Block::new().title("TRACK")),
+            Paragraph::new(format!("TITLE: {title}\nARTISTS: {artists}"))
+                .block(Block::new().title("TRACK")),
             info_area,
         );
 

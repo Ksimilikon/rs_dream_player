@@ -47,6 +47,16 @@ impl Controls {
     pub fn set_master_volume(&self, volume: f32) {
         let _ = self.tx_engine.send(EngineEvent::SetMaster(volume));
     }
+    /// сохранить плейлист в бд: имя + упорядоченные id треков.
+    pub fn save_playlist(&self, name: String, ids: Vec<i64>) {
+        let _ = self
+            .tx_manager
+            .send(PlaylistManagerEvent::SavePlaylist { name, ids });
+    }
+    /// собрать временный (несохраняемый) плейлист из id треков и проиграть.
+    pub fn play_temp(&self, ids: Vec<i64>) {
+        let _ = self.tx_manager.send(PlaylistManagerEvent::PlayTemp { ids });
+    }
 }
 
 pub mod dbus;

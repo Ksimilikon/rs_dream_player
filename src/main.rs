@@ -38,7 +38,7 @@ fn main() {
     let (initial, playlists, db) = if let Some(dir) = args.playlist {
         (Some(Playlist::from_dir(&dir).unwrap()), Vec::new(), None)
     } else {
-        let db_path = config::db_file().expect("не удалось определить каталог данных");
+        let db_path = config::db_file().expect("failed to resolve data directory");
         let storage = storage::Db::init(db_path).unwrap();
 
         // директория музыки: явный --path используем как есть, иначе системный
@@ -61,12 +61,14 @@ fn main() {
             name: "ALL SONGS".to_string(),
             tracks: track_infos(&pool),
             pool: true,
+            temp: false,
         }];
         entries.extend(storage.list_playlists().unwrap_or_default().iter().map(|p| {
             tui::PlaylistEntry {
                 name: p.get_name().unwrap_or_else(|| "---".to_string()),
                 tracks: track_infos(p),
                 pool: false,
+                temp: false,
             }
         }));
         (None, entries, Some(storage))
@@ -81,6 +83,9 @@ fn main() {
     // оркестратор играет в фоне, главный поток занимает интерфейс
     let master = config.master_volume;
     let (updates, controls) = Orchestrator::run(db, initial, master);
+
+    // текст конфига для вкладки настроек (до передачи config в поток-мост).
+    let config_text = config_view(&config, config::config_file().as_deref());
 
     // мост: команды TUI -> управление оркестратором. Мастер-громкость
     // дополнительно сохраняем в конфиг (песенная сохраняется в бд внутри менеджера).
@@ -103,6 +108,8 @@ fn main() {
                         let _ = config.save(path);
                     }
                 }
+                tui::Control::SavePlaylist { name, ids } => controls.save_playlist(name, ids),
+                tui::Control::PlayTemp { ids } => controls.play_temp(ids),
             }
         }
     });
@@ -112,10 +119,20 @@ fn main() {
         tracks,
         playlists,
         master_volume: master,
+        config_text,
     };
     if let Err(e) = tui::run(view, updates, tx_ctl) {
         eprintln!("tui: {e}");
     }
+}
+
+/// готовит текст конфига для вкладки настроек: путь к файлу + его поля в toml.
+fn config_view(config: &config::Config, path: Option<&std::path::Path>) -> String {
+    let file = path
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "-".into());
+    let body = toml::to_string_pretty(config).unwrap_or_else(|_| "<serialization error>".into());
+    format!("file: {file}\n\n{body}")
 }
 
 /// собирает краткую инфу о треках плейлиста для TUI.
@@ -129,6 +146,7 @@ fn track_infos(playlist: &Playlist) -> Vec<tui::TrackInfo> {
                 Err(_) => ("Unknown".to_string(), String::new()),
             };
             tui::TrackInfo {
+                id: t.index_id().unwrap_or(-1),
                 title,
                 artists,
                 volume: t.volume,
@@ -142,7 +160,7 @@ fn track_infos(playlist: &Playlist) -> Vec<tui::TrackInfo> {
 fn print_dirs(music: Option<&std::path::Path>) {
     let fmt = |d: Option<PathBuf>| {
         d.map(|p| p.display().to_string())
-            .unwrap_or_else(|| "—".into())
+            .unwrap_or_else(|| "-".into())
     };
     println!("settings dir: {}", fmt(config::settings_dir()));
     println!("config dir:   {}", fmt(config::config_dir()));
@@ -158,15 +176,15 @@ fn ensure_default_music_dir() -> Option<PathBuf> {
         return Some(dir);
     }
 
-    println!("каталог музыки по умолчанию не найден: {}", dir.display());
-    println!("варианты:");
-    println!("  - создать этот каталог;");
+    println!("default music directory not found: {}", dir.display());
+    println!("options:");
+    println!("  - create this directory;");
     #[cfg(target_os = "linux")]
-    println!("  - задать XDG_MUSIC_DIR (~/.config/user-dirs.dirs);");
-    println!("  - указать каталог самому через аргумент --path <Dir>.");
+    println!("  - set XDG_MUSIC_DIR (~/.config/user-dirs.dirs);");
+    println!("  - pass the directory yourself via --path <Dir>.");
 
     if !prompt_yes_no(&format!(
-        "создать каталог по умолчанию ({})? [y/N]:",
+        "create the default directory ({})? [y/N]:",
         dir.display()
     )) {
         return None;
@@ -175,7 +193,7 @@ fn ensure_default_music_dir() -> Option<PathBuf> {
     match std::fs::create_dir_all(&dir) {
         Ok(()) => Some(dir),
         Err(e) => {
-            println!("не удалось создать каталог: {e}");
+            println!("failed to create directory: {e}");
             None
         }
     }

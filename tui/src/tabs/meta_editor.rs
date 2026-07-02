@@ -1,7 +1,8 @@
 //! редактор метаданных трека (задача 1): модальная «вкладка», открываемая
-//! клавишей `m` на вкладке SONG. Правит поля заголовка, артистов, имени файла и
-//! пути к обложке; сохранение — Ctrl+S (эксклюзивная клавиша редактора), выход —
-//! Esc. Пустой заголовок при сохранении оставляет прежний (поле не отправляется).
+//! клавишей `m` на вкладке SONG. Правит теги файла (заголовок, артисты, альбом,
+//! жанры), имя файла, обложку, а также прилагаемые к бд метки (цвет, текст).
+//! Сохранение — Ctrl+S (эксклюзивная клавиша), выход — Esc. Пустое поле при
+//! сохранении оставляет прежнее значение (не отправляется).
 
 use ratatui::{
     Frame,
@@ -18,69 +19,87 @@ pub enum MetaEditorOutcome {
     /// выйти без изменений.
     Cancel,
     /// сохранить: применяются только непустые изменённые поля.
-    Save {
-        id: i64,
-        title: String,
-        artists: String,
-        filename: String,
-        cover: String,
-    },
+    Save(MetaEdit),
+}
+
+/// собранные значения полей редактора.
+pub struct MetaEdit {
+    pub id: i64,
+    pub title: String,
+    pub artists: String,
+    pub album: String,
+    pub genres: String,
+    pub filename: String,
+    pub cover: String,
+    pub color: String,
+    pub label: String,
 }
 
 /// поля редактора (порядок соответствует навигации сверху вниз).
-const FIELD_COUNT: usize = 4;
+const FIELD_COUNT: usize = 8;
+const LABELS: [&str; FIELD_COUNT] = [
+    "TITLE",
+    "ARTISTS (comma separated)",
+    "ALBUM",
+    "GENRES (comma separated)",
+    "FILE NAME",
+    "COVER PATH",
+    "COLOR (red/pink/orange/green/blue/cyan/purple)",
+    "TEXT LABEL",
+];
 
 pub struct MetaEditorState {
-    /// id редактируемого трека в бд.
     id: i64,
-    title: String,
-    artists: String,
-    filename: String,
-    cover: String,
+    fields: [String; FIELD_COUNT],
     /// активное поле (0..FIELD_COUNT).
     field: usize,
 }
 
 impl MetaEditorState {
-    /// открывает редактор, заполняя поля текущими значениями трека. `filename`
-    /// — только имя файла (без каталога); `cover` — текущий путь обложки.
+    /// открывает редактор, заполняя поля текущими значениями трека. Имя файла в
+    /// TUI не хранится, поэтому передаётся пустым.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: i64,
         title: String,
         artists: String,
-        filename: String,
+        album: String,
+        genres: String,
         cover: String,
+        color: String,
+        label: String,
     ) -> Self {
         Self {
             id,
-            title,
-            artists,
-            filename,
-            cover,
+            fields: [
+                title,
+                artists,
+                album,
+                genres,
+                String::new(),
+                cover,
+                color,
+                label,
+            ],
             field: 0,
-        }
-    }
-
-    /// изменяемая ссылка на буфер активного поля.
-    fn active_buf(&mut self) -> &mut String {
-        match self.field {
-            0 => &mut self.title,
-            1 => &mut self.artists,
-            2 => &mut self.filename,
-            _ => &mut self.cover,
         }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> MetaEditorOutcome {
         // сохранение — эксклюзивная клавиша редактора.
         if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            return MetaEditorOutcome::Save {
+            let f = &self.fields;
+            return MetaEditorOutcome::Save(MetaEdit {
                 id: self.id,
-                title: self.title.trim().to_string(),
-                artists: self.artists.trim().to_string(),
-                filename: self.filename.trim().to_string(),
-                cover: self.cover.trim().to_string(),
-            };
+                title: f[0].trim().to_string(),
+                artists: f[1].trim().to_string(),
+                album: f[2].trim().to_string(),
+                genres: f[3].trim().to_string(),
+                filename: f[4].trim().to_string(),
+                cover: f[5].trim().to_string(),
+                color: f[6].trim().to_string(),
+                label: f[7].trim().to_string(),
+            });
         }
         match key.code {
             KeyCode::Esc => return MetaEditorOutcome::Cancel,
@@ -89,9 +108,9 @@ impl MetaEditorState {
                 self.field = (self.field + 1).min(FIELD_COUNT - 1);
             }
             KeyCode::Backspace => {
-                self.active_buf().pop();
+                self.fields[self.field].pop();
             }
-            KeyCode::Char(c) => self.active_buf().push(c),
+            KeyCode::Char(c) => self.fields[self.field].push(c),
             _ => {}
         }
         MetaEditorOutcome::None
@@ -110,12 +129,14 @@ impl MetaEditorState {
             title_area,
         );
 
-        let labels = ["TITLE", "ARTISTS (comma separated)", "FILE NAME", "COVER PATH"];
-        let values = [&self.title, &self.artists, &self.filename, &self.cover];
         let items: Vec<ListItem> = (0..FIELD_COUNT)
             .map(|i| {
                 let cursor = if i == self.field { "_" } else { "" };
-                let line = format!("{:<26} {}{cursor}", format!("{}:", labels[i]), values[i]);
+                let line = format!(
+                    "{:<46} {}{cursor}",
+                    format!("{}:", LABELS[i]),
+                    self.fields[i]
+                );
                 let item = ListItem::new(line);
                 if i == self.field {
                     item.style(Style::new().add_modifier(Modifier::REVERSED))
@@ -131,7 +152,7 @@ impl MetaEditorState {
 
         frame.render_widget(
             Paragraph::new(
-                "Up/Down (Tab) move field | type to edit | Ctrl+S save | Esc cancel",
+                "Up/Down (Tab) move field | type to edit | empty = keep | Ctrl+S save | Esc cancel",
             )
             .style(Style::new().fg(Color::DarkGray)),
             hints,

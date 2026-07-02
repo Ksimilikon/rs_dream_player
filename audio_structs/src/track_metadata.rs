@@ -19,6 +19,10 @@ use crate::cover_art::detect_image_format;
 pub struct TrackMetadata {
     pub title: String,
     pub artist: Vec<String>,
+    /// album name from the file tags, if any (1:N — one album per song).
+    pub album: Option<String>,
+    /// genre list from the file tags (M:N — may be empty).
+    pub genres: Vec<String>,
     pub params: Option<TrackMetadataParams>,
 }
 
@@ -61,9 +65,17 @@ impl TrackMetadata {
             artists.push("Unknown".into());
         }
 
+        let album = tag.get_string(ItemKey::AlbumTitle).map(str::to_string);
+        let genres: Vec<String> = tag
+            .get_strings(ItemKey::Genre)
+            .map(str::to_string)
+            .collect();
+
         Ok(TrackMetadata {
             title: tag.title().map_or("Unknown".into(), |v| v.to_string()),
             artist: artists,
+            album,
+            genres,
             params: Some(TrackMetadataParams {
                 duration_sec: properties.duration().as_secs(),
                 sample_rate: properties.sample_rate().unwrap_or(0),
@@ -73,10 +85,17 @@ impl TrackMetadata {
         })
     }
 
-    /// writes `title` and the `artists` list into the file's tags at `path`.
-    /// Creates a primary tag of the file's native type if one doesn't exist yet,
-    /// so even an untagged file becomes editable.
-    pub fn write_tags(path: &Path, title: &str, artists: &[String]) -> Result<(), Box<dyn Error>> {
+    /// writes `title`, the `artists` list, `album` and the `genres` list into the
+    /// file's tags at `path`. Creates a primary tag of the file's native type if
+    /// one doesn't exist yet, so even an untagged file becomes editable.
+    /// `album == None` clears the album tag.
+    pub fn write_tags(
+        path: &Path,
+        title: &str,
+        artists: &[String],
+        album: Option<&str>,
+        genres: &[String],
+    ) -> Result<(), Box<dyn Error>> {
         let mut tagged_file = Probe::open(path)?.guess_file_type()?.read()?;
         ensure_primary_tag(&mut tagged_file);
         let tag = tagged_file
@@ -91,6 +110,20 @@ impl TrackMetadata {
                 ItemKey::TrackArtist,
                 ItemValue::Text(artist.clone()),
             ));
+        }
+
+        // album: set or clear.
+        match album {
+            Some(a) => {
+                tag.insert_text(ItemKey::AlbumTitle, a.to_string());
+            }
+            None => tag.remove_key(ItemKey::AlbumTitle),
+        }
+
+        // rewrite the whole genre list.
+        tag.remove_key(ItemKey::Genre);
+        for genre in genres {
+            tag.push(TagItem::new(ItemKey::Genre, ItemValue::Text(genre.clone())));
         }
 
         tag.save_to_path(path, WriteOptions::default())?;
@@ -152,11 +185,20 @@ mod tests {
         let path = dir.path().join("copy.mp3");
         fs::copy(&src, &path).unwrap();
 
-        TrackMetadata::write_tags(&path, "My New Title", &["Alice".into(), "Bob".into()]).unwrap();
+        TrackMetadata::write_tags(
+            &path,
+            "My New Title",
+            &["Alice".into(), "Bob".into()],
+            Some("Greatest Hits"),
+            &["Rock".into(), "Pop".into()],
+        )
+        .unwrap();
 
         let meta = TrackMetadata::from_path(&path).unwrap();
         assert_eq!(meta.title, "My New Title");
         assert_eq!(meta.artist, vec!["Alice".to_string(), "Bob".to_string()]);
+        assert_eq!(meta.album.as_deref(), Some("Greatest Hits"));
+        assert_eq!(meta.genres, vec!["Rock".to_string(), "Pop".to_string()]);
     }
 
     #[test]

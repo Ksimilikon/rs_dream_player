@@ -10,36 +10,50 @@ use dbus::DBusData;
 use storage::{Db, traits::indexator::Indexator};
 use tui::{PlaylistEntry, TrackInfo, Update};
 
-use crate::{config, orchestrator::engine::EngineEvent, playlist_manager::PlaylistManager};
+use crate::{orchestrator::engine::EngineEvent, playlist_manager::PlaylistManager};
 
 pub enum PlaylistManagerEvent {
     Next,
     Prev,
     Select(usize),
     Playlist(Playlist),
-    /// загрузить плейлист по имени из бд.
-    LoadByName(String),
-    /// загрузить виртуальный плейлист со всем пулом песен.
-    LoadPool,
+    /// загрузить плейлист по имени из бд и начать с трека `start`.
+    LoadByName { name: String, start: usize },
+    /// загрузить виртуальный плейлист со всем пулом песен, начать с `start`.
+    LoadPool { start: usize },
     /// громкость текущего трека (0.0..=1.0).
     SetVolume(f32),
     /// сохранить плейлист в бд: имя + упорядоченные id треков.
     SavePlaylist { name: String, ids: Vec<i64> },
-    /// собрать временный (несохраняемый) плейлист из id треков и проиграть.
-    PlayTemp { ids: Vec<i64> },
+    /// собрать временный (несохраняемый) плейлист из id треков и проиграть с `start`.
+    PlayTemp { ids: Vec<i64>, start: usize },
     /// задать заголовок трека (тег файла + бд).
     SetTitle { id: i64, title: String },
     /// задать список артистов трека (тег файла + бд).
     SetArtists { id: i64, artists: Vec<String> },
+    /// задать альбом трека (тег файла + бд).
+    SetAlbum { id: i64, album: String },
+    /// задать список жанров трека (тег файла + бд).
+    SetGenres { id: i64, genres: Vec<String> },
+    /// задать цветовую метку трека (бд).
+    SetColor { id: i64, color: String },
+    /// задать текстовую метку трека (бд).
+    SetLabel { id: i64, label: String },
     /// переименовать файл трека на диске (та же папка) + обновить путь в бд.
     RenameFile { id: i64, name: String },
     /// скопировать обложку в каталог конфига и сохранить путь в бд (приоритет).
     SetCover { id: i64, path: String },
     /// встроить обложку прямо в теги файла.
     SetCoverTag { id: i64, path: String },
+    /// присвоить недействительному треку новый путь к файлу.
+    SetPath { id: i64, path: String },
+    /// удалить трек из индекса (каскадом из плейлистов).
+    RemoveTrack(i64),
+    /// удалить из индекса все недействительные треки.
+    PurgeInvalid,
     /// проиндексировать заданный каталог в бд.
     Scan(String),
-    /// проверить наличие файлов треков; отсутствующие удаляются из индекса.
+    /// проверить наличие файлов треков; отсутствующие помечаются недействительными.
     /// `None` — весь индекс, `Some(name)` — конкретный плейлист.
     Check { playlist: Option<String> },
 }
@@ -70,31 +84,38 @@ fn push_meta(tx_data: &Sender<DBusData>, tx_ui: &Sender<Update>, manager: &Playl
     }
 }
 
+/// краткая инфа об одном треке для UI (с новыми полями: альбом/жанры/цвет/метка/invalid).
+fn track_info(t: &audio_structs::track_virtual::TrackVirtual) -> TrackInfo {
+    let (title, artists, cover, album, genres) = match t.get_metadata() {
+        Ok(m) => (
+            m.title.clone(),
+            m.artist.join(", "),
+            m.params
+                .as_ref()
+                .and_then(|p| p.cover_art.as_ref())
+                .map(|c| c.to_string_lossy().into_owned()),
+            m.album.clone(),
+            m.genres.clone(),
+        ),
+        Err(_) => ("Unknown".to_string(), String::new(), None, None, Vec::new()),
+    };
+    TrackInfo {
+        id: t.index_id().unwrap_or(-1),
+        title,
+        artists,
+        volume: t.volume,
+        cover,
+        album,
+        genres,
+        color: t.color.clone(),
+        user_label: t.user_label.clone(),
+        invalid: t.invalid,
+    }
+}
+
 /// краткий список треков плейлиста для UI.
 fn playlist_view(p: &Playlist) -> Vec<TrackInfo> {
-    p.tracks()
-        .iter()
-        .map(|t| {
-            let (title, artists, cover) = match t.get_metadata() {
-                Ok(m) => (
-                    m.title.clone(),
-                    m.artist.join(", "),
-                    m.params
-                        .as_ref()
-                        .and_then(|p| p.cover_art.as_ref())
-                        .map(|c| c.to_string_lossy().into_owned()),
-                ),
-                Err(_) => ("Unknown".to_string(), String::new(), None),
-            };
-            TrackInfo {
-                id: t.index_id().unwrap_or(-1),
-                title,
-                artists,
-                volume: t.volume,
-                cover,
-            }
-        })
-        .collect()
+    p.tracks().iter().map(track_info).collect()
 }
 
 /// текущее время в секундах эпохи (для меток плейлиста).
@@ -164,43 +185,58 @@ fn track_by_id(db: &Db, id: i64) -> Option<audio_structs::track_virtual::TrackVi
         .next()
 }
 
-/// перечитывает трек из бд и шлёт в UI обновление его метаданных + обновлённый
+/// перечитывает трек из бд и шлёт в UI его новую инфу (на месте) + обновлённый
 /// список плейлистов (для предпросмотров).
 fn push_track_meta(db: &Db, tx_ui: &Sender<Update>, id: i64) {
-    if let Some(track) = track_by_id(db, id)
-        && let Ok(meta) = track.get_metadata()
-    {
-        let cover = meta
-            .params
-            .as_ref()
-            .and_then(|p| p.cover_art.as_ref())
-            .map(|c| c.to_string_lossy().into_owned());
-        let _ = tx_ui.send(Update::TrackMeta {
-            id,
-            title: meta.title.clone(),
-            artists: meta.artist.join(", "),
-            cover,
-        });
+    if let Some(track) = track_by_id(db, id) {
+        let _ = tx_ui.send(Update::TrackPatch(track_info(&track)));
     }
     let _ = tx_ui.send(Update::Playlists(playlist_entries(db)));
 }
 
-/// задаёт заголовок трека: пишет тег файла (сохраняя текущих артистов) и бд.
+/// текущие значения тегов трека: (title, artists, album, genres). Нужны, чтобы
+/// правка одного поля не затирала остальные при записи в файл.
+fn current_tags(track: &audio_structs::track_virtual::TrackVirtual) -> (String, Vec<String>, Option<String>, Vec<String>) {
+    match track.get_metadata() {
+        Ok(m) => (
+            m.title.clone(),
+            m.artist.clone(),
+            m.album.clone(),
+            m.genres.clone(),
+        ),
+        Err(_) => ("Unknown".to_string(), Vec::new(), None, Vec::new()),
+    }
+}
+
+/// пишет все теги файла (title/artists/album/genres) и шлёт обновление в UI.
+/// Возвращает `false` при ошибке (сообщение уже отправлено).
+fn write_all_tags(
+    tx_ui: &Sender<Update>,
+    path: &Path,
+    title: &str,
+    artists: &[String],
+    album: Option<&str>,
+    genres: &[String],
+) -> bool {
+    if let Err(e) = TrackMetadata::write_tags(path, title, artists, album, genres) {
+        let _ = tx_ui.send(Update::Error(format!("failed to write tags: {e}")));
+        return false;
+    }
+    true
+}
+
+/// задаёт заголовок трека: пишет тег файла (сохраняя остальные теги) и бд.
 fn edit_title(db: &Db, tx_ui: &Sender<Update>, id: i64, title: String) {
     let Some(track) = track_by_id(db, id) else {
         let _ = tx_ui.send(Update::Error(format!("track #{id} not found in index")));
         return;
     };
-    let Some(path) = track.get_path() else {
+    let Some(path) = track.get_path().map(Path::to_path_buf) else {
         let _ = tx_ui.send(Update::Error("track has no file path".into()));
         return;
     };
-    let artists = track
-        .get_metadata()
-        .map(|m| m.artist.clone())
-        .unwrap_or_default();
-    if let Err(e) = TrackMetadata::write_tags(path, &title, &artists) {
-        let _ = tx_ui.send(Update::Error(format!("failed to write tags: {e}")));
+    let (_, artists, album, genres) = current_tags(&track);
+    if !write_all_tags(tx_ui, &path, &title, &artists, album.as_deref(), &genres) {
         return;
     }
     if let Err(e) = db.update_track_meta(id, Some(&title), None) {
@@ -210,26 +246,86 @@ fn edit_title(db: &Db, tx_ui: &Sender<Update>, id: i64, title: String) {
     push_track_meta(db, tx_ui, id);
 }
 
-/// задаёт список артистов трека: пишет тег файла (сохраняя заголовок) и бд.
+/// задаёт список артистов трека: пишет тег файла (сохраняя остальные теги) и бд.
 fn edit_artists(db: &Db, tx_ui: &Sender<Update>, id: i64, artists: Vec<String>) {
     let Some(track) = track_by_id(db, id) else {
         let _ = tx_ui.send(Update::Error(format!("track #{id} not found in index")));
         return;
     };
-    let Some(path) = track.get_path() else {
+    let Some(path) = track.get_path().map(Path::to_path_buf) else {
         let _ = tx_ui.send(Update::Error("track has no file path".into()));
         return;
     };
-    let title = track
-        .get_metadata()
-        .map(|m| m.title.clone())
-        .unwrap_or_else(|_| "Unknown".to_string());
-    if let Err(e) = TrackMetadata::write_tags(path, &title, &artists) {
-        let _ = tx_ui.send(Update::Error(format!("failed to write tags: {e}")));
+    let (title, _, album, genres) = current_tags(&track);
+    if !write_all_tags(tx_ui, &path, &title, &artists, album.as_deref(), &genres) {
         return;
     }
     if let Err(e) = db.update_track_meta(id, None, Some(&artists)) {
         let _ = tx_ui.send(Update::Error(format!("failed to update index: {e}")));
+        return;
+    }
+    push_track_meta(db, tx_ui, id);
+}
+
+/// задаёт альбом трека: пишет тег файла (сохраняя остальные теги) и бд. Пустая
+/// строка очищает альбом.
+fn edit_album(db: &Db, tx_ui: &Sender<Update>, id: i64, album: String) {
+    let Some(track) = track_by_id(db, id) else {
+        let _ = tx_ui.send(Update::Error(format!("track #{id} not found in index")));
+        return;
+    };
+    let Some(path) = track.get_path().map(Path::to_path_buf) else {
+        let _ = tx_ui.send(Update::Error("track has no file path".into()));
+        return;
+    };
+    let (title, artists, _, genres) = current_tags(&track);
+    let album_opt = (!album.is_empty()).then_some(album.as_str());
+    if !write_all_tags(tx_ui, &path, &title, &artists, album_opt, &genres) {
+        return;
+    }
+    if let Err(e) = db.set_track_album(id, album_opt) {
+        let _ = tx_ui.send(Update::Error(format!("failed to update index: {e}")));
+        return;
+    }
+    push_track_meta(db, tx_ui, id);
+}
+
+/// задаёт список жанров трека: пишет тег файла (сохраняя остальные теги) и бд.
+fn edit_genres(db: &Db, tx_ui: &Sender<Update>, id: i64, genres: Vec<String>) {
+    let Some(track) = track_by_id(db, id) else {
+        let _ = tx_ui.send(Update::Error(format!("track #{id} not found in index")));
+        return;
+    };
+    let Some(path) = track.get_path().map(Path::to_path_buf) else {
+        let _ = tx_ui.send(Update::Error("track has no file path".into()));
+        return;
+    };
+    let (title, artists, album, _) = current_tags(&track);
+    if !write_all_tags(tx_ui, &path, &title, &artists, album.as_deref(), &genres) {
+        return;
+    }
+    if let Err(e) = db.set_track_genres(id, &genres) {
+        let _ = tx_ui.send(Update::Error(format!("failed to update index: {e}")));
+        return;
+    }
+    push_track_meta(db, tx_ui, id);
+}
+
+/// задаёт цветовую метку трека (только бд). Пустая строка очищает.
+fn edit_color(db: &Db, tx_ui: &Sender<Update>, id: i64, color: String) {
+    let color_opt = (!color.is_empty()).then_some(color.as_str());
+    if let Err(e) = db.set_track_color(id, color_opt) {
+        let _ = tx_ui.send(Update::Error(format!("failed to set color: {e}")));
+        return;
+    }
+    push_track_meta(db, tx_ui, id);
+}
+
+/// задаёт текстовую метку трека (только бд). Пустая строка очищает.
+fn edit_label(db: &Db, tx_ui: &Sender<Update>, id: i64, label: String) {
+    let label_opt = (!label.is_empty()).then_some(label.as_str());
+    if let Err(e) = db.set_track_label(id, label_opt) {
+        let _ = tx_ui.send(Update::Error(format!("failed to set label: {e}")));
         return;
     }
     push_track_meta(db, tx_ui, id);
@@ -282,7 +378,15 @@ fn edit_rename(db: &Db, tx_ui: &Sender<Update>, id: i64, name: String) {
     let _ = tx_ui.send(Update::Playlists(playlist_entries(db)));
 }
 
-/// копирует изображение в каталог конфига (covers/) и сохраняет путь в бд —
+/// каталог для обложек, привязанный к хранилищу (рядом с файлом бд).
+fn covers_dir(db: &Db) -> PathBuf {
+    db.path()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("covers")
+}
+
+/// копирует изображение в каталог хранилища (covers/) и сохраняет путь в бд —
 /// приоритетный источник обложки для отображения.
 fn edit_cover_db(db: &Db, tx_ui: &Sender<Update>, id: i64, path: String) {
     let bytes = match std::fs::read(&path) {
@@ -292,11 +396,7 @@ fn edit_cover_db(db: &Db, tx_ui: &Sender<Update>, id: i64, path: String) {
             return;
         }
     };
-    let Some(cfg) = config::config_dir() else {
-        let _ = tx_ui.send(Update::Error("no config directory available".into()));
-        return;
-    };
-    let covers = cfg.join("covers");
+    let covers = covers_dir(db);
     match cover_art::save_cover_art(&bytes, &covers, &id.to_string()) {
         Ok(saved) => {
             if let Err(e) = db.set_track_cover(id, Some(&saved)) {
@@ -359,8 +459,8 @@ fn scan_dir(db: &Db, tx_ui: &Sender<Update>, dir: String) {
     }
 }
 
-/// проверяет наличие файлов треков; отсутствующие удаляет из индекса и
-/// сообщает о них красным. `playlist` = `None` — весь индекс.
+/// проверяет наличие файлов треков; отсутствующие помечает недействительными
+/// (не удаляет — задача 2/3) и сообщает о них красным. `None` — весь индекс.
 fn check_files(db: &Db, tx_ui: &Sender<Update>, playlist: Option<String>) {
     let pairs = match &playlist {
         None => db.track_paths(),
@@ -394,21 +494,60 @@ fn check_files(db: &Db, tx_ui: &Sender<Update>, playlist: Option<String>) {
         return;
     }
     for (id, _) in &missing {
-        let _ = db.remove_track(*id);
+        let _ = db.set_track_invalid(*id, true);
     }
     let names: Vec<String> = missing.iter().map(|(_, n)| n.clone()).collect();
     let _ = tx_ui.send(Update::Error(format!(
-        "removed {} missing tracks from index ({scope}), not on disk: {}",
+        "{} missing files flagged invalid ({scope}), not on disk: {}",
         missing.len(),
         names.join(", ")
     )));
     let _ = tx_ui.send(Update::Playlists(playlist_entries(db)));
 }
 
-/// загружает и проигрывает текущий трек; при ошибке из-за отсутствия файла
-/// удаляет трек из индекса и in-memory плейлиста, шлёт красное сообщение и
-/// переходит к следующему. Повторяет, пока трек не загрузится или плейлист не
-/// опустеет (задача 2).
+/// присваивает недействительному треку новый путь (с дедупом дубликата) и
+/// обновляет UI.
+fn set_path(db: &Db, tx_ui: &Sender<Update>, id: i64, path: String) {
+    let new_path = PathBuf::from(&path);
+    if !new_path.is_file() {
+        let _ = tx_ui.send(Update::Error(format!("file does not exist: {path}")));
+        return;
+    }
+    if let Err(e) = db.reassign_path(id, &new_path) {
+        let _ = tx_ui.send(Update::Error(format!("failed to set path: {e}")));
+        return;
+    }
+    let _ = tx_ui.send(Update::Notice("path updated".into()));
+    push_track_meta(db, tx_ui, id);
+}
+
+/// удаляет трек из индекса (каскадом из плейлистов) и обновляет UI.
+fn remove_track_cmd(db: &Db, tx_ui: &Sender<Update>, id: i64) {
+    if let Err(e) = db.remove_track(id) {
+        let _ = tx_ui.send(Update::Error(format!("failed to remove track: {e}")));
+        return;
+    }
+    let _ = tx_ui.send(Update::Notice("track removed from index".into()));
+    let _ = tx_ui.send(Update::Playlists(playlist_entries(db)));
+}
+
+/// удаляет из индекса все недействительные треки и обновляет UI.
+fn purge_invalid(db: &Db, tx_ui: &Sender<Update>) {
+    match db.remove_invalid() {
+        Ok(n) => {
+            let _ = tx_ui.send(Update::Notice(format!("removed {n} invalid tracks from index")));
+            let _ = tx_ui.send(Update::Playlists(playlist_entries(db)));
+        }
+        Err(e) => {
+            let _ = tx_ui.send(Update::Error(format!("purge failed: {e}")));
+        }
+    }
+}
+
+/// загружает и проигрывает текущий трек, пропуская недействительные (invalid) и
+/// сдвигаясь вперёд. Если файл трека пропал при загрузке — помечает его invalid
+/// (не удаляет, задача 2/3), сообщает красным и идёт дальше. Ограничено числом
+/// треков, чтобы плейлист целиком из недействительных не зациклился.
 fn play_current_recover(
     manager: &mut PlaylistManager,
     db: Option<&Db>,
@@ -416,15 +555,27 @@ fn play_current_recover(
     tx_data: &Sender<DBusData>,
     tx_ui: &Sender<Update>,
 ) {
+    let mut tries = manager.len();
     loop {
         if manager.is_empty() {
             return;
+        }
+        if tries == 0 {
+            let _ = tx_ui.send(Update::Error("no playable tracks (all invalid)".into()));
+            return;
+        }
+        tries -= 1;
+
+        // трек уже помечен недействительным — пропускаем без попытки загрузки.
+        if manager.current_is_invalid() {
+            manager.step_next();
+            continue;
         }
         if manager.load_current().is_ok() {
             play_current(manager, tx_engine, tx_data, tx_ui);
             return;
         }
-        // загрузка не удалась: удаляем трек только если файла действительно нет.
+        // загрузка не удалась. Если файла нет — помечаем трек недействительным.
         let desc = manager.current_descriptor();
         let missing = desc
             .as_ref()
@@ -433,16 +584,17 @@ fn play_current_recover(
         match (desc, missing) {
             (Some((index_id, _, title)), true) => {
                 if let (Some(db), Some(id)) = (db, index_id) {
-                    let _ = db.remove_track(id);
+                    let _ = db.set_track_invalid(id, true);
                 }
+                manager.mark_current_invalid();
                 let _ = tx_ui.send(Update::Error(format!(
-                    "track not found on disk, removed from index: {title}"
+                    "path invalid, marked (not on disk): {title}"
                 )));
-                manager.remove_current();
                 if let Some(db) = db {
                     let _ = tx_ui.send(Update::Playlists(playlist_entries(db)));
                 }
-                // повторяем цикл: пробуем трек, вставший на освободившееся место.
+                manager.step_next();
+                // повторяем цикл: ищем следующий воспроизводимый трек.
             }
             _ => {
                 let _ = tx_ui.send(Update::Error("failed to load current track".into()));
@@ -485,7 +637,7 @@ fn handler_manager(
                 let _ = manager.set_playlist(p);
                 play_current_recover(&mut manager, db.as_ref(), &tx_engine, &tx_data, &tx_ui);
             }
-            PlaylistManagerEvent::LoadByName(name) => {
+            PlaylistManagerEvent::LoadByName { name, start } => {
                 let Some(db_ref) = &db else {
                     println!("WARN::Orchestrator::handler_manager::LoadByName::no db");
                     continue;
@@ -499,6 +651,9 @@ fn handler_manager(
                         let tracks = playlist_view(&p);
                         let _ = tx_ui.send(Update::Playlist { name, tracks });
                         let _ = manager.set_playlist(p);
+                        if start > 0 {
+                            let _ = manager.goto(start);
+                        }
                         play_current_recover(
                             &mut manager,
                             db.as_ref(),
@@ -509,7 +664,7 @@ fn handler_manager(
                     }
                 }
             }
-            PlaylistManagerEvent::LoadPool => {
+            PlaylistManagerEvent::LoadPool { start } => {
                 let Some(db_ref) = &db else {
                     println!("WARN::Orchestrator::handler_manager::LoadPool::no db");
                     continue;
@@ -523,6 +678,9 @@ fn handler_manager(
                             tracks,
                         });
                         let _ = manager.set_playlist(p);
+                        if start > 0 {
+                            let _ = manager.goto(start);
+                        }
                         play_current_recover(
                             &mut manager,
                             db.as_ref(),
@@ -563,7 +721,7 @@ fn handler_manager(
                     }
                 }
             }
-            PlaylistManagerEvent::PlayTemp { ids } => {
+            PlaylistManagerEvent::PlayTemp { ids, start } => {
                 let Some(db_ref) = &db else {
                     println!("WARN::Orchestrator::handler_manager::PlayTemp::no db");
                     continue;
@@ -576,6 +734,9 @@ fn handler_manager(
                     tracks,
                 });
                 let _ = manager.set_playlist(playlist);
+                if start > 0 {
+                    let _ = manager.goto(start);
+                }
                 play_current_recover(&mut manager, db.as_ref(), &tx_engine, &tx_data, &tx_ui);
             }
             // правка метаданных / индексация / проверка — требуют бд.
@@ -587,6 +748,41 @@ fn handler_manager(
             PlaylistManagerEvent::SetArtists { id, artists } => {
                 if let Some(db) = &db {
                     edit_artists(db, &tx_ui, id, artists);
+                }
+            }
+            PlaylistManagerEvent::SetAlbum { id, album } => {
+                if let Some(db) = &db {
+                    edit_album(db, &tx_ui, id, album);
+                }
+            }
+            PlaylistManagerEvent::SetGenres { id, genres } => {
+                if let Some(db) = &db {
+                    edit_genres(db, &tx_ui, id, genres);
+                }
+            }
+            PlaylistManagerEvent::SetColor { id, color } => {
+                if let Some(db) = &db {
+                    edit_color(db, &tx_ui, id, color);
+                }
+            }
+            PlaylistManagerEvent::SetLabel { id, label } => {
+                if let Some(db) = &db {
+                    edit_label(db, &tx_ui, id, label);
+                }
+            }
+            PlaylistManagerEvent::SetPath { id, path } => {
+                if let Some(db) = &db {
+                    set_path(db, &tx_ui, id, path);
+                }
+            }
+            PlaylistManagerEvent::RemoveTrack(id) => {
+                if let Some(db) = &db {
+                    remove_track_cmd(db, &tx_ui, id);
+                }
+            }
+            PlaylistManagerEvent::PurgeInvalid => {
+                if let Some(db) = &db {
+                    purge_invalid(db, &tx_ui);
                 }
             }
             PlaylistManagerEvent::RenameFile { id, name } => {

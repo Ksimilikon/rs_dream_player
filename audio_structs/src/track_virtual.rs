@@ -16,6 +16,12 @@ pub struct TrackVirtual {
     metadata: Option<Arc<TrackMetadata>>,
     track: Option<Vec<u8>>,
     pub volume: Volume,
+    /// DB-only app state (not file tags): file path is known-bad, skip playback.
+    pub invalid: bool,
+    /// DB-only visual mark: one of red/pink/orange/green/blue/cyan/purple.
+    pub color: Option<String>,
+    /// DB-only free-form user text label.
+    pub user_label: Option<String>,
 }
 
 #[derive(Debug)]
@@ -69,6 +75,9 @@ impl TrackVirtual {
             metadata: Some(Arc::new(metadata)),
             track: None,
             volume: 1.,
+            invalid: false,
+            color: None,
+            user_label: None,
         }
     }
 
@@ -82,6 +91,9 @@ impl TrackVirtual {
                 metadata: Some(Arc::new(metadata)),
                 track: Some(track),
                 volume: 1.,
+                invalid: false,
+                color: None,
+                user_label: None,
             })
         } else {
             if !Track::is_music_file(&path)? {
@@ -93,6 +105,9 @@ impl TrackVirtual {
                 metadata: Some(Arc::new(metadata)),
                 track: None,
                 volume: 1.,
+                invalid: false,
+                color: None,
+                user_label: None,
             })
         }
     }

@@ -78,9 +78,21 @@ impl Db {
             artists.push("Unknown".into());
         }
 
+        // genres of this track (M:N via track_genres).
+        let mut gstmt = self.conn.prepare(
+            "SELECT g.name FROM genres g \
+             JOIN track_genres tg ON tg.genre_id = g.id \
+             WHERE tg.track_id = ?1 ORDER BY g.name",
+        )?;
+        let genres = gstmt
+            .query_map([row.id], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
         let metadata = TrackMetadata {
             title: row.title,
             artist: artists,
+            album: row.album,
+            genres,
             params: Some(TrackMetadataParams {
                 duration_sec: row.duration as u64,
                 sample_rate: 0,
@@ -90,16 +102,20 @@ impl Db {
         };
         let mut track = TrackVirtual::new(row.id, PathBuf::from(row.path), metadata);
         track.volume = row.volume as f32;
+        track.invalid = row.invalid;
+        track.color = row.color;
+        track.user_label = row.user_label;
         Ok(track)
     }
 
     /// загружает упорядоченные треки плейлиста по его id.
     fn load_playlist_tracks(&self, playlist_id: i64) -> Result<Vec<TrackVirtual>, Box<dyn Error>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT t.id, t.title, t.duration, t.cover_art, t.path, t.volume \
+        let sql = format!(
+            "SELECT {TRACK_COLUMNS} \
              FROM playlist_tracks pt JOIN tracks t ON t.hash = pt.song_hash \
-             WHERE pt.playlist_id = ?1 ORDER BY pt.position",
-        )?;
+             WHERE pt.playlist_id = ?1 ORDER BY pt.position"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
             .query_map([playlist_id], TrackRow::from_row)?
             .collect::<Result<Vec<_>, _>>()?;
@@ -192,9 +208,7 @@ impl Db {
         id: Option<i64>,
         hash: Option<String>,
     ) -> Result<Vec<TrackVirtual>, Box<dyn Error>> {
-        let mut sql = String::from(
-            "SELECT DISTINCT t.id, t.title, t.duration, t.cover_art, t.path, t.volume FROM tracks t",
-        );
+        let mut sql = format!("SELECT DISTINCT {TRACK_COLUMNS} FROM tracks t");
         if artist.is_some() {
             sql.push_str(
                 " JOIN track_artists ta ON ta.track_id = t.id \
@@ -333,12 +347,106 @@ impl Db {
         Ok(())
     }
 
-    /// удаляет трек из индекса по его id (каскадом чистятся `track_artists`;
-    /// строки `playlist_tracks` просто выпадают из выборок по JOIN).
+    /// удаляет трек из индекса по его id. Каскадом чистятся `track_artists` и
+    /// `track_genres` (через FK), а привязки во всех плейлистах (`playlist_tracks`
+    /// по `song_hash`) удаляются вручную — так удаление всегда каскадит в плейлисты.
     pub fn remove_track(&self, id: i64) -> Result<(), Box<dyn Error>> {
-        self.conn
-            .execute("DELETE FROM tracks WHERE id = ?1", [id])?;
+        let tx = self.conn.unchecked_transaction()?;
+        // сперва убираем привязки в плейлистах по хешу трека.
+        tx.execute(
+            "DELETE FROM playlist_tracks \
+             WHERE song_hash IN (SELECT hash FROM tracks WHERE id = ?1)",
+            [id],
+        )?;
+        tx.execute("DELETE FROM tracks WHERE id = ?1", [id])?;
+        tx.commit()?;
         Ok(())
+    }
+
+    /// задаёт (или очищает `None`) альбом трека по его id.
+    pub fn set_track_album(&self, id: i64, album: Option<&str>) -> Result<(), Box<dyn Error>> {
+        let album_id = upsert_album(&self.conn, album)?;
+        self.conn.execute(
+            "UPDATE tracks SET album_id = ?2 WHERE id = ?1",
+            params![id, album_id],
+        )?;
+        Ok(())
+    }
+
+    /// переписывает жанры трека (M:N).
+    pub fn set_track_genres(&self, id: i64, genres: &[String]) -> Result<(), Box<dyn Error>> {
+        let tx = self.conn.unchecked_transaction()?;
+        write_track_genres(&tx, id, genres)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// задаёт (или очищает `None`) цветовую метку трека.
+    pub fn set_track_color(&self, id: i64, color: Option<&str>) -> Result<(), Box<dyn Error>> {
+        self.conn.execute(
+            "UPDATE tracks SET color = ?2 WHERE id = ?1",
+            params![id, color],
+        )?;
+        Ok(())
+    }
+
+    /// задаёт (или очищает `None`) текстовую метку трека.
+    pub fn set_track_label(&self, id: i64, label: Option<&str>) -> Result<(), Box<dyn Error>> {
+        self.conn.execute(
+            "UPDATE tracks SET user_label = ?2 WHERE id = ?1",
+            params![id, label],
+        )?;
+        Ok(())
+    }
+
+    /// помечает трек как недействительный (файл не читается) или снимает метку.
+    pub fn set_track_invalid(&self, id: i64, invalid: bool) -> Result<(), Box<dyn Error>> {
+        self.conn.execute(
+            "UPDATE tracks SET invalid = ?2 WHERE id = ?1",
+            params![id, invalid as i64],
+        )?;
+        Ok(())
+    }
+
+    /// присваивает треку `id` новый путь. Если такой путь уже занят другой
+    /// записью (например, приложение уже проиндексировало переименованный файл),
+    /// та запись удаляется (каскадом из плейлистов), а путь достаётся исходному
+    /// треку. Заодно снимается метка `invalid`.
+    pub fn reassign_path(&self, id: i64, new_path: &Path) -> Result<(), Box<dyn Error>> {
+        let path_s = new_path.to_string_lossy().into_owned();
+        // если новым путём уже владеет другая запись — удаляем её.
+        let dup: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM tracks WHERE path = ?1",
+                [&path_s],
+                |r| r.get(0),
+            )
+            .ok();
+        if let Some(dup_id) = dup
+            && dup_id != id
+        {
+            self.remove_track(dup_id)?;
+        }
+        self.conn.execute(
+            "UPDATE tracks SET path = ?2, invalid = 0 WHERE id = ?1",
+            params![id, path_s],
+        )?;
+        Ok(())
+    }
+
+    /// удаляет из индекса все треки, помеченные как недействительные
+    /// (каскадом из плейлистов). Возвращает количество удалённых.
+    pub fn remove_invalid(&self) -> Result<usize, Box<dyn Error>> {
+        let ids: Vec<i64> = {
+            let mut stmt = self.conn.prepare("SELECT id FROM tracks WHERE invalid = 1")?;
+            stmt.query_map([], |r| r.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for id in &ids {
+            self.remove_track(*id)?;
+        }
+        Ok(ids.len())
     }
 
     /// пары (id, path) всех треков библиотеки — для проверки наличия файлов.
@@ -380,11 +488,8 @@ impl Indexator for Db {
 
     /// `key` — хеш песни.
     fn load_track(&self, key: String) -> Result<TrackVirtual, Box<dyn Error>> {
-        let row = self.conn.query_row(
-            "SELECT id, title, duration, cover_art, path, volume FROM tracks WHERE hash = ?1",
-            [&key],
-            TrackRow::from_row,
-        )?;
+        let sql = format!("SELECT {TRACK_COLUMNS} FROM tracks t WHERE t.hash = ?1");
+        let row = self.conn.query_row(&sql, [&key], TrackRow::from_row)?;
         self.build_track(row)
     }
 
@@ -471,6 +576,7 @@ impl Indexator for Db {
 }
 
 /// сырые столбцы `tracks`, общие для всех запросов, возвращающих треки.
+/// Порядок совпадает с [`TRACK_COLUMNS`].
 struct TrackRow {
     id: i64,
     title: String,
@@ -478,7 +584,16 @@ struct TrackRow {
     cover_art: Option<String>,
     path: String,
     volume: f64,
+    album: Option<String>,
+    color: Option<String>,
+    user_label: Option<String>,
+    invalid: bool,
 }
+
+/// список столбцов трека (с алиасом `t`) для SELECT'ов, возвращающих [`TrackRow`].
+/// Альбом дотягивается коррелированным подзапросом по `album_id`.
+const TRACK_COLUMNS: &str = "t.id, t.title, t.duration, t.cover_art, t.path, t.volume, \
+     (SELECT name FROM albums WHERE id = t.album_id), t.color, t.user_label, t.invalid";
 
 impl TrackRow {
     fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
@@ -489,6 +604,10 @@ impl TrackRow {
             cover_art: r.get(3)?,
             path: r.get(4)?,
             volume: r.get(5)?,
+            album: r.get(6)?,
+            color: r.get(7)?,
+            user_label: r.get(8)?,
+            invalid: r.get(9)?,
         })
     }
 }
@@ -514,17 +633,21 @@ fn upsert_track(conn: &Connection, track: &TrackVirtual) -> Result<String, Box<d
         None => (0, None),
     };
     let source = source_label(track);
+    // альбом из тегов (1:N) → album_id.
+    let album_id = upsert_album(conn, meta.album.as_deref())?;
 
     // на новый трек попадёт этот случайный хеш; при конфликте по `path`
-    // существующий хеш не трогаем.
+    // существующий хеш не трогаем. color/user_label/invalid — пользовательское
+    // состояние, при повторном скане (ON CONFLICT) их НЕ перезаписываем.
     let new_hash = random_hash();
     conn.execute(
-        "INSERT INTO tracks (hash, title, duration, cover_art, path, source_type, volume) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+        "INSERT INTO tracks \
+            (hash, title, duration, cover_art, path, source_type, volume, album_id, color, user_label, invalid) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
          ON CONFLICT(path) DO UPDATE SET \
             title = excluded.title, duration = excluded.duration, \
             cover_art = excluded.cover_art, source_type = excluded.source_type, \
-            volume = excluded.volume",
+            volume = excluded.volume, album_id = excluded.album_id",
         params![
             new_hash,
             meta.title,
@@ -532,7 +655,11 @@ fn upsert_track(conn: &Connection, track: &TrackVirtual) -> Result<String, Box<d
             cover,
             path_s,
             source,
-            track.volume as f64
+            track.volume as f64,
+            album_id,
+            track.color,
+            track.user_label,
+            track.invalid as i64,
         ],
     )?;
 
@@ -559,7 +686,45 @@ fn upsert_track(conn: &Connection, track: &TrackVirtual) -> Result<String, Box<d
         )?;
     }
 
+    // полностью переписываем список жанров трека (M:N через track_genres).
+    write_track_genres(conn, id, &meta.genres)?;
+
     Ok(hash)
+}
+
+/// upsert названия альбома, возвращает его id (или `None`, если альбом пуст).
+fn upsert_album(conn: &Connection, album: Option<&str>) -> Result<Option<i64>, Box<dyn Error>> {
+    let Some(name) = album.filter(|a| !a.is_empty()) else {
+        return Ok(None);
+    };
+    conn.execute(
+        "INSERT INTO albums (name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
+        [name],
+    )?;
+    let id: i64 = conn.query_row("SELECT id FROM albums WHERE name = ?1", [name], |r| r.get(0))?;
+    Ok(Some(id))
+}
+
+/// переписывает жанры трека: чистит `track_genres` для него и вставляет заново.
+fn write_track_genres(
+    conn: &Connection,
+    track_id: i64,
+    genres: &[String],
+) -> Result<(), Box<dyn Error>> {
+    conn.execute("DELETE FROM track_genres WHERE track_id = ?1", [track_id])?;
+    for name in genres.iter().filter(|g| !g.is_empty()) {
+        conn.execute(
+            "INSERT INTO genres (name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
+            [name],
+        )?;
+        let genre_id: i64 =
+            conn.query_row("SELECT id FROM genres WHERE name = ?1", [name], |r| r.get(0))?;
+        conn.execute(
+            "INSERT OR IGNORE INTO track_genres (track_id, genre_id) VALUES (?1, ?2)",
+            params![track_id, genre_id],
+        )?;
+    }
+    Ok(())
 }
 
 /// метаданные для записи: сперва то, что трек уже держит, затем повторное
@@ -579,6 +744,8 @@ fn resolve_metadata(track: &TrackVirtual, path: &Path) -> Arc<TrackMetadata> {
     Arc::new(TrackMetadata {
         title,
         artist: vec!["Unknown".into()],
+        album: None,
+        genres: Vec::new(),
         params: None,
     })
 }
@@ -622,6 +789,8 @@ mod tests {
         let metadata = TrackMetadata {
             title: title.into(),
             artist: vec![artist.into()],
+            album: None,
+            genres: Vec::new(),
             params: Some(TrackMetadataParams {
                 duration_sec: 180,
                 sample_rate: 44_100,
@@ -938,5 +1107,142 @@ mod tests {
         assert_eq!(pl.len(), 2);
         assert!(pl[0].1.ends_with("1.mp3"));
         assert!(pl[1].1.ends_with("2.mp3"));
+    }
+
+    #[test]
+    fn album_and_genres_roundtrip() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        db.save_track(fixture_track(dir.path(), "a.mp3", "T", "A"))
+            .unwrap();
+        let id = only_track_id(&db);
+
+        db.set_track_album(id, Some("Nevermind")).unwrap();
+        db.set_track_genres(id, &["Grunge".into(), "Rock".into()])
+            .unwrap();
+
+        let track = &db.find_track(None, None, Some(id), None).unwrap()[0];
+        let meta = track.get_metadata().unwrap();
+        assert_eq!(meta.album.as_deref(), Some("Nevermind"));
+        assert_eq!(meta.genres, vec!["Grunge".to_string(), "Rock".to_string()]);
+
+        // очистка альбома и жанров.
+        db.set_track_album(id, None).unwrap();
+        db.set_track_genres(id, &[]).unwrap();
+        let track = &db.find_track(None, None, Some(id), None).unwrap()[0];
+        let meta = track.get_metadata().unwrap();
+        assert!(meta.album.is_none());
+        assert!(meta.genres.is_empty());
+    }
+
+    #[test]
+    fn color_label_and_invalid_roundtrip() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        db.save_track(fixture_track(dir.path(), "a.mp3", "T", "A"))
+            .unwrap();
+        let id = only_track_id(&db);
+
+        db.set_track_color(id, Some("red")).unwrap();
+        db.set_track_label(id, Some("favourite")).unwrap();
+        db.set_track_invalid(id, true).unwrap();
+
+        let track = &db.find_track(None, None, Some(id), None).unwrap()[0];
+        assert_eq!(track.color.as_deref(), Some("red"));
+        assert_eq!(track.user_label.as_deref(), Some("favourite"));
+        assert!(track.invalid);
+    }
+
+    #[test]
+    fn rescan_preserves_user_state() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        db.save_track(fixture_track(dir.path(), "a.mp3", "T", "A"))
+            .unwrap();
+        let id = only_track_id(&db);
+        db.set_track_color(id, Some("blue")).unwrap();
+        db.set_track_invalid(id, true).unwrap();
+
+        // повторный upsert того же пути (как при re-scan) не должен затирать
+        // пользовательские color/invalid.
+        db.save_track(fixture_track(dir.path(), "a.mp3", "T2", "A"))
+            .unwrap();
+        let track = &db.find_track(None, None, Some(id), None).unwrap()[0];
+        assert_eq!(track.get_metadata().unwrap().title, "T2");
+        assert_eq!(track.color.as_deref(), Some("blue"));
+        assert!(track.invalid);
+    }
+
+    #[test]
+    fn remove_track_cascades_to_playlists() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        let mut p = Playlist::from_tracks(vec![
+            fixture_track(dir.path(), "1.mp3", "One", "A"),
+            fixture_track(dir.path(), "2.mp3", "Two", "B"),
+        ]);
+        p.set_name("mix".into());
+        db.save_playlist(p).unwrap();
+
+        let id: i64 = db
+            .conn
+            .query_row("SELECT id FROM tracks WHERE title = 'One'", [], |r| r.get(0))
+            .unwrap();
+        db.remove_track(id).unwrap();
+
+        // трек ушёл и из индекса, и из плейлиста.
+        assert_eq!(db.find_track(None, None, None, None).unwrap().len(), 1);
+        assert_eq!(db.playlist_track_paths("mix").unwrap().len(), 1);
+        let links: i64 = db
+            .conn
+            .query_row("SELECT count(*) FROM playlist_tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(links, 1);
+    }
+
+    #[test]
+    fn reassign_path_dedups_and_clears_invalid() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        // исходный трек (пометим invalid) и дубликат по будущему пути.
+        db.save_track(fixture_track(dir.path(), "old.mp3", "Song", "A"))
+            .unwrap();
+        db.save_track(fixture_track(dir.path(), "new.mp3", "Song Dup", "A"))
+            .unwrap();
+        let old_id: i64 = db
+            .conn
+            .query_row("SELECT id FROM tracks WHERE title = 'Song'", [], |r| r.get(0))
+            .unwrap();
+        db.set_track_invalid(old_id, true).unwrap();
+
+        let new_path = dir.path().join("new.mp3");
+        db.reassign_path(old_id, &new_path).unwrap();
+
+        // дубликат удалён, у старой записи теперь новый путь и снят invalid.
+        let all = db.find_track(None, None, None, None).unwrap();
+        assert_eq!(all.len(), 1);
+        let track = &db.find_track(None, None, Some(old_id), None).unwrap()[0];
+        assert_eq!(track.get_path(), Some(new_path.as_path()));
+        assert!(!track.invalid);
+    }
+
+    #[test]
+    fn remove_invalid_purges_all_flagged() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        db.save_track(fixture_track(dir.path(), "1.mp3", "Keep", "A"))
+            .unwrap();
+        db.save_track(fixture_track(dir.path(), "2.mp3", "Drop", "A"))
+            .unwrap();
+        let drop_id: i64 = db
+            .conn
+            .query_row("SELECT id FROM tracks WHERE title = 'Drop'", [], |r| r.get(0))
+            .unwrap();
+        db.set_track_invalid(drop_id, true).unwrap();
+
+        assert_eq!(db.remove_invalid().unwrap(), 1);
+        let all = db.find_track(None, None, None, None).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].get_metadata().unwrap().title, "Keep");
     }
 }

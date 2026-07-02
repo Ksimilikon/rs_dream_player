@@ -18,8 +18,9 @@ pub use model::{CheckTarget, Control, PlaylistEntry, TrackInfo, Update};
 
 use model::Model;
 use tabs::{
-    Action, EditorOutcome, EditorState, MetaEditorOutcome, MetaEditorState, PlaylistsTab,
-    SettingsTab, SongTab, Tab, help_lines, render_help,
+    Action, COLOR_NAMES, EditorOutcome, EditorState, InvalidOutcome, InvalidPromptState, MetaEdit,
+    MetaEditorOutcome, MetaEditorState, PlaylistsTab, SettingsTab, SongTab, Tab, help_lines,
+    render_help,
 };
 
 /// исходные данные для старта интерфейса.
@@ -39,7 +40,7 @@ const VISIBLE_TABS: usize = 3;
 const VOL_STEP: f32 = 0.05;
 
 const HINTS: &str =
-    "Shift+H/L tabs | j/k move | Enter select | space play/pause | -/+ vol | [/] svol | n new | e edit | m meta | : cmd | ? help | q quit";
+    "Shift+H/L tabs | j/k move | Enter select | space play/pause | -/+ vol | [ and ] svol | n new | e edit | m meta | : cmd | ? help | q quit";
 
 /// запускает TUI: захватывает текущий поток до выхода пользователя.
 pub fn run(
@@ -70,6 +71,8 @@ struct App {
     editor: Option<EditorState>,
     /// активный редактор метаданных трека (Some — модальный режим).
     meta_editor: Option<MetaEditorState>,
+    /// активное меню недействительного трека (Some — модальный режим).
+    invalid_prompt: Option<InvalidPromptState>,
     /// показано ли окно справки.
     help: bool,
     /// вертикальная прокрутка окна справки.
@@ -104,6 +107,7 @@ impl App {
             status_error: false,
             editor: None,
             meta_editor: None,
+            invalid_prompt: None,
             help: false,
             help_scroll: 0,
             temp_entry: None,
@@ -144,25 +148,21 @@ impl App {
                 self.model.playlists = playlists;
                 self.refresh_temp_slot();
             }
-            Update::TrackMeta {
-                id,
-                title,
-                artists,
-                cover,
-            } => self.apply_track_meta(id, &title, &artists, &cover),
+            Update::TrackPatch(info) => self.apply_track_patch(info),
             Update::Error(msg) => self.set_error(msg),
             Update::Notice(msg) => self.set_warn(msg),
         }
     }
 
-    /// применяет изменённые метаданные трека на месте: ко всем совпадениям по
-    /// `id` в текущем списке и в предпросмотрах плейлистов.
-    fn apply_track_meta(&mut self, id: i64, title: &str, artists: &str, cover: &Option<String>) {
+    /// применяет обновлённую инфу трека на месте: ко всем совпадениям по `id` в
+    /// текущем списке и в предпросмотрах плейлистов (громкость не трогаем — она
+    /// живёт своей жизнью в проигрывателе).
+    fn apply_track_patch(&mut self, info: TrackInfo) {
         let patch = |t: &mut TrackInfo| {
-            if t.id == id {
-                t.title = title.to_string();
-                t.artists = artists.to_string();
-                t.cover = cover.clone();
+            if t.id == info.id {
+                let vol = t.volume;
+                *t = info.clone();
+                t.volume = vol;
             }
         };
         self.model.tracks.iter_mut().for_each(patch);
@@ -195,6 +195,11 @@ impl App {
         // редактор метаданных — тоже модальный.
         if self.meta_editor.is_some() {
             self.handle_meta_editor_key(key);
+            return false;
+        }
+        // меню недействительного трека — модальное.
+        if self.invalid_prompt.is_some() {
+            self.handle_invalid_prompt_key(key);
             return false;
         }
         if self.command.is_some() {
@@ -251,41 +256,100 @@ impl App {
         match editor.handle_key(key) {
             MetaEditorOutcome::None => {}
             MetaEditorOutcome::Cancel => self.meta_editor = None,
-            MetaEditorOutcome::Save {
-                id,
-                title,
-                artists,
-                filename,
-                cover,
-            } => self.finish_meta_editor(id, title, artists, filename, cover),
+            MetaEditorOutcome::Save(edit) => self.finish_meta_editor(edit),
         }
     }
 
-    /// закрывает редактор метаданных и рассылает изменения полей: пустое поле
-    /// пропускается (значение не меняется). Артисты разбираются по запятым.
-    fn finish_meta_editor(
-        &mut self,
-        id: i64,
-        title: String,
-        artists: String,
-        filename: String,
-        cover: String,
-    ) {
-        self.meta_editor = None;
-        if !title.is_empty() {
-            let _ = self.controls.send(Control::SetTitle { id, title });
+    fn handle_invalid_prompt_key(&mut self, key: KeyEvent) {
+        let Some(prompt) = self.invalid_prompt.as_mut() else {
+            return;
+        };
+        match prompt.handle_key(key) {
+            InvalidOutcome::None => {}
+            InvalidOutcome::Cancel => self.invalid_prompt = None,
+            InvalidOutcome::SetPath { id, path } => {
+                self.invalid_prompt = None;
+                let _ = self.controls.send(Control::SetPath { id, path });
+                self.set_warn("new path sent".to_string());
+            }
+            InvalidOutcome::Remove { id } => {
+                self.invalid_prompt = None;
+                let _ = self.controls.send(Control::RemoveTrack(id));
+                self.set_warn("track removed from index".to_string());
+            }
         }
-        if !artists.is_empty() {
-            let _ = self.controls.send(Control::SetArtists {
+    }
+
+    /// открыть меню действий для недействительного трека по его id.
+    fn open_invalid_prompt(&mut self, id: i64) {
+        let title = self
+            .model
+            .tracks
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.title.clone())
+            .unwrap_or_else(|| "Unknown".to_string());
+        self.invalid_prompt = Some(InvalidPromptState::new(id, title));
+    }
+
+    /// закрывает редактор метаданных и рассылает изменения полей: пустое поле
+    /// пропускается (значение не меняется). Списки разбираются по запятым.
+    fn finish_meta_editor(&mut self, edit: MetaEdit) {
+        self.meta_editor = None;
+        let id = edit.id;
+        if !edit.title.is_empty() {
+            let _ = self.controls.send(Control::SetTitle {
                 id,
-                artists: split_artists(&artists),
+                title: edit.title,
             });
         }
-        if !filename.is_empty() {
-            let _ = self.controls.send(Control::RenameFile { id, name: filename });
+        if !edit.artists.is_empty() {
+            let _ = self.controls.send(Control::SetArtists {
+                id,
+                artists: split_artists(&edit.artists),
+            });
         }
-        if !cover.is_empty() {
-            let _ = self.controls.send(Control::SetCover { id, path: cover });
+        if !edit.album.is_empty() {
+            let _ = self.controls.send(Control::SetAlbum {
+                id,
+                album: edit.album,
+            });
+        }
+        if !edit.genres.is_empty() {
+            let _ = self.controls.send(Control::SetGenres {
+                id,
+                genres: split_artists(&edit.genres),
+            });
+        }
+        if !edit.filename.is_empty() {
+            let _ = self.controls.send(Control::RenameFile {
+                id,
+                name: edit.filename,
+            });
+        }
+        if !edit.cover.is_empty() {
+            let _ = self.controls.send(Control::SetCover {
+                id,
+                path: edit.cover,
+            });
+        }
+        if !edit.color.is_empty() {
+            // валидация имени цвета до отправки.
+            if COLOR_NAMES.contains(&edit.color.to_ascii_lowercase().as_str()) {
+                let _ = self.controls.send(Control::SetColor {
+                    id,
+                    color: edit.color,
+                });
+            } else {
+                self.set_error(format!("unknown color: {}", edit.color));
+                return;
+            }
+        }
+        if !edit.label.is_empty() {
+            let _ = self.controls.send(Control::SetLabel {
+                id,
+                label: edit.label,
+            });
         }
         self.set_warn("metadata edit sent".to_string());
     }
@@ -305,7 +369,7 @@ impl App {
                 temp: true,
             });
             self.refresh_temp_slot();
-            let _ = self.controls.send(Control::PlayTemp { ids });
+            let _ = self.controls.send(Control::PlayTemp { ids, start: 0 });
             self.set_warn(format!(
                 "temporary playlist ({count} tracks) - playing, not saved to db"
             ));
@@ -409,7 +473,10 @@ impl App {
             }
             "pl" => {
                 if !arg.is_empty() {
-                    let _ = self.controls.send(Control::LoadPlaylist(arg.to_string()));
+                    let _ = self.controls.send(Control::LoadPlaylist {
+                        name: arg.to_string(),
+                        start: 0,
+                    });
                 }
             }
             "song" => {
@@ -445,8 +512,14 @@ impl App {
                     self.set_warn(format!("checking playlist: {arg}"));
                 }
             }
+            // удалить из индекса все недействительные (красные) треки.
+            "purge" => {
+                let _ = self.controls.send(Control::PurgeInvalid);
+                self.set_warn("purging invalid tracks...".into());
+            }
             // редактирование метаданных — только на вкладке SONG (индекс 1).
-            "title" | "artist" | "artists" | "filename" | "cover" | "covertag" => {
+            "title" | "artist" | "artists" | "album" | "genres" | "color" | "label"
+            | "filename" | "cover" | "covertag" | "setpath" => {
                 self.exec_song_command(head, arg);
             }
             other => match other.parse::<usize>() {
@@ -475,8 +548,19 @@ impl App {
             return;
         }
         let id = track.id;
-        if arg.is_empty() {
+        // album/genres/color/label очищаются пустым аргументом; остальным нужен
+        // непустой аргумент.
+        let clearable = matches!(head, "album" | "genres" | "color" | "label");
+        if arg.is_empty() && !clearable {
             self.status = Some(format!("usage: :{head} <value>"));
+            return;
+        }
+        // валидация имени цвета.
+        if head == "color"
+            && !arg.is_empty()
+            && !COLOR_NAMES.contains(&arg.to_ascii_lowercase().as_str())
+        {
+            self.status = Some(format!("unknown color: {arg} (try: {})", COLOR_NAMES.join("/")));
             return;
         }
         let control = match head {
@@ -487,6 +571,22 @@ impl App {
             "artist" | "artists" => Control::SetArtists {
                 id,
                 artists: split_artists(arg),
+            },
+            "album" => Control::SetAlbum {
+                id,
+                album: arg.to_string(),
+            },
+            "genres" => Control::SetGenres {
+                id,
+                genres: split_artists(arg),
+            },
+            "color" => Control::SetColor {
+                id,
+                color: arg.to_string(),
+            },
+            "label" => Control::SetLabel {
+                id,
+                label: arg.to_string(),
             },
             "filename" => Control::RenameFile {
                 id,
@@ -500,6 +600,10 @@ impl App {
                 id,
                 path: arg.to_string(),
             },
+            "setpath" => Control::SetPath {
+                id,
+                path: arg.to_string(),
+            },
             _ => return,
         };
         let _ = self.controls.send(control);
@@ -508,9 +612,9 @@ impl App {
 
     fn dispatch(&mut self, action: Action) {
         let control = match action {
-            Action::LoadPlaylist(name) => Control::LoadPlaylist(name),
-            Action::LoadPool => Control::LoadPool,
-            Action::PlayTemp(ids) => Control::PlayTemp { ids },
+            Action::LoadPlaylist { name, start } => Control::LoadPlaylist { name, start },
+            Action::LoadPool { start } => Control::LoadPool { start },
+            Action::PlayTemp { ids, start } => Control::PlayTemp { ids, start },
             Action::SelectSong(i) => Control::Select(i),
             Action::NewPlaylist => {
                 self.open_create();
@@ -522,6 +626,10 @@ impl App {
             }
             Action::EditMeta(idx) => {
                 self.open_meta_editor(idx);
+                return;
+            }
+            Action::InvalidAction(id) => {
+                self.open_invalid_prompt(id);
                 return;
             }
         };
@@ -543,8 +651,11 @@ impl App {
             track.id,
             track.title.clone(),
             track.artists.clone(),
-            String::new(),
+            track.album.clone().unwrap_or_default(),
+            track.genres.join(", "),
             track.cover.clone().unwrap_or_default(),
+            track.color.clone().unwrap_or_default(),
+            track.user_label.clone().unwrap_or_default(),
         ));
     }
 
@@ -685,6 +796,10 @@ impl App {
 
         if self.help {
             render_help(frame, frame.area(), self.help_scroll);
+        }
+        // меню недействительного трека — поверх всего.
+        if let Some(prompt) = &self.invalid_prompt {
+            prompt.render(frame, frame.area());
         }
     }
 }

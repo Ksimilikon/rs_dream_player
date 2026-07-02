@@ -27,10 +27,17 @@ const REQUIRED_SCHEMA: &[(&str, &[&str])] = &[
             "path",
             "source_type",
             "volume",
+            "album_id",
+            "color",
+            "user_label",
+            "invalid",
         ],
     ),
     ("artists", &["id", "name"]),
     ("track_artists", &["track_id", "artist_id"]),
+    ("albums", &["id", "name"]),
+    ("genres", &["id", "name"]),
+    ("track_genres", &["track_id", "genre_id"]),
     (
         "playlists",
         &["id", "name", "cover_art", "created_at", "updated_at"],
@@ -41,6 +48,11 @@ const REQUIRED_SCHEMA: &[(&str, &[&str])] = &[
 /// вся структура бд. Каждое выражение идемпотентно (`IF NOT EXISTS`), поэтому
 /// повторный прогон только дозаполняет недостающее.
 const SCHEMA_SQL: &str = "\
+CREATE TABLE IF NOT EXISTS albums (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+
 CREATE TABLE IF NOT EXISTS tracks (
     id          INTEGER PRIMARY KEY,
     hash        TEXT    NOT NULL UNIQUE,
@@ -49,7 +61,11 @@ CREATE TABLE IF NOT EXISTS tracks (
     cover_art   TEXT,
     path        TEXT    NOT NULL UNIQUE,
     source_type TEXT    NOT NULL DEFAULT 'file',
-    volume      REAL    NOT NULL DEFAULT 1.0
+    volume      REAL    NOT NULL DEFAULT 1.0,
+    album_id    INTEGER REFERENCES albums(id) ON DELETE SET NULL,
+    color       TEXT,
+    user_label  TEXT,
+    invalid     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_hash  ON tracks(hash);
 CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
@@ -63,6 +79,17 @@ CREATE TABLE IF NOT EXISTS track_artists (
     track_id  INTEGER NOT NULL REFERENCES tracks(id)  ON DELETE CASCADE,
     artist_id INTEGER NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
     PRIMARY KEY (track_id, artist_id)
+);
+
+CREATE TABLE IF NOT EXISTS genres (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS track_genres (
+    track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    genre_id INTEGER NOT NULL REFERENCES genres(id) ON DELETE CASCADE,
+    PRIMARY KEY (track_id, genre_id)
 );
 
 CREATE TABLE IF NOT EXISTS playlists (

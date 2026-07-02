@@ -52,11 +52,28 @@ pub fn music_dir() -> Option<PathBuf> {
 pub struct Config {
     /// общая (мастер-) громкость плеера, 0.0..=1.0.
     pub master_volume: f32,
+    /// каталог хранилища: где лежат бд и обложки. `None` — каталог конфига
+    /// по умолчанию (см. [`db_file`]).
+    pub storage_path: Option<PathBuf>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { master_volume: 1.0 }
+        Self {
+            master_volume: 1.0,
+            storage_path: None,
+        }
+    }
+}
+
+impl Config {
+    /// путь к файлу бд с учётом `storage_path` (если задан), иначе — каталог
+    /// конфига по умолчанию.
+    pub fn resolve_db_path(&self) -> Option<PathBuf> {
+        match &self.storage_path {
+            Some(dir) => Some(dir.join(storage::DB_FILE_NAME)),
+            None => db_file(),
+        }
     }
 }
 
@@ -118,10 +135,12 @@ mod tests {
         let path = dir.path().join("nested/config.toml");
         let cfg = Config {
             master_volume: 0.42,
+            storage_path: Some(PathBuf::from("/tmp/dream_store")),
         };
         cfg.save(&path).unwrap();
         assert!(path.exists());
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.master_volume, 0.42);
+        assert_eq!(loaded.storage_path, Some(PathBuf::from("/tmp/dream_store")));
     }
 }

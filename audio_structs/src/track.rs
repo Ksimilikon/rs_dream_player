@@ -60,10 +60,16 @@ impl Track {
         if artists.is_empty() {
             artists.push("Unknown".into());
         }
+        let album = tag.get_string(ItemKey::AlbumTitle).map(str::to_string);
+        let genres: Vec<String> = tag
+            .get_strings(ItemKey::Genre)
+            .map(str::to_string)
+            .collect();
         Ok(TrackMetadata {
             title: tag.title().map_or("Unknown".into(), |v| v.to_string()),
             artist: artists,
-            // Превращаем Option<&str> в Vec<String>
+            album,
+            genres,
             params: Some(TrackMetadataParams {
                 duration_sec: properties.duration().as_secs(),
                 sample_rate: properties.sample_rate().unwrap_or(0),

@@ -17,7 +17,7 @@ GLOBAL (any tab)
   j / k              move cursor up / down
   Space              play / pause
   - / +              master volume
-  [ / ]              current song volume
+  [  and  ]          current song volume
   :                  command mode
   :help  (or ?)      this help window
   q / Esc            quit the player
@@ -32,24 +32,41 @@ COMMANDS (after `:`)
   :new               create a playlist (editor)
   :edit <name>       edit a playlist by name
   :scan <dir>        index a directory into the library
-  :check all         verify all files exist (missing are removed)
-  :check <playlist>  verify a playlist's files (missing are removed)
+  :check all         verify all files exist (missing are flagged invalid)
+  :check <playlist>  verify a playlist's files (missing are flagged invalid)
+  :purge             delete all invalid (red) tracks from the index
   :help              this help
 
 PLAYLISTS TAB
-  Enter              load / play selected playlist
+  h / l              switch panel (playlists / songs)
+  j / k              move cursor in the focused panel
+  Enter (playlists)  load / play selected playlist
+  Enter (songs)      play the playlist starting from that song
+                     (invalid song -> set new path / delete)
   n                  create a new playlist
   e                  edit selected playlist
 
 SONG TAB
   Enter              play the song under the cursor
+                     (invalid song -> set new path / delete)
   m                  edit metadata of the song under the cursor
   metadata commands (SONG tab only, act on the current song):
   :title <text>      set the title (writes the file tag)
   :artist <a, b>     set artists, comma separated (writes the tag)
+  :album <text>      set the album (writes the tag; empty clears)
+  :genres <a, b>     set genres, comma separated (writes the tag; empty clears)
+  :color <name>      set the color mark: red/pink/orange/green/blue/cyan/purple
+                     (db only; empty clears)
+  :label <text>      set the user text label (db only; empty clears)
   :filename <name>   rename the file on disk (keeps the extension)
   :cover <path>      copy image to the config dir, store its path (db, png/jpg/gif)
   :covertag <path>   embed the image into the file's tags
+  :setpath <path>    give an invalid track a new file path
+
+SONG FIELDS (shown in lists / SONG tab)
+  color square       the color mark, drawn before the title
+  [album]            album name, at the end of the line
+  red line           an invalid track (file missing) - skipped in playback
 
 SETTINGS TAB
   (shows the config)
@@ -57,8 +74,14 @@ SETTINGS TAB
 METADATA EDITOR
   Up / Down (Tab)    move between fields
   type text          edit the focused field (empty field = keep old value)
-  Ctrl+S             save (writes tags / renames file / stores cover)
+  Ctrl+S             save (writes tags / renames file / stores cover / db marks)
   Esc                leave without saving
+
+INVALID TRACK MENU
+  type text          new file path
+  Enter              set the new path (dedups if already indexed)
+  Ctrl+D             delete the track from the index
+  Esc                cancel
 
 PLAYLIST EDITOR
   type text          playlist name, then Enter

@@ -98,6 +98,23 @@ impl PlaylistManager {
             .unwrap_or(true)
     }
 
+    /// number of tracks in the active playlist (0 if none).
+    pub fn len(&self) -> usize {
+        self.playlist.as_ref().map(|p| p.get_count()).unwrap_or(0)
+    }
+
+    /// whether the current track is flagged invalid (bad file path).
+    pub fn current_is_invalid(&self) -> bool {
+        self.get_track().map(|t| t.invalid).unwrap_or(false)
+    }
+
+    /// flags the current track as invalid in memory (db is updated separately).
+    pub fn mark_current_invalid(&mut self) {
+        if let Some(track) = self.get_track_mut() {
+            track.invalid = true;
+        }
+    }
+
     /// describes the current track for error recovery: its index id (if any),
     /// file path (if any) and title.
     pub fn current_descriptor(&self) -> Option<(Option<i64>, Option<PathBuf>, String)> {
@@ -111,21 +128,6 @@ impl PlaylistManager {
             track.get_path().map(|p| p.to_path_buf()),
             title,
         ))
-    }
-
-    /// removes the current track from the active playlist, clamping the cursor
-    /// so it points at the track that shifted into its place (or wraps to the
-    /// start). Returns the removed track.
-    pub fn remove_current(&mut self) -> Option<TrackVirtual> {
-        let cur = self.cur_track;
-        let removed = self.playlist.as_mut()?.remove_track(cur);
-        if let Some(p) = &self.playlist {
-            let count = p.get_count();
-            if count == 0 || self.cur_track >= count {
-                self.cur_track = 0;
-            }
-        }
-        removed
     }
 
     /// the currently selected track, if any.

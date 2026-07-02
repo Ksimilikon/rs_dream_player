@@ -38,7 +38,9 @@ fn main() {
     let (initial, playlists, db) = if let Some(dir) = args.playlist {
         (Some(Playlist::from_dir(&dir).unwrap()), Vec::new(), None)
     } else {
-        let db_path = config::db_file().expect("failed to resolve data directory");
+        let db_path = config
+            .resolve_db_path()
+            .expect("failed to resolve data directory");
         let storage = storage::Db::init(db_path).unwrap();
 
         // директория музыки: явный --path используем как есть, иначе системный
@@ -98,8 +100,10 @@ fn main() {
                 tui::Control::Prev => controls.prev(),
                 tui::Control::PlayPause => controls.play_pause(),
                 tui::Control::Select(i) => controls.select(i),
-                tui::Control::LoadPlaylist(name) => controls.load_playlist(name),
-                tui::Control::LoadPool => controls.load_pool(),
+                tui::Control::LoadPlaylist { name, start } => {
+                    controls.load_playlist(name, start)
+                }
+                tui::Control::LoadPool { start } => controls.load_pool(start),
                 tui::Control::SongVolume(v) => controls.set_song_volume(v),
                 tui::Control::MasterVolume(v) => {
                     controls.set_master_volume(v);
@@ -109,12 +113,19 @@ fn main() {
                     }
                 }
                 tui::Control::SavePlaylist { name, ids } => controls.save_playlist(name, ids),
-                tui::Control::PlayTemp { ids } => controls.play_temp(ids),
+                tui::Control::PlayTemp { ids, start } => controls.play_temp(ids, start),
                 tui::Control::SetTitle { id, title } => controls.set_title(id, title),
                 tui::Control::SetArtists { id, artists } => controls.set_artists(id, artists),
+                tui::Control::SetAlbum { id, album } => controls.set_album(id, album),
+                tui::Control::SetGenres { id, genres } => controls.set_genres(id, genres),
+                tui::Control::SetColor { id, color } => controls.set_color(id, color),
+                tui::Control::SetLabel { id, label } => controls.set_label(id, label),
                 tui::Control::RenameFile { id, name } => controls.rename_file(id, name),
                 tui::Control::SetCover { id, path } => controls.set_cover(id, path),
                 tui::Control::SetCoverTag { id, path } => controls.set_cover_tag(id, path),
+                tui::Control::SetPath { id, path } => controls.set_path(id, path),
+                tui::Control::RemoveTrack(id) => controls.remove_track(id),
+                tui::Control::PurgeInvalid => controls.purge_invalid(),
                 tui::Control::Scan(dir) => controls.scan(dir),
                 tui::Control::Check(target) => {
                     let playlist = match target {
@@ -154,7 +165,7 @@ fn track_infos(playlist: &Playlist) -> Vec<tui::TrackInfo> {
         .tracks()
         .iter()
         .map(|t| {
-            let (title, artists, cover) = match t.get_metadata() {
+            let (title, artists, cover, album, genres) = match t.get_metadata() {
                 Ok(m) => (
                     m.title.clone(),
                     m.artist.join(", "),
@@ -162,8 +173,10 @@ fn track_infos(playlist: &Playlist) -> Vec<tui::TrackInfo> {
                         .as_ref()
                         .and_then(|p| p.cover_art.as_ref())
                         .map(|c| c.to_string_lossy().into_owned()),
+                    m.album.clone(),
+                    m.genres.clone(),
                 ),
-                Err(_) => ("Unknown".to_string(), String::new(), None),
+                Err(_) => ("Unknown".to_string(), String::new(), None, None, Vec::new()),
             };
             tui::TrackInfo {
                 id: t.index_id().unwrap_or(-1),
@@ -171,6 +184,11 @@ fn track_infos(playlist: &Playlist) -> Vec<tui::TrackInfo> {
                 artists,
                 volume: t.volume,
                 cover,
+                album,
+                genres,
+                color: t.color.clone(),
+                user_label: t.user_label.clone(),
+                invalid: t.invalid,
             }
         })
         .collect()

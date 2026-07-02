@@ -31,13 +31,15 @@ impl Controls {
     pub fn select(&self, index: usize) {
         let _ = self.tx_manager.send(PlaylistManagerEvent::Select(index));
     }
-    /// загрузить плейлист по имени из бд.
-    pub fn load_playlist(&self, name: String) {
-        let _ = self.tx_manager.send(PlaylistManagerEvent::LoadByName(name));
+    /// загрузить плейлист по имени из бд и начать с трека `start`.
+    pub fn load_playlist(&self, name: String, start: usize) {
+        let _ = self
+            .tx_manager
+            .send(PlaylistManagerEvent::LoadByName { name, start });
     }
-    /// загрузить виртуальный плейлист со всем пулом песен.
-    pub fn load_pool(&self) {
-        let _ = self.tx_manager.send(PlaylistManagerEvent::LoadPool);
+    /// загрузить виртуальный плейлист со всем пулом песен, начать с трека `start`.
+    pub fn load_pool(&self, start: usize) {
+        let _ = self.tx_manager.send(PlaylistManagerEvent::LoadPool { start });
     }
     /// громкость текущей песни.
     pub fn set_song_volume(&self, volume: f32) {
@@ -55,9 +57,11 @@ impl Controls {
             .tx_manager
             .send(PlaylistManagerEvent::SavePlaylist { name, ids });
     }
-    /// собрать временный (несохраняемый) плейлист из id треков и проиграть.
-    pub fn play_temp(&self, ids: Vec<i64>) {
-        let _ = self.tx_manager.send(PlaylistManagerEvent::PlayTemp { ids });
+    /// собрать временный (несохраняемый) плейлист из id треков и проиграть с `start`.
+    pub fn play_temp(&self, ids: Vec<i64>, start: usize) {
+        let _ = self
+            .tx_manager
+            .send(PlaylistManagerEvent::PlayTemp { ids, start });
     }
     /// задать заголовок трека (тег файла + бд).
     pub fn set_title(&self, id: i64, title: String) {
@@ -71,11 +75,49 @@ impl Controls {
             .tx_manager
             .send(PlaylistManagerEvent::SetArtists { id, artists });
     }
+    /// задать альбом трека (тег файла + бд).
+    pub fn set_album(&self, id: i64, album: String) {
+        let _ = self
+            .tx_manager
+            .send(PlaylistManagerEvent::SetAlbum { id, album });
+    }
+    /// задать список жанров трека (тег файла + бд).
+    pub fn set_genres(&self, id: i64, genres: Vec<String>) {
+        let _ = self
+            .tx_manager
+            .send(PlaylistManagerEvent::SetGenres { id, genres });
+    }
+    /// задать цветовую метку трека (бд).
+    pub fn set_color(&self, id: i64, color: String) {
+        let _ = self
+            .tx_manager
+            .send(PlaylistManagerEvent::SetColor { id, color });
+    }
+    /// задать текстовую метку трека (бд).
+    pub fn set_label(&self, id: i64, label: String) {
+        let _ = self
+            .tx_manager
+            .send(PlaylistManagerEvent::SetLabel { id, label });
+    }
     /// переименовать файл трека на диске + обновить путь в бд.
     pub fn rename_file(&self, id: i64, name: String) {
         let _ = self
             .tx_manager
             .send(PlaylistManagerEvent::RenameFile { id, name });
+    }
+    /// присвоить недействительному треку новый путь к файлу.
+    pub fn set_path(&self, id: i64, path: String) {
+        let _ = self
+            .tx_manager
+            .send(PlaylistManagerEvent::SetPath { id, path });
+    }
+    /// удалить трек из индекса (каскадом из плейлистов).
+    pub fn remove_track(&self, id: i64) {
+        let _ = self.tx_manager.send(PlaylistManagerEvent::RemoveTrack(id));
+    }
+    /// удалить из индекса все недействительные треки.
+    pub fn purge_invalid(&self) {
+        let _ = self.tx_manager.send(PlaylistManagerEvent::PurgeInvalid);
     }
     /// скопировать обложку в каталог конфига и сохранить путь в бд.
     pub fn set_cover(&self, id: i64, path: String) {

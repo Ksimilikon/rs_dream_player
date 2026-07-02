@@ -43,11 +43,18 @@ impl Tab for SongTab {
             info_area,
         );
 
-        // заглушка под обложку (реальный рендер картинки — на будущее).
+        // заглушка под обложку (реальный рендер картинки — на будущее): в рамке
+        // показываем путь до обложки трека, если он задан в бд.
         // Квадрат подстраивается под размер области.
         let cover = square(cover_area);
         if cover.width >= 2 && cover.height >= 2 {
-            frame.render_widget(Block::bordered().title("COVER"), cover);
+            let path = cur
+                .and_then(|t| t.cover.clone())
+                .unwrap_or_else(|| "<no cover>".to_string());
+            frame.render_widget(
+                Paragraph::new(path).block(Block::bordered().title("COVER")),
+                cover,
+            );
         }
     }
 
@@ -66,6 +73,14 @@ impl Tab for SongTab {
             KeyCode::Enter => {
                 if self.cursor < model.tracks.len() {
                     Some(Action::SelectSong(self.cursor))
+                } else {
+                    None
+                }
+            }
+            // редактор метаданных трека под курсором (эксклюзив вкладки SONG).
+            KeyCode::Char('m') | KeyCode::Char('M') => {
+                if self.cursor < model.tracks.len() {
+                    Some(Action::EditMeta(self.cursor))
                 } else {
                     None
                 }

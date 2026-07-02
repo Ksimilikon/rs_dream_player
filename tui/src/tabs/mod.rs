@@ -12,12 +12,14 @@ use crate::model::{Model, TrackInfo};
 
 mod editor;
 mod help;
+mod meta_editor;
 mod playlists;
 mod settings;
 mod song;
 
 pub use editor::{EditorOutcome, EditorState};
 pub use help::{help_lines, render_help};
+pub use meta_editor::{MetaEditorOutcome, MetaEditorState};
 pub use playlists::PlaylistsTab;
 pub use settings::SettingsTab;
 pub use song::SongTab;
@@ -36,6 +38,8 @@ pub enum Action {
     NewPlaylist,
     /// открыть редактор для правки плейлиста под курсором.
     EditPlaylist(usize),
+    /// открыть редактор метаданных трека под курсором (вкладка SONG).
+    EditMeta(usize),
 }
 
 /// элементы списка песен: всегда с номерами. `playing` — индекс играющего

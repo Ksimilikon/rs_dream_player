@@ -1,4 +1,4 @@
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, path::PathBuf};
 
 use audio_structs::{playlist::Playlist, track_virtual::TrackVirtual, types::Volume};
 
@@ -53,41 +53,79 @@ impl PlaylistManager {
         Ok(())
     }
 
-    /// moves to the next track, wrapping around to the start. Unloads the
-    /// previous track's raw audio and loads the new one.
-    pub fn next(&mut self) -> Result<Option<&mut TrackVirtual>, Box<dyn Error>> {
+    /// moves the cursor to the next track (wrapping) without loading it.
+    /// Used by the error-recovery play loop, which loads separately.
+    pub fn step_next(&mut self) {
         let count = match &self.playlist {
             Some(p) if p.get_count() > 0 => p.get_count(),
-            _ => return Ok(None),
+            _ => return,
         };
         self.unload(self.cur_track);
         self.cur_track = (self.cur_track + 1) % count;
-        self.load(self.cur_track)?;
-        Ok(self.get_track_mut())
     }
 
-    /// moves to the previous track, wrapping around to the end.
-    pub fn prev(&mut self) -> Result<Option<&mut TrackVirtual>, Box<dyn Error>> {
+    /// moves the cursor to the previous track (wrapping) without loading it.
+    pub fn step_prev(&mut self) {
         let count = match &self.playlist {
             Some(p) if p.get_count() > 0 => p.get_count(),
-            _ => return Ok(None),
+            _ => return,
         };
         self.unload(self.cur_track);
         self.cur_track = (self.cur_track + count - 1) % count;
-        self.load(self.cur_track)?;
-        Ok(self.get_track_mut())
     }
 
-    /// jumps directly to track `number`.
-    pub fn select_track(&mut self, number: usize) -> Result<&TrackVirtual, Box<dyn Error>> {
+    /// moves the cursor to track `number` without loading it.
+    pub fn goto(&mut self, number: usize) -> Result<(), Box<dyn Error>> {
         let count = self.playlist.as_ref().ok_or(ErrorNoPlaylist)?.get_count();
         if number >= count {
             return Err(Box::new(ErrorTrackOutOfRange(number)));
         }
         self.unload(self.cur_track);
         self.cur_track = number;
-        self.load(self.cur_track)?;
-        Ok(self.get_track().expect("just loaded a valid index"))
+        Ok(())
+    }
+
+    /// loads metadata and raw audio for the currently selected track.
+    pub fn load_current(&mut self) -> Result<(), Box<dyn Error>> {
+        self.load(self.cur_track)
+    }
+
+    /// `true` when there's no playlist or it has no tracks.
+    pub fn is_empty(&self) -> bool {
+        self.playlist
+            .as_ref()
+            .map(|p| p.get_count() == 0)
+            .unwrap_or(true)
+    }
+
+    /// describes the current track for error recovery: its index id (if any),
+    /// file path (if any) and title.
+    pub fn current_descriptor(&self) -> Option<(Option<i64>, Option<PathBuf>, String)> {
+        let track = self.get_track()?;
+        let title = track
+            .get_metadata()
+            .map(|m| m.title.clone())
+            .unwrap_or_else(|_| "Unknown".to_string());
+        Some((
+            track.index_id(),
+            track.get_path().map(|p| p.to_path_buf()),
+            title,
+        ))
+    }
+
+    /// removes the current track from the active playlist, clamping the cursor
+    /// so it points at the track that shifted into its place (or wraps to the
+    /// start). Returns the removed track.
+    pub fn remove_current(&mut self) -> Option<TrackVirtual> {
+        let cur = self.cur_track;
+        let removed = self.playlist.as_mut()?.remove_track(cur);
+        if let Some(p) = &self.playlist {
+            let count = p.get_count();
+            if count == 0 || self.cur_track >= count {
+                self.cur_track = 0;
+            }
+        }
+        removed
     }
 
     /// the currently selected track, if any.
@@ -108,22 +146,12 @@ impl PlaylistManager {
         Ok(())
     }
 
-    /// WARN: not safe
-    pub fn load_next(&mut self) -> Result<(), Box<dyn Error>> {
-        let playlist = self.playlist.as_mut().ok_or(ErrorNoPlaylist)?;
-        let number = (self.cur_track + 1) % playlist.get_count();
-        let track = playlist.get_track_mut(number).unwrap();
-        track.load_metadata()?;
-        track.load_track()?;
-        Ok(())
-    }
-
     /// drops the raw audio for track `number` from RAM (metadata stays loaded).
     pub fn unload(&mut self, number: usize) {
-        if let Some(playlist) = self.playlist.as_mut() {
-            if let Some(track) = playlist.get_track_mut(number) {
-                track.unload_track();
-            }
+        if let Some(playlist) = self.playlist.as_mut()
+            && let Some(track) = playlist.get_track_mut(number)
+        {
+            track.unload_track();
         }
     }
 

@@ -110,6 +110,19 @@ fn main() {
                 }
                 tui::Control::SavePlaylist { name, ids } => controls.save_playlist(name, ids),
                 tui::Control::PlayTemp { ids } => controls.play_temp(ids),
+                tui::Control::SetTitle { id, title } => controls.set_title(id, title),
+                tui::Control::SetArtists { id, artists } => controls.set_artists(id, artists),
+                tui::Control::RenameFile { id, name } => controls.rename_file(id, name),
+                tui::Control::SetCover { id, path } => controls.set_cover(id, path),
+                tui::Control::SetCoverTag { id, path } => controls.set_cover_tag(id, path),
+                tui::Control::Scan(dir) => controls.scan(dir),
+                tui::Control::Check(target) => {
+                    let playlist = match target {
+                        tui::CheckTarget::All => None,
+                        tui::CheckTarget::Playlist(name) => Some(name),
+                    };
+                    controls.check(playlist);
+                }
             }
         }
     });
@@ -141,15 +154,23 @@ fn track_infos(playlist: &Playlist) -> Vec<tui::TrackInfo> {
         .tracks()
         .iter()
         .map(|t| {
-            let (title, artists) = match t.get_metadata() {
-                Ok(m) => (m.title.clone(), m.artist.join(", ")),
-                Err(_) => ("Unknown".to_string(), String::new()),
+            let (title, artists, cover) = match t.get_metadata() {
+                Ok(m) => (
+                    m.title.clone(),
+                    m.artist.join(", "),
+                    m.params
+                        .as_ref()
+                        .and_then(|p| p.cover_art.as_ref())
+                        .map(|c| c.to_string_lossy().into_owned()),
+                ),
+                Err(_) => ("Unknown".to_string(), String::new(), None),
             };
             tui::TrackInfo {
                 id: t.index_id().unwrap_or(-1),
                 title,
                 artists,
                 volume: t.volume,
+                cover,
             }
         })
         .collect()

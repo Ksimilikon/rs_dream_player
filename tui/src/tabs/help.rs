@@ -31,6 +31,9 @@ COMMANDS (after `:`)
   :<number>          select a song by number
   :new               create a playlist (editor)
   :edit <name>       edit a playlist by name
+  :scan <dir>        index a directory into the library
+  :check all         verify all files exist (missing are removed)
+  :check <playlist>  verify a playlist's files (missing are removed)
   :help              this help
 
 PLAYLISTS TAB
@@ -40,9 +43,22 @@ PLAYLISTS TAB
 
 SONG TAB
   Enter              play the song under the cursor
+  m                  edit metadata of the song under the cursor
+  metadata commands (SONG tab only, act on the current song):
+  :title <text>      set the title (writes the file tag)
+  :artist <a, b>     set artists, comma separated (writes the tag)
+  :filename <name>   rename the file on disk (keeps the extension)
+  :cover <path>      copy image to the config dir, store its path (db, png/jpg/gif)
+  :covertag <path>   embed the image into the file's tags
 
 SETTINGS TAB
   (shows the config)
+
+METADATA EDITOR
+  Up / Down (Tab)    move between fields
+  type text          edit the focused field (empty field = keep old value)
+  Ctrl+S             save (writes tags / renames file / stores cover)
+  Esc                leave without saving
 
 PLAYLIST EDITOR
   type text          playlist name, then Enter

@@ -14,12 +14,12 @@ use ratatui::{
 mod model;
 mod tabs;
 
-pub use model::{Control, PlaylistEntry, TrackInfo, Update};
+pub use model::{CheckTarget, Control, PlaylistEntry, TrackInfo, Update};
 
 use model::Model;
 use tabs::{
-    Action, EditorOutcome, EditorState, PlaylistsTab, SettingsTab, SongTab, Tab, help_lines,
-    render_help,
+    Action, EditorOutcome, EditorState, MetaEditorOutcome, MetaEditorState, PlaylistsTab,
+    SettingsTab, SongTab, Tab, help_lines, render_help,
 };
 
 /// исходные данные для старта интерфейса.
@@ -39,7 +39,7 @@ const VISIBLE_TABS: usize = 3;
 const VOL_STEP: f32 = 0.05;
 
 const HINTS: &str =
-    "Shift+H/L tabs | j/k move | Enter select | space play/pause | -/+ vol | [/] svol | n new | e edit | : cmd | ? help | q quit";
+    "Shift+H/L tabs | j/k move | Enter select | space play/pause | -/+ vol | [/] svol | n new | e edit | m meta | : cmd | ? help | q quit";
 
 /// запускает TUI: захватывает текущий поток до выхода пользователя.
 pub fn run(
@@ -64,8 +64,12 @@ struct App {
     status: Option<String>,
     /// показывать `status` жёлтым (предупреждения/итоги).
     status_warn: bool,
+    /// показывать `status` красным (ошибки: удаление трека и т.п.).
+    status_error: bool,
     /// активный редактор плейлиста (Some — модальный режим).
     editor: Option<EditorState>,
+    /// активный редактор метаданных трека (Some — модальный режим).
+    meta_editor: Option<MetaEditorState>,
     /// показано ли окно справки.
     help: bool,
     /// вертикальная прокрутка окна справки.
@@ -97,7 +101,9 @@ impl App {
             command: None,
             status: None,
             status_warn: false,
+            status_error: false,
             editor: None,
+            meta_editor: None,
             help: false,
             help_scroll: 0,
             temp_entry: None,
@@ -138,6 +144,30 @@ impl App {
                 self.model.playlists = playlists;
                 self.refresh_temp_slot();
             }
+            Update::TrackMeta {
+                id,
+                title,
+                artists,
+                cover,
+            } => self.apply_track_meta(id, &title, &artists, &cover),
+            Update::Error(msg) => self.set_error(msg),
+            Update::Notice(msg) => self.set_warn(msg),
+        }
+    }
+
+    /// применяет изменённые метаданные трека на месте: ко всем совпадениям по
+    /// `id` в текущем списке и в предпросмотрах плейлистов.
+    fn apply_track_meta(&mut self, id: i64, title: &str, artists: &str, cover: &Option<String>) {
+        let patch = |t: &mut TrackInfo| {
+            if t.id == id {
+                t.title = title.to_string();
+                t.artists = artists.to_string();
+                t.cover = cover.clone();
+            }
+        };
+        self.model.tracks.iter_mut().for_each(patch);
+        for entry in &mut self.model.playlists {
+            entry.tracks.iter_mut().for_each(patch);
         }
     }
 
@@ -162,11 +192,17 @@ impl App {
             self.handle_editor_key(key);
             return false;
         }
+        // редактор метаданных — тоже модальный.
+        if self.meta_editor.is_some() {
+            self.handle_meta_editor_key(key);
+            return false;
+        }
         if self.command.is_some() {
             return self.handle_command_key(key);
         }
         self.status = None;
         self.status_warn = false;
+        self.status_error = false;
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return true,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
@@ -206,6 +242,52 @@ impl App {
             EditorOutcome::Cancel => self.editor = None,
             EditorOutcome::Save { name, ids } => self.finish_editor(name, ids),
         }
+    }
+
+    fn handle_meta_editor_key(&mut self, key: KeyEvent) {
+        let Some(editor) = self.meta_editor.as_mut() else {
+            return;
+        };
+        match editor.handle_key(key) {
+            MetaEditorOutcome::None => {}
+            MetaEditorOutcome::Cancel => self.meta_editor = None,
+            MetaEditorOutcome::Save {
+                id,
+                title,
+                artists,
+                filename,
+                cover,
+            } => self.finish_meta_editor(id, title, artists, filename, cover),
+        }
+    }
+
+    /// закрывает редактор метаданных и рассылает изменения полей: пустое поле
+    /// пропускается (значение не меняется). Артисты разбираются по запятым.
+    fn finish_meta_editor(
+        &mut self,
+        id: i64,
+        title: String,
+        artists: String,
+        filename: String,
+        cover: String,
+    ) {
+        self.meta_editor = None;
+        if !title.is_empty() {
+            let _ = self.controls.send(Control::SetTitle { id, title });
+        }
+        if !artists.is_empty() {
+            let _ = self.controls.send(Control::SetArtists {
+                id,
+                artists: split_artists(&artists),
+            });
+        }
+        if !filename.is_empty() {
+            let _ = self.controls.send(Control::RenameFile { id, name: filename });
+        }
+        if !cover.is_empty() {
+            let _ = self.controls.send(Control::SetCover { id, path: cover });
+        }
+        self.set_warn("metadata edit sent".to_string());
     }
 
     /// завершает редактор: пустое имя ⇒ временный плейлист (играет, не в бд),
@@ -290,6 +372,7 @@ impl App {
     fn exec_command(&mut self, cmd: &str) -> bool {
         self.status = None;
         self.status_warn = false;
+        self.status_error = false;
         let cmd = cmd.trim();
         let (head, arg) = match cmd.split_once(char::is_whitespace) {
             Some((h, a)) => (h, a.trim()),
@@ -340,6 +423,32 @@ impl App {
                     let _ = self.controls.send(Control::Select(i));
                 }
             }
+            // индексация каталога и проверка наличия файлов — глобальные команды.
+            "scan" => {
+                if arg.is_empty() {
+                    self.status = Some("usage: :scan <directory>".into());
+                } else {
+                    let _ = self.controls.send(Control::Scan(arg.to_string()));
+                    self.set_warn(format!("scanning: {arg}"));
+                }
+            }
+            "check" => {
+                if arg.is_empty() {
+                    self.status = Some("usage: :check all | <playlist name>".into());
+                } else if arg.eq_ignore_ascii_case("all") {
+                    let _ = self.controls.send(Control::Check(CheckTarget::All));
+                    self.set_warn("checking whole library...".into());
+                } else {
+                    let _ = self
+                        .controls
+                        .send(Control::Check(CheckTarget::Playlist(arg.to_string())));
+                    self.set_warn(format!("checking playlist: {arg}"));
+                }
+            }
+            // редактирование метаданных — только на вкладке SONG (индекс 1).
+            "title" | "artist" | "artists" | "filename" | "cover" | "covertag" => {
+                self.exec_song_command(head, arg);
+            }
             other => match other.parse::<usize>() {
                 Ok(n) if n >= 1 && n <= self.model.tracks.len() => {
                     let _ = self.controls.send(Control::Select(n - 1));
@@ -348,6 +457,53 @@ impl App {
             },
         }
         false
+    }
+
+    /// команды правки метаданных, доступные только на вкладке SONG (индекс 1).
+    /// Действуют на трек под курсором списка (текущий индекс модели).
+    fn exec_song_command(&mut self, head: &str, arg: &str) {
+        if self.current_tab != 1 {
+            self.status = Some("available only on the SONG tab".into());
+            return;
+        }
+        let Some(track) = self.model.tracks.get(self.model.current) else {
+            self.status = Some("no track selected".into());
+            return;
+        };
+        if track.id < 0 {
+            self.status = Some("this track is not in the library".into());
+            return;
+        }
+        let id = track.id;
+        if arg.is_empty() {
+            self.status = Some(format!("usage: :{head} <value>"));
+            return;
+        }
+        let control = match head {
+            "title" => Control::SetTitle {
+                id,
+                title: arg.to_string(),
+            },
+            "artist" | "artists" => Control::SetArtists {
+                id,
+                artists: split_artists(arg),
+            },
+            "filename" => Control::RenameFile {
+                id,
+                name: arg.to_string(),
+            },
+            "cover" => Control::SetCover {
+                id,
+                path: arg.to_string(),
+            },
+            "covertag" => Control::SetCoverTag {
+                id,
+                path: arg.to_string(),
+            },
+            _ => return,
+        };
+        let _ = self.controls.send(control);
+        self.set_warn(format!("{head} edit sent"));
     }
 
     fn dispatch(&mut self, action: Action) {
@@ -364,8 +520,32 @@ impl App {
                 self.open_edit(idx);
                 return;
             }
+            Action::EditMeta(idx) => {
+                self.open_meta_editor(idx);
+                return;
+            }
         };
         let _ = self.controls.send(control);
+    }
+
+    /// открыть редактор метаданных трека по индексу в текущем списке. Треки вне
+    /// бд (id < 0) редактировать нельзя.
+    fn open_meta_editor(&mut self, idx: usize) {
+        let Some(track) = self.model.tracks.get(idx) else {
+            return;
+        };
+        if track.id < 0 {
+            self.set_warn("this track is not in the library (cannot edit)".to_string());
+            return;
+        }
+        // имя файла в TUI не хранится: поле остаётся пустым (пустое = не менять).
+        self.meta_editor = Some(MetaEditorState::new(
+            track.id,
+            track.title.clone(),
+            track.artists.clone(),
+            String::new(),
+            track.cover.clone().unwrap_or_default(),
+        ));
     }
 
     /// открыть окно справки с прокруткой от начала.
@@ -414,11 +594,23 @@ impl App {
     fn set_warn(&mut self, msg: String) {
         self.status = Some(msg);
         self.status_warn = true;
+        self.status_error = false;
+    }
+
+    fn set_error(&mut self, msg: String) {
+        self.status = Some(msg);
+        self.status_error = true;
+        self.status_warn = false;
     }
 
     fn draw(&mut self, frame: &mut Frame) {
         // редактор — на весь экран.
         if let Some(editor) = &self.editor {
+            editor.render(frame, frame.area());
+            return;
+        }
+        // редактор метаданных — тоже на весь экран.
+        if let Some(editor) = &self.meta_editor {
             editor.render(frame, frame.area());
             return;
         }
@@ -478,7 +670,9 @@ impl App {
         let (line, style) = match (&self.command, &self.status) {
             (Some(buf), _) => (format!(":{buf}"), Style::default()),
             (None, Some(s)) => {
-                let st = if self.status_warn {
+                let st = if self.status_error {
+                    Style::new().fg(Color::Red)
+                } else if self.status_warn {
                     Style::new().fg(Color::Yellow)
                 } else {
                     Style::default()
@@ -493,6 +687,15 @@ impl App {
             render_help(frame, frame.area(), self.help_scroll);
         }
     }
+}
+
+/// разбивает список артистов по запятым, отбрасывая пустые части.
+fn split_artists(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// парсит "80" → 0.8 (проценты 0..=100 в долю 0.0..=1.0).

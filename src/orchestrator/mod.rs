@@ -41,7 +41,9 @@ impl Controls {
     }
     /// громкость текущей песни.
     pub fn set_song_volume(&self, volume: f32) {
-        let _ = self.tx_manager.send(PlaylistManagerEvent::SetVolume(volume));
+        let _ = self
+            .tx_manager
+            .send(PlaylistManagerEvent::SetVolume(volume));
     }
     /// общая (мастер-) громкость.
     pub fn set_master_volume(&self, volume: f32) {
@@ -56,6 +58,46 @@ impl Controls {
     /// собрать временный (несохраняемый) плейлист из id треков и проиграть.
     pub fn play_temp(&self, ids: Vec<i64>) {
         let _ = self.tx_manager.send(PlaylistManagerEvent::PlayTemp { ids });
+    }
+    /// задать заголовок трека (тег файла + бд).
+    pub fn set_title(&self, id: i64, title: String) {
+        let _ = self
+            .tx_manager
+            .send(PlaylistManagerEvent::SetTitle { id, title });
+    }
+    /// задать список артистов трека (тег файла + бд).
+    pub fn set_artists(&self, id: i64, artists: Vec<String>) {
+        let _ = self
+            .tx_manager
+            .send(PlaylistManagerEvent::SetArtists { id, artists });
+    }
+    /// переименовать файл трека на диске + обновить путь в бд.
+    pub fn rename_file(&self, id: i64, name: String) {
+        let _ = self
+            .tx_manager
+            .send(PlaylistManagerEvent::RenameFile { id, name });
+    }
+    /// скопировать обложку в каталог конфига и сохранить путь в бд.
+    pub fn set_cover(&self, id: i64, path: String) {
+        let _ = self
+            .tx_manager
+            .send(PlaylistManagerEvent::SetCover { id, path });
+    }
+    /// встроить обложку прямо в теги файла.
+    pub fn set_cover_tag(&self, id: i64, path: String) {
+        let _ = self
+            .tx_manager
+            .send(PlaylistManagerEvent::SetCoverTag { id, path });
+    }
+    /// проиндексировать заданный каталог в бд.
+    pub fn scan(&self, dir: String) {
+        let _ = self.tx_manager.send(PlaylistManagerEvent::Scan(dir));
+    }
+    /// проверить наличие файлов: `None` — весь индекс, `Some(name)` — плейлист.
+    pub fn check(&self, playlist: Option<String>) {
+        let _ = self
+            .tx_manager
+            .send(PlaylistManagerEvent::Check { playlist });
     }
 }
 

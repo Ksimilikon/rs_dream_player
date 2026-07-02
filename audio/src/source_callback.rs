@@ -56,4 +56,13 @@ where
     fn total_duration(&self) -> Option<std::time::Duration> {
         self.inner.total_duration()
     }
+    /// делегируем перемотку внутреннему источнику. Без этого используется
+    /// дефолт трейта `Source`, который возвращает `NotSupported`, и `:seek`
+    /// молча не работает (позиция откатывается назад).
+    fn try_seek(
+        &mut self,
+        pos: std::time::Duration,
+    ) -> Result<(), rodio::source::SeekError> {
+        self.inner.try_seek(pos)
+    }
 }

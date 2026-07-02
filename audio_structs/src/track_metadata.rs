@@ -152,6 +152,22 @@ impl TrackMetadata {
         tag.save_to_path(path, WriteOptions::default())?;
         Ok(())
     }
+
+    /// extracts the embedded cover art bytes from the file's tags, if any.
+    /// Prefers the `CoverFront` picture, otherwise falls back to the first one.
+    /// Returns `None` when the file has no readable tags or no picture. This is
+    /// the canonical embedded-cover extractor used by consumers that only have
+    /// the file path (e.g. the UI cover preview, the indexer).
+    pub fn read_cover(path: &Path) -> Option<Vec<u8>> {
+        let tagged_file = Probe::open(path).ok()?.guess_file_type().ok()?.read().ok()?;
+        let tag = tagged_file
+            .primary_tag()
+            .or_else(|| tagged_file.first_tag())?;
+        let picture = tag
+            .get_picture_type(PictureType::CoverFront)
+            .or_else(|| tag.pictures().first())?;
+        Some(picture.data().to_vec())
+    }
 }
 
 /// ensures the file has a primary tag to write into, creating an empty one of
@@ -199,6 +215,33 @@ mod tests {
         assert_eq!(meta.artist, vec!["Alice".to_string(), "Bob".to_string()]);
         assert_eq!(meta.album.as_deref(), Some("Greatest Hits"));
         assert_eq!(meta.genres, vec!["Rock".to_string(), "Pop".to_string()]);
+    }
+
+    /// валидный 1×1 PNG (красный пиксель) — для проверки записи/чтения обложки.
+    const PNG_1X1: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8,
+        2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192,
+        0, 0, 3, 1, 1, 0, 201, 254, 146, 239, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+
+    #[test]
+    fn read_cover_roundtrips_embedded_picture() {
+        let src = fixture();
+        if !src.exists() {
+            eprintln!("skipping: fixture missing at {}", src.display());
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("copy.mp3");
+        fs::copy(&src, &path).unwrap();
+
+        // без обложки read_cover возвращает None.
+        assert!(TrackMetadata::read_cover(&path).is_none());
+
+        // после встраивания — читаем те же байты обратно.
+        TrackMetadata::write_cover(&path, PNG_1X1).unwrap();
+        let got = TrackMetadata::read_cover(&path).expect("cover should be present");
+        assert_eq!(got, PNG_1X1);
     }
 
     #[test]

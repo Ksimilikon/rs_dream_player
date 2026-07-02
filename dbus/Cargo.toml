@@ -3,5 +3,25 @@ name = "dbus"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[features]
+# ВНИМАНИЕ: Windows-бэкенд (SMTC через souvlaki) опирается на окно консоли
+# (`GetConsoleWindow`) и потому работает ТОЛЬКО в TUI-сборке. Он компилируется и
+# используется лишь при включённом `with_tui`; при простой сборке под Windows
+# (без флага) этот модуль и его зависимости (souvlaki/windows) не собираются, а
+# вместо них берётся пустая заглушка (`fallback`). Настоящий GUI/FFI-фронтенд
+# должен будет отдать ядру свой хендл окна и заменить этот модуль.
+with_tui = ["dep:souvlaki", "dep:windows"]
+
+# Linux: нативный MPRIS через zbus (текущая реализация, от TUI не зависит).
+[target.'cfg(target_os = "linux")'.dependencies]
 zbus = "5.16.0"
+
+# Windows: системный медиа-транспорт (SMTC) через кроссплатформенную souvlaki.
+# hwnd для консольного окна берём из windows-crate. Обе зависимости опциональны и
+# подтягиваются только фичей `with_tui` (см. выше).
+[target.'cfg(target_os = "windows")'.dependencies]
+souvlaki = { version = "0.8.3", optional = true }
+windows = { version = "0.58", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+] }

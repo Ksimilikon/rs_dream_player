@@ -124,8 +124,10 @@ fn main() {
                 tui::Control::SetCover { id, path } => controls.set_cover(id, path),
                 tui::Control::SetCoverTag { id, path } => controls.set_cover_tag(id, path),
                 tui::Control::SetPath { id, path } => controls.set_path(id, path),
+                tui::Control::RescanPath { id } => controls.rescan_path(id),
                 tui::Control::RemoveTrack(id) => controls.remove_track(id),
                 tui::Control::PurgeInvalid => controls.purge_invalid(),
+                tui::Control::Seek(secs) => controls.seek(secs),
                 tui::Control::Scan(dir) => controls.scan(dir),
                 tui::Control::Check(target) => {
                     let playlist = match target {
@@ -165,7 +167,7 @@ fn track_infos(playlist: &Playlist) -> Vec<tui::TrackInfo> {
         .tracks()
         .iter()
         .map(|t| {
-            let (title, artists, cover, album, genres) = match t.get_metadata() {
+            let (title, artists, cover, album, genres, duration) = match t.get_metadata() {
                 Ok(m) => (
                     m.title.clone(),
                     m.artist.join(", "),
@@ -175,15 +177,18 @@ fn track_infos(playlist: &Playlist) -> Vec<tui::TrackInfo> {
                         .map(|c| c.to_string_lossy().into_owned()),
                     m.album.clone(),
                     m.genres.clone(),
+                    m.params.as_ref().map(|p| p.duration_sec).unwrap_or(0),
                 ),
-                Err(_) => ("Unknown".to_string(), String::new(), None, None, Vec::new()),
+                Err(_) => ("Unknown".to_string(), String::new(), None, None, Vec::new(), 0),
             };
             tui::TrackInfo {
                 id: t.index_id().unwrap_or(-1),
                 title,
                 artists,
                 volume: t.volume,
+                duration,
                 cover,
+                path: t.get_path().map(|p| p.to_string_lossy().into_owned()),
                 album,
                 genres,
                 color: t.color.clone(),

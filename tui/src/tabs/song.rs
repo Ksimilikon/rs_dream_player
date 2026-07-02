@@ -2,17 +2,25 @@ use ratatui::{
     Frame,
     crossterm::event::{KeyCode, KeyEvent},
     layout::{Constraint, Layout, Rect},
-    widgets::{Block, Borders, List, Paragraph},
+    widgets::{Block, Borders, List, ListState, Paragraph},
 };
 
-use super::{Action, Tab, song_items, square};
+use super::{Action, Hint, Tab, song_items, square};
+use crate::images::ImageManager;
 use crate::model::Model;
 
 /// вкладка с подробностями текущего плейлиста: список песен, инфо о треке и
-/// квадратное место под обложку.
-#[derive(Default)]
+/// (если терминал поддерживает graphics-протокол) обложка трека.
 pub struct SongTab {
     cursor: usize,
+    /// показ обложек в терминале + детекция поддержки протокола.
+    images: ImageManager,
+}
+
+impl SongTab {
+    pub fn new(images: ImageManager) -> Self {
+        Self { cursor: 0, images }
+    }
 }
 
 impl Tab for SongTab {
@@ -25,10 +33,13 @@ impl Tab for SongTab {
             Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .areas(area);
 
-        frame.render_widget(
+        // прокрутка списка песен: держим курсор в поле зрения.
+        let mut list_state = ListState::default().with_selected(Some(self.cursor));
+        frame.render_stateful_widget(
             List::new(song_items(&model.tracks, Some(model.current), Some(self.cursor)))
                 .block(Block::new().borders(Borders::RIGHT).title("SONGS")),
             left,
+            &mut list_state,
         );
 
         // по центру — инфо о текущем треке + квадратное место под обложку
@@ -55,26 +66,60 @@ impl Tab for SongTab {
             info_area,
         );
 
-        // заглушка под обложку (реальный рендер картинки — на будущее): в рамке
-        // показываем путь до обложки; текстовая метка пользователя — под обложкой.
-        let [cover_box, label_area] =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(cover_area);
-        let cover = square(cover_box);
-        if cover.width >= 2 && cover.height >= 2 {
-            let path = cur
-                .and_then(|t| t.cover.clone())
-                .unwrap_or_else(|| "<no cover>".to_string());
-            frame.render_widget(
-                Paragraph::new(path).block(Block::bordered().title("COVER")),
-                cover,
-            );
-        }
+        // обложка текущего трека. Если терминал поддерживает graphics-протокол —
+        // резервируем квадрат и рисуем картинку; иначе место под изображение
+        // вообще не выделяется (схлопывается) — остаются только метка и путь.
+        // приоритет — отдельный файл обложки из индекса; иначе достаём встроенную
+        // обложку из тегов самого аудиофайла.
+        self.images.set_source(
+            cur.and_then(|t| t.cover.as_deref()),
+            cur.and_then(|t| t.path.as_deref()),
+        );
+
+        let (label_area, path_area) = if self.images.supported() {
+            let [cover_box, label_area, path_area] = Layout::vertical([
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .areas(cover_area);
+            let cover = square(cover_box);
+            if cover.width >= 2 && cover.height >= 2 {
+                if self.images.has_image() {
+                    self.images.render(frame, cover);
+                } else {
+                    // протокол есть, но у трека нет обложки — показываем слот.
+                    frame.render_widget(
+                        Paragraph::new("<no cover>").block(Block::bordered().title("COVER")),
+                        cover,
+                    );
+                }
+            }
+            (label_area, path_area)
+        } else {
+            // терминал не умеет графику: без квадрата под обложку.
+            let [label_area, path_area, _rest] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .areas(cover_area);
+            (label_area, path_area)
+        };
+
         let label = cur
             .and_then(|t| t.user_label.clone())
             .filter(|l| !l.is_empty())
             .map(|l| format!("LABEL: {l}"))
             .unwrap_or_default();
         frame.render_widget(Paragraph::new(label), label_area);
+
+        // путь к файлу трека на диске (прочерк, если неизвестен).
+        let file_path = cur
+            .and_then(|t| t.path.clone())
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| "-".to_string());
+        frame.render_widget(Paragraph::new(format!("PATH: {file_path}")), path_area);
     }
 
     fn on_key(&mut self, key: KeyEvent, model: &Model) -> Option<Action> {
@@ -105,5 +150,14 @@ impl Tab for SongTab {
             }
             _ => None,
         }
+    }
+
+    fn hints(&self) -> &'static [Hint] {
+        &[("j/k", "move"), ("Enter", "play"), ("m", "meta")]
+    }
+
+    /// новый плейлист — курсор списка песен возвращаем в начало.
+    fn on_tracks_changed(&mut self) {
+        self.cursor = 0;
     }
 }

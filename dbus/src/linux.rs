@@ -18,7 +18,7 @@ impl DBus {
     /// блокирует поток: поднимает соединение и качает обновления метаданных
     /// из `rx` в свойства, эмитя `PropertiesChanged`. Входящие команды от DE
     /// обслуживает внутренний executor zbus на своём потоке.
-    pub fn run(self) -> zbus::Result<()> {
+    pub fn run(self) -> Result<(), Box<dyn std::error::Error>> {
         let DBus { tx, rx } = self;
         // общий источник правды: пишет этот цикл, читают геттеры интерфейса.
         let data = Arc::new(Mutex::new(DBusData::default()));

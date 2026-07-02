@@ -111,6 +111,10 @@ impl Controls {
             .tx_manager
             .send(PlaylistManagerEvent::SetPath { id, path });
     }
+    /// перепроверить недействительный трек по его текущему пути.
+    pub fn rescan_path(&self, id: i64) {
+        let _ = self.tx_manager.send(PlaylistManagerEvent::RescanPath { id });
+    }
     /// удалить трек из индекса (каскадом из плейлистов).
     pub fn remove_track(&self, id: i64) {
         let _ = self.tx_manager.send(PlaylistManagerEvent::RemoveTrack(id));
@@ -134,6 +138,12 @@ impl Controls {
     /// проиндексировать заданный каталог в бд.
     pub fn scan(&self, dir: String) {
         let _ = self.tx_manager.send(PlaylistManagerEvent::Scan(dir));
+    }
+    /// перемотать текущий трек на позицию в секундах.
+    pub fn seek(&self, secs: u64) {
+        let _ = self
+            .tx_engine
+            .send(EngineEvent::Seek(std::time::Duration::from_secs(secs)));
     }
     /// проверить наличие файлов: `None` — весь индекс, `Some(name)` — плейлист.
     pub fn check(&self, playlist: Option<String>) {
@@ -176,8 +186,8 @@ impl Orchestrator {
             arc_tx_manager.clone(),
             arc_tx_engine.clone(),
         );
-        manager::spawn(rx_manager, arc_tx_engine.clone(), tx_data, tx_ui, db);
-        engine::spawn(rx_engine, arc_tx_manager.clone(), master);
+        manager::spawn(rx_manager, arc_tx_engine.clone(), tx_data, tx_ui.clone(), db);
+        engine::spawn(rx_engine, arc_tx_manager.clone(), tx_ui, master);
 
         // явный --playlist стартует сразу; в обычном режиме плеер ждёт выбора.
         if let Some(playlist) = initial {

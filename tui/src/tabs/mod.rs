@@ -21,6 +21,7 @@ mod song;
 
 pub use editor::{EditorOutcome, EditorState};
 pub use help::{help_lines, render_help};
+// hints_line/Hint используются нижней строкой подсказок в App.
 pub use invalid_prompt::{InvalidOutcome, InvalidPromptState};
 pub use meta_editor::{MetaEdit, MetaEditorOutcome, MetaEditorState};
 pub use playlists::PlaylistsTab;
@@ -69,7 +70,7 @@ pub const COLOR_NAMES: &[&str] = &[
 /// элементы списка песен: всегда с номерами. `playing` — индекс играющего
 /// трека (маркер `>`), `cursor` — индекс выделения курсором. Цветовая метка —
 /// квадратик перед названием; альбом — `[альбом]` в конце; недействительные
-/// треки целиком красные.
+/// треки целиком красные, играющий трек — зелёный.
 fn song_items(
     tracks: &[TrackInfo],
     playing: Option<usize>,
@@ -100,9 +101,11 @@ fn song_items(
             )));
 
             let mut line = Line::from(spans);
+            // недействительные треки — красным; играющий (валидный) — зелёным.
             if t.invalid {
-                // недействительные треки — красным.
                 line = line.style(Style::new().fg(Color::Red));
+            } else if Some(i) == playing {
+                line = line.style(Style::new().fg(PLAYING_GREEN));
             }
             let item = ListItem::new(line);
             if Some(i) == cursor {
@@ -112,6 +115,26 @@ fn song_items(
             }
         })
         .collect()
+}
+
+/// зелёный цвет играющего трека и подсказок-клавиш (общий акцент интерфейса).
+pub const PLAYING_GREEN: Color = Color::Rgb(70, 200, 90);
+
+/// одна подсказка: клавиша (зелёным) + её действие.
+pub type Hint = (&'static str, &'static str);
+
+/// собирает строку подсказок: клавиши зелёным, действия обычным цветом,
+/// разделитель ` | `.
+pub fn hints_line(hints: &[Hint]) -> Line<'static> {
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, (key, desc)) in hints.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" | "));
+        }
+        spans.push(Span::styled(*key, Style::new().fg(PLAYING_GREEN)));
+        spans.push(Span::raw(format!(" {desc}")));
+    }
+    Line::from(spans)
 }
 
 /// наибольший «визуальный квадрат» по центру `area`. Учитывает, что ячейка
@@ -153,4 +176,14 @@ pub trait Tab {
     fn title(&self) -> &str;
     fn render(&mut self, frame: &mut Frame, area: Rect, model: &Model);
     fn on_key(&mut self, key: KeyEvent, model: &Model) -> Option<Action>;
+    /// подсказки клавиш, специфичные для этой вкладки (показываются в нижней
+    /// строке рядом с глобальными). По умолчанию — пусто.
+    fn hints(&self) -> &'static [Hint] {
+        &[]
+    }
+
+    /// вызывается при загрузке другого плейлиста (сменился текущий список
+    /// треков). Вкладка может сбросить свой курсор, чтобы он не «завис» вне
+    /// диапазона на более коротком плейлисте. По умолчанию — ничего.
+    fn on_tracks_changed(&mut self) {}
 }

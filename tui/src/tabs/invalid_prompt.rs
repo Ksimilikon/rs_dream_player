@@ -20,6 +20,8 @@ pub enum InvalidOutcome {
     Cancel,
     /// присвоить треку новый путь.
     SetPath { id: i64, path: String },
+    /// перепроверить трек по его текущему пути (файл мог вернуться на место).
+    Rescan { id: i64 },
     /// удалить трек из индекса.
     Remove { id: i64 },
 }
@@ -46,6 +48,10 @@ impl InvalidPromptState {
         if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return InvalidOutcome::Remove { id: self.id };
         }
+        // рескан по текущему пути — Ctrl+R.
+        if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return InvalidOutcome::Rescan { id: self.id };
+        }
         match key.code {
             KeyCode::Esc => InvalidOutcome::Cancel,
             KeyCode::Enter => {
@@ -69,10 +75,10 @@ impl InvalidPromptState {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect) {
-        let popup = centered_rect(area, 70, 7);
+        let popup = centered_rect(area, 84, 7);
         frame.render_widget(Clear, popup);
         let body = format!(
-            "invalid track: {}\n\nnew path: {}_\n\nEnter: set path | Ctrl+D: delete from index | Esc: cancel",
+            "invalid track: {}\n\nnew path: {}_\n\nEnter: set path | Ctrl+R: rescan path | Ctrl+D: delete from index | Esc: cancel",
             self.title, self.path
         );
         frame.render_widget(

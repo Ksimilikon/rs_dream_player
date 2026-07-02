@@ -6,11 +6,12 @@ use std::{
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Style},
     widgets::{Paragraph, Tabs},
 };
 
+mod images;
 mod model;
 mod tabs;
 
@@ -18,9 +19,9 @@ pub use model::{CheckTarget, Control, PlaylistEntry, TrackInfo, Update};
 
 use model::Model;
 use tabs::{
-    Action, COLOR_NAMES, EditorOutcome, EditorState, InvalidOutcome, InvalidPromptState, MetaEdit,
-    MetaEditorOutcome, MetaEditorState, PlaylistsTab, SettingsTab, SongTab, Tab, help_lines,
-    render_help,
+    Action, COLOR_NAMES, EditorOutcome, EditorState, Hint, InvalidOutcome, InvalidPromptState,
+    MetaEdit, MetaEditorOutcome, MetaEditorState, PLAYING_GREEN, PlaylistsTab, SettingsTab, SongTab,
+    Tab, help_lines, hints_line, render_help,
 };
 
 /// исходные данные для старта интерфейса.
@@ -39,8 +40,23 @@ const VISIBLE_TABS: usize = 3;
 /// шаг изменения громкости клавишами.
 const VOL_STEP: f32 = 0.05;
 
-const HINTS: &str =
-    "Shift+H/L tabs | j/k move | Enter select | space play/pause | -/+ vol | [ and ] svol | n new | e edit | m meta | : cmd | ? help | q quit";
+/// максимальная мастер-громкость (100%).
+const MASTER_VOL_MAX: f32 = 1.0;
+
+/// максимальная персональная громкость трека (200%).
+const SONG_VOL_MAX: f32 = 2.0;
+
+/// глобальные подсказки клавиш, общие для всех вкладок (клавиша, действие).
+const GLOBAL_HINTS: &[Hint] = &[
+    ("Shift+H/L", "tabs"),
+    ("space", "play/pause"),
+    ("-/+", "vol"),
+    ("[/]", "svol"),
+    (":", "cmd"),
+    ("^L", "redraw"),
+    ("?", "help"),
+    ("q", "quit"),
+];
 
 /// запускает TUI: захватывает текущий поток до выхода пользователя.
 pub fn run(
@@ -79,6 +95,11 @@ struct App {
     help_scroll: u16,
     /// сессионный временный плейлист (не в бд), показывается 2-м в списке.
     temp_entry: Option<PlaylistEntry>,
+    /// запрос полной перерисовки экрана (Ctrl+L / `:redraw`) — на случай, когда
+    /// терминал «съедает» первый кадр и диффовый рендер не чинит картинку сам.
+    force_clear: bool,
+    /// текущая позиция воспроизведения в секундах (для прогресс-бара).
+    pos: u64,
     updates: Receiver<Update>,
     controls: Sender<Control>,
 }
@@ -97,7 +118,9 @@ impl App {
             model,
             tabs: vec![
                 Box::new(PlaylistsTab::default()),
-                Box::new(SongTab::default()),
+                // детекция graphics-протокола идёт уже после ratatui::init()
+                // (терминал в raw-режиме) — самое место для запроса к stdio.
+                Box::new(SongTab::new(images::ImageManager::detect())),
                 Box::new(SettingsTab),
             ],
             current_tab: 0,
@@ -111,12 +134,15 @@ impl App {
             help: false,
             help_scroll: 0,
             temp_entry: None,
+            force_clear: false,
+            pos: 0,
             updates,
             controls,
         }
     }
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
+        self.startup_resync(terminal)?;
         loop {
             // обновления состояния от оркестратора
             while let Ok(u) = self.updates.try_recv() {
@@ -125,24 +151,69 @@ impl App {
 
             terminal.draw(|frame| self.draw(frame))?;
 
-            if event::poll(Duration::from_millis(200))?
-                && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-                && self.handle_key(key)
-            {
-                return Ok(());
+            if event::poll(Duration::from_millis(200))? {
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        if self.handle_key(key) {
+                            return Ok(());
+                        }
+                    }
+                    // ресайз терминала: форсируем полную перерисовку, чтобы не
+                    // осталось артефактов от прежнего размера.
+                    Event::Resize(_, _) => self.force_clear = true,
+                    _ => {}
+                }
+            }
+
+            // запрошена полная перерисовка (Ctrl+L / `:redraw` / ресайз): затираем
+            // экран, следующий `draw` в начале цикла перерисует всё заново.
+            if self.force_clear {
+                terminal.clear()?;
+                self.force_clear = false;
             }
         }
     }
 
+    /// авто-фикс артефактов старта. В части терминалов (kitty/tty/zellij) размер,
+    /// полученный при `ratatui::init()`, оказывается устаревшим, поэтому первый
+    /// кадр «съезжает» и чинится только ручным ресайзом. Здесь мы воспроизводим то
+    /// же, что делает ручной ресайз: даём терминалу мгновение «устаканиться»,
+    /// затем принудительно сбрасываем известный размер и заставляем ratatui
+    /// пересчитать буферы под фактический размер бэкенда, после чего полностью
+    /// очищаем экран.
+    fn startup_resync(&self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
+        // короткая пауза: некоторые терминалы сообщают верный размер не сразу.
+        std::thread::sleep(Duration::from_millis(30));
+        if let Ok(size) = terminal.size()
+            && size.width > 0
+            && size.height > 0
+        {
+            // «портим» last_known_area (1×1), чтобы autoresize гарантированно
+            // сработал и сделал полный resize+clear под реальный размер.
+            let _ = terminal.resize(Rect::new(0, 0, 1, 1));
+            let _ = terminal.autoresize();
+        }
+        terminal.clear()
+    }
+
     fn apply_update(&mut self, update: Update) {
         match update {
-            Update::NowPlaying(i) => self.model.current = i,
+            // новый играющий трек — позицию прогресс-бара обнуляем.
+            Update::NowPlaying(i) => {
+                self.model.current = i;
+                self.pos = 0;
+            }
             Update::Playlist { name, tracks } => {
                 self.model.playlist_name = name;
                 self.model.tracks = tracks;
                 self.model.current = 0;
+                self.pos = 0;
                 self.current_tab = 1; // авто-переход на вкладку песни
+                // сменился список треков — вкладки сбрасывают свои курсоры,
+                // чтобы селектор не «завис» вне диапазона (напр. вкладка SONG).
+                for tab in self.tabs.iter_mut() {
+                    tab.on_tracks_changed();
+                }
             }
             Update::Playlists(playlists) => {
                 self.model.playlists = playlists;
@@ -151,6 +222,7 @@ impl App {
             Update::TrackPatch(info) => self.apply_track_patch(info),
             Update::Error(msg) => self.set_error(msg),
             Update::Notice(msg) => self.set_warn(msg),
+            Update::Position(secs) => self.pos = secs,
         }
     }
 
@@ -173,6 +245,12 @@ impl App {
 
     /// обрабатывает клавишу; возвращает `true`, если нужно выйти.
     fn handle_key(&mut self, key: KeyEvent) -> bool {
+        // Ctrl+L — принудительная полная перерисовка экрана. Работает в любом
+        // режиме (включая модальные окна и ввод команды), ничего больше не делает.
+        if key.code == KeyCode::Char('l') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.force_clear = true;
+            return false;
+        }
         // окно справки перехватывает ввод: q/Esc закрывают его (не плеер),
         // j/k прокручивают содержимое.
         if self.help {
@@ -271,6 +349,11 @@ impl App {
                 self.invalid_prompt = None;
                 let _ = self.controls.send(Control::SetPath { id, path });
                 self.set_warn("new path sent".to_string());
+            }
+            InvalidOutcome::Rescan { id } => {
+                self.invalid_prompt = None;
+                let _ = self.controls.send(Control::RescanPath { id });
+                self.set_warn("rescanning track path...".to_string());
             }
             InvalidOutcome::Remove { id } => {
                 self.invalid_prompt = None;
@@ -444,6 +527,8 @@ impl App {
         };
         match head {
             "q" | "quit" => return true,
+            // полная перерисовка экрана (дублирует Ctrl+L) — на случай артефактов.
+            "redraw" | "clear" => self.force_clear = true,
             "help" => self.open_help(),
             "new" => self.open_create(),
             "edit" => {
@@ -462,15 +547,23 @@ impl App {
                 }
             }
             "vol" => {
-                if let Some(v) = parse_percent(arg) {
+                if let Some(v) = parse_percent(arg, MASTER_VOL_MAX) {
                     self.set_master(v);
                 }
             }
             "svol" => {
-                if let Some(v) = parse_percent(arg) {
+                if let Some(v) = parse_percent(arg, SONG_VOL_MAX) {
                     self.set_song(v);
                 }
             }
+            // перемотка текущего трека на позицию в секундах (доступна везде).
+            "seek" => match arg.parse::<u64>() {
+                Ok(secs) => {
+                    let _ = self.controls.send(Control::Seek(secs));
+                    self.pos = secs; // оптимистично, движок подтвердит тиком.
+                }
+                Err(_) => self.status = Some("usage: :seek <seconds>".into()),
+            },
             "pl" => {
                 if !arg.is_empty() {
                     let _ = self.controls.send(Control::LoadPlaylist {
@@ -688,14 +781,15 @@ impl App {
         self.set_master(self.model.master_vol + delta);
     }
     fn set_master(&mut self, v: f32) {
-        self.model.master_vol = v.clamp(0.0, 1.0);
+        self.model.master_vol = v.clamp(0.0, MASTER_VOL_MAX);
         let _ = self.controls.send(Control::MasterVolume(self.model.master_vol));
     }
     fn add_song(&mut self, delta: f32) {
         self.set_song(self.model.song_vol() + delta);
     }
     fn set_song(&mut self, v: f32) {
-        let v = v.clamp(0.0, 1.0);
+        // персональная громкость трека допускает усиление до 200%.
+        let v = v.clamp(0.0, SONG_VOL_MAX);
         if let Some(t) = self.model.tracks.get_mut(self.model.current) {
             t.volume = v;
         }
@@ -729,7 +823,7 @@ impl App {
         let [tabbar, content, bottom] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(3),
+            Constraint::Length(4),
         ])
         .areas(frame.area());
 
@@ -753,8 +847,9 @@ impl App {
         // контент активной вкладки
         self.tabs[self.current_tab].render(frame, content, &self.model);
 
-        // нижний блок (независим от вкладок)
-        let [sep, status, hints] = Layout::vertical([
+        // нижний блок (независим от вкладок): разделитель, статус, прогресс, подсказки
+        let [sep, status, progress, hints] = Layout::vertical([
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -778,8 +873,31 @@ impl App {
             status,
         );
 
-        let (line, style) = match (&self.command, &self.status) {
-            (Some(buf), _) => (format!(":{buf}"), Style::default()),
+        // прогресс-бар воспроизведения: проигранное — `#`, остальное — `-`,
+        // в конце `current/total` в секундах; всё зелёным.
+        let total = self.model.tracks.get(self.model.current).map(|t| t.duration).unwrap_or(0);
+        let pos = if total > 0 { self.pos.min(total) } else { self.pos };
+        let time_str = format!(" {pos}/{total}");
+        let bar_w = (progress.width as usize).saturating_sub(time_str.len());
+        let filled = if total > 0 {
+            bar_w * (pos as usize) / (total as usize)
+        } else {
+            0
+        };
+        let bar = format!(
+            "{}{}{time_str}",
+            "#".repeat(filled),
+            "-".repeat(bar_w.saturating_sub(filled)),
+        );
+        frame.render_widget(
+            Paragraph::new(bar).style(Style::new().fg(PLAYING_GREEN)),
+            progress,
+        );
+
+        match (&self.command, &self.status) {
+            (Some(buf), _) => {
+                frame.render_widget(Paragraph::new(format!(":{buf}")), hints);
+            }
             (None, Some(s)) => {
                 let st = if self.status_error {
                     Style::new().fg(Color::Red)
@@ -788,11 +906,16 @@ impl App {
                 } else {
                     Style::default()
                 };
-                (s.clone(), st)
+                frame.render_widget(Paragraph::new(s.clone()).style(st), hints);
             }
-            (None, None) => (HINTS.to_string(), Style::default()),
-        };
-        frame.render_widget(Paragraph::new(line).style(style), hints);
+            // без сообщения — подсказки: глобальные + хоткеи активной вкладки,
+            // клавиши зелёным.
+            (None, None) => {
+                let mut all: Vec<Hint> = GLOBAL_HINTS.to_vec();
+                all.extend_from_slice(self.tabs[self.current_tab].hints());
+                frame.render_widget(Paragraph::new(hints_line(&all)), hints);
+            }
+        }
 
         if self.help {
             render_help(frame, frame.area(), self.help_scroll);
@@ -813,10 +936,11 @@ fn split_artists(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// парсит "80" → 0.8 (проценты 0..=100 в долю 0.0..=1.0).
-fn parse_percent(s: &str) -> Option<f32> {
+/// парсит "80" → 0.8 (проценты в долю), ограничивая сверху `max`
+/// (1.0 для мастера, 2.0 для персональной громкости трека).
+fn parse_percent(s: &str, max: f32) -> Option<f32> {
     s.trim()
         .parse::<f32>()
         .ok()
-        .map(|n| (n / 100.0).clamp(0.0, 1.0))
+        .map(|n| (n / 100.0).clamp(0.0, max))
 }

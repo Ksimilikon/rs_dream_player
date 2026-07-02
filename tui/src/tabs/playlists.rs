@@ -3,10 +3,10 @@ use ratatui::{
     crossterm::event::{KeyCode, KeyEvent},
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
-    widgets::{Block, Borders, List, ListItem},
+    widgets::{Block, Borders, List, ListItem, ListState},
 };
 
-use super::{Action, Tab, song_items};
+use super::{Action, Hint, Tab, song_items};
 use crate::model::Model;
 
 /// активная панель вкладки: список плейлистов слева или песни справа.
@@ -71,17 +71,23 @@ impl Tab for PlaylistsTab {
                 }
             })
             .collect();
-        frame.render_widget(
+        // прокрутка левой панели: держим курсор плейлиста в поле зрения.
+        let mut left_state = ListState::default().with_selected(Some(self.cursor));
+        frame.render_stateful_widget(
             List::new(items).block(Block::new().borders(Borders::RIGHT).title("PLAYLISTS")),
             left,
+            &mut left_state,
         );
 
         // по центру — песни выбранного плейлиста; курсор песни при фокусе справа.
         let preview = self.preview(model);
         let song_cursor = (self.focus == Focus::Right).then_some(self.song_cursor);
-        frame.render_widget(
+        // прокрутка правой панели по курсору песни (при фокусе справа).
+        let mut song_state = ListState::default().with_selected(song_cursor);
+        frame.render_stateful_widget(
             List::new(song_items(preview, None, song_cursor)).block(Block::new().title("SONGS")),
             center,
+            &mut song_state,
         );
     }
 
@@ -162,5 +168,15 @@ impl Tab for PlaylistsTab {
             },
             _ => None,
         }
+    }
+
+    fn hints(&self) -> &'static [Hint] {
+        &[
+            ("h/l", "panel"),
+            ("j/k", "move"),
+            ("Enter", "select"),
+            ("n", "new"),
+            ("e", "edit"),
+        ]
     }
 }

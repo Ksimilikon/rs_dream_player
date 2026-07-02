@@ -1,14 +1,18 @@
 use std::{
     sync::{
         Arc,
-        mpsc::{Receiver, Sender},
+        mpsc::{Receiver, RecvTimeoutError, Sender},
     },
     time::Duration,
 };
 
 use audio::AudioEngine;
+use tui::Update;
 
-use crate::orchestrator::{engine, manager::PlaylistManagerEvent};
+use crate::orchestrator::manager::PlaylistManagerEvent;
+
+/// как часто движок публикует текущую позицию воспроизведения в UI.
+const POSITION_TICK: Duration = Duration::from_millis(250);
 
 pub enum EngineEvent {
     /// сырые байты трека + его персональная громкость.
@@ -24,15 +28,17 @@ pub enum EngineEvent {
 pub fn spawn(
     rx: Receiver<EngineEvent>,
     tx_manager: Arc<Sender<PlaylistManagerEvent>>,
+    tx_ui: Sender<Update>,
     master: f32,
 ) {
-    let worker_engine = std::thread::spawn(move || {
-        handler_engine(tx_manager, master, rx);
+    std::thread::spawn(move || {
+        handler_engine(tx_manager, tx_ui, master, rx);
     });
 }
 
 fn handler_engine(
     tx_manager: Arc<Sender<PlaylistManagerEvent>>,
+    tx_ui: Sender<Update>,
     master: f32,
     rx: Receiver<EngineEvent>,
 ) {
@@ -44,30 +50,48 @@ fn handler_engine(
     }
     engine.set_master(master);
 
-    while let Ok(e) = rx.recv() {
-        match e {
-            EngineEvent::PlayPause => engine.play_pause(),
-            EngineEvent::Add(b, volume) => {
-                let tx_clone = tx_manager.clone();
-                let res = engine.load(
-                    b,
-                    volume,
-                    Some(move || {
-                        let _ = tx_clone.send(PlaylistManagerEvent::Next);
-                    }),
-                );
-                if let Err(err) = res {
-                    println!(
-                        "ERROR::orchestrator::engine::handler_engine::load bytes::{}",
-                        err
+    // ждём команду не дольше POSITION_TICK: по таймауту публикуем позицию, чтобы
+    // прогресс-бар в UI двигался во время проигрывания.
+    loop {
+        match rx.recv_timeout(POSITION_TICK) {
+            Ok(e) => match e {
+                EngineEvent::PlayPause => engine.play_pause(),
+                EngineEvent::Add(b, volume) => {
+                    let tx_clone = tx_manager.clone();
+                    let res = engine.load(
+                        b,
+                        volume,
+                        Some(move || {
+                            let _ = tx_clone.send(PlaylistManagerEvent::Next);
+                        }),
                     );
+                    if let Err(err) = res {
+                        println!(
+                            "ERROR::orchestrator::engine::handler_engine::load bytes::{}",
+                            err
+                        );
+                    }
+                }
+                EngineEvent::Seek(time) => match engine.seek(time) {
+                    // сразу отражаем новую позицию, не дожидаясь тика.
+                    Ok(()) => {
+                        let _ = tx_ui.send(Update::Position(engine.get_pos().as_secs()));
+                    }
+                    // если формат/источник не поддерживает перемотку — не молчим.
+                    Err(e) => {
+                        let _ = tx_ui.send(Update::Error(format!("seek failed: {e}")));
+                    }
+                },
+                EngineEvent::SetVolume(v) => engine.set_volume(v),
+                EngineEvent::SetMaster(v) => engine.set_master(v),
+            },
+            Err(RecvTimeoutError::Timeout) => {
+                // публикуем позицию только когда есть что играть.
+                if !engine.is_empty() {
+                    let _ = tx_ui.send(Update::Position(engine.get_pos().as_secs()));
                 }
             }
-            EngineEvent::Seek(time) => {
-                let _ = engine.seek(time);
-            }
-            EngineEvent::SetVolume(v) => engine.set_volume(v),
-            EngineEvent::SetMaster(v) => engine.set_master(v),
+            Err(RecvTimeoutError::Disconnected) => break,
         }
     }
 }

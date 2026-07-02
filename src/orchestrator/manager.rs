@@ -47,6 +47,8 @@ pub enum PlaylistManagerEvent {
     SetCoverTag { id: i64, path: String },
     /// присвоить недействительному треку новый путь к файлу.
     SetPath { id: i64, path: String },
+    /// перепроверить недействительный трек по его текущему пути.
+    RescanPath { id: i64 },
     /// удалить трек из индекса (каскадом из плейлистов).
     RemoveTrack(i64),
     /// удалить из индекса все недействительные треки.
@@ -86,7 +88,7 @@ fn push_meta(tx_data: &Sender<DBusData>, tx_ui: &Sender<Update>, manager: &Playl
 
 /// краткая инфа об одном треке для UI (с новыми полями: альбом/жанры/цвет/метка/invalid).
 fn track_info(t: &audio_structs::track_virtual::TrackVirtual) -> TrackInfo {
-    let (title, artists, cover, album, genres) = match t.get_metadata() {
+    let (title, artists, cover, album, genres, duration) = match t.get_metadata() {
         Ok(m) => (
             m.title.clone(),
             m.artist.join(", "),
@@ -96,15 +98,18 @@ fn track_info(t: &audio_structs::track_virtual::TrackVirtual) -> TrackInfo {
                 .map(|c| c.to_string_lossy().into_owned()),
             m.album.clone(),
             m.genres.clone(),
+            m.params.as_ref().map(|p| p.duration_sec).unwrap_or(0),
         ),
-        Err(_) => ("Unknown".to_string(), String::new(), None, None, Vec::new()),
+        Err(_) => ("Unknown".to_string(), String::new(), None, None, Vec::new(), 0),
     };
     TrackInfo {
         id: t.index_id().unwrap_or(-1),
         title,
         artists,
         volume: t.volume,
+        duration,
         cover,
+        path: t.get_path().map(|p| p.to_string_lossy().into_owned()),
         album,
         genres,
         color: t.color.clone(),
@@ -521,6 +526,33 @@ fn set_path(db: &Db, tx_ui: &Sender<Update>, id: i64, path: String) {
     push_track_meta(db, tx_ui, id);
 }
 
+/// перепроверяет недействительный трек по его текущему пути: если файл снова на
+/// месте — снимает пометку invalid и обновляет UI; иначе сообщает, что файла
+/// по-прежнему нет.
+fn rescan_path(db: &Db, tx_ui: &Sender<Update>, id: i64) {
+    let Some(track) = track_by_id(db, id) else {
+        let _ = tx_ui.send(Update::Error(format!("track #{id} not found in index")));
+        return;
+    };
+    let Some(path) = track.get_path().map(Path::to_path_buf) else {
+        let _ = tx_ui.send(Update::Error("track has no file path".into()));
+        return;
+    };
+    if !path.is_file() {
+        let _ = tx_ui.send(Update::Error(format!(
+            "file still missing: {}",
+            path.display()
+        )));
+        return;
+    }
+    if let Err(e) = db.set_track_invalid(id, false) {
+        let _ = tx_ui.send(Update::Error(format!("failed to update index: {e}")));
+        return;
+    }
+    let _ = tx_ui.send(Update::Notice("track restored (file found)".into()));
+    push_track_meta(db, tx_ui, id);
+}
+
 /// удаляет трек из индекса (каскадом из плейлистов) и обновляет UI.
 fn remove_track_cmd(db: &Db, tx_ui: &Sender<Update>, id: i64) {
     if let Err(e) = db.remove_track(id) {
@@ -544,16 +576,38 @@ fn purge_invalid(db: &Db, tx_ui: &Sender<Update>) {
     }
 }
 
-/// загружает и проигрывает текущий трек, пропуская недействительные (invalid) и
-/// сдвигаясь вперёд. Если файл трека пропал при загрузке — помечает его invalid
-/// (не удаляет, задача 2/3), сообщает красным и идёт дальше. Ограничено числом
-/// треков, чтобы плейлист целиком из недействительных не зациклился.
+/// направление пропуска недействительных треков в цикле восстановления.
+/// Next двигает вперёд, Prev — назад; для этого важно, чтобы при пропуске
+/// invalid-трека мы шли в ту же сторону, иначе «назад» упирается в стену
+/// (задача 2).
+#[derive(Clone, Copy, PartialEq)]
+enum Direction {
+    Forward,
+    Backward,
+}
+
+impl Direction {
+    /// сдвигает курсор менеджера в нужную сторону.
+    fn step(self, manager: &mut PlaylistManager) {
+        match self {
+            Direction::Forward => manager.step_next(),
+            Direction::Backward => manager.step_prev(),
+        }
+    }
+}
+
+/// загружает и проигрывает текущий трек, пропуская недействительные (invalid) в
+/// заданном направлении `dir`. Если файл трека пропал при загрузке — помечает его
+/// invalid (не удаляет, задача 2/3), сообщает красным и идёт дальше в том же
+/// направлении. Ограничено числом треков, чтобы плейлист целиком из
+/// недействительных не зациклился.
 fn play_current_recover(
     manager: &mut PlaylistManager,
     db: Option<&Db>,
     tx_engine: &Sender<EngineEvent>,
     tx_data: &Sender<DBusData>,
     tx_ui: &Sender<Update>,
+    dir: Direction,
 ) {
     let mut tries = manager.len();
     loop {
@@ -566,9 +620,10 @@ fn play_current_recover(
         }
         tries -= 1;
 
-        // трек уже помечен недействительным — пропускаем без попытки загрузки.
+        // трек уже помечен недействительным — пропускаем без попытки загрузки,
+        // двигаясь в текущем направлении.
         if manager.current_is_invalid() {
-            manager.step_next();
+            dir.step(manager);
             continue;
         }
         if manager.load_current().is_ok() {
@@ -593,7 +648,7 @@ fn play_current_recover(
                 if let Some(db) = db {
                     let _ = tx_ui.send(Update::Playlists(playlist_entries(db)));
                 }
-                manager.step_next();
+                dir.step(manager);
                 // повторяем цикл: ищем следующий воспроизводимый трек.
             }
             _ => {
@@ -616,11 +671,26 @@ fn handler_manager(
         match e {
             PlaylistManagerEvent::Next => {
                 manager.step_next();
-                play_current_recover(&mut manager, db.as_ref(), &tx_engine, &tx_data, &tx_ui);
+                play_current_recover(
+                    &mut manager,
+                    db.as_ref(),
+                    &tx_engine,
+                    &tx_data,
+                    &tx_ui,
+                    Direction::Forward,
+                );
             }
             PlaylistManagerEvent::Prev => {
                 manager.step_prev();
-                play_current_recover(&mut manager, db.as_ref(), &tx_engine, &tx_data, &tx_ui);
+                // назад пропускаем недействительные треки тоже назад (задача 2).
+                play_current_recover(
+                    &mut manager,
+                    db.as_ref(),
+                    &tx_engine,
+                    &tx_data,
+                    &tx_ui,
+                    Direction::Backward,
+                );
             }
             PlaylistManagerEvent::Select(number) => {
                 if let Err(err) = manager.goto(number) {
@@ -629,13 +699,27 @@ fn handler_manager(
                         err
                     );
                 } else {
-                    play_current_recover(&mut manager, db.as_ref(), &tx_engine, &tx_data, &tx_ui);
+                    play_current_recover(
+                        &mut manager,
+                        db.as_ref(),
+                        &tx_engine,
+                        &tx_data,
+                        &tx_ui,
+                        Direction::Forward,
+                    );
                 }
             }
             PlaylistManagerEvent::Playlist(p) => {
                 // стартовый плейлист: UI уже знает его треки, вкладку не переключаем.
                 let _ = manager.set_playlist(p);
-                play_current_recover(&mut manager, db.as_ref(), &tx_engine, &tx_data, &tx_ui);
+                play_current_recover(
+                    &mut manager,
+                    db.as_ref(),
+                    &tx_engine,
+                    &tx_data,
+                    &tx_ui,
+                    Direction::Forward,
+                );
             }
             PlaylistManagerEvent::LoadByName { name, start } => {
                 let Some(db_ref) = &db else {
@@ -660,6 +744,7 @@ fn handler_manager(
                             &tx_engine,
                             &tx_data,
                             &tx_ui,
+                            Direction::Forward,
                         );
                     }
                 }
@@ -687,6 +772,7 @@ fn handler_manager(
                             &tx_engine,
                             &tx_data,
                             &tx_ui,
+                            Direction::Forward,
                         );
                     }
                 }
@@ -737,7 +823,14 @@ fn handler_manager(
                 if start > 0 {
                     let _ = manager.goto(start);
                 }
-                play_current_recover(&mut manager, db.as_ref(), &tx_engine, &tx_data, &tx_ui);
+                play_current_recover(
+                    &mut manager,
+                    db.as_ref(),
+                    &tx_engine,
+                    &tx_data,
+                    &tx_ui,
+                    Direction::Forward,
+                );
             }
             // правка метаданных / индексация / проверка — требуют бд.
             PlaylistManagerEvent::SetTitle { id, title } => {
@@ -773,6 +866,11 @@ fn handler_manager(
             PlaylistManagerEvent::SetPath { id, path } => {
                 if let Some(db) = &db {
                     set_path(db, &tx_ui, id, path);
+                }
+            }
+            PlaylistManagerEvent::RescanPath { id } => {
+                if let Some(db) = &db {
+                    rescan_path(db, &tx_ui, id);
                 }
             }
             PlaylistManagerEvent::RemoveTrack(id) => {

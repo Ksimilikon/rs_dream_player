@@ -17,15 +17,17 @@ GLOBAL (any tab)
   j / k              move cursor up / down
   Space              play / pause
   - / +              master volume
-  [  and  ]          current song volume
+  [ / ]              current song volume (up to 200%)
   :                  command mode
   :help  (or ?)      this help window
+  Ctrl+L             force a full screen redraw (fixes display artifacts)
   q / Esc            quit the player
 
 COMMANDS (after `:`)
   :q  :quit          quit
   :vol N             master volume N% (0..100)
   :svol N            song volume N%
+  :seek N            jump to second N of the current track
   :pl <name>         load playlist by name
   :song <text>       select a song by title
   :<number>          select a song by number
@@ -35,6 +37,7 @@ COMMANDS (after `:`)
   :check all         verify all files exist (missing are flagged invalid)
   :check <playlist>  verify a playlist's files (missing are flagged invalid)
   :purge             delete all invalid (red) tracks from the index
+  :redraw            force a full screen redraw (same as Ctrl+L)
   :help              this help
 
 PLAYLISTS TAB
@@ -80,6 +83,7 @@ METADATA EDITOR
 INVALID TRACK MENU
   type text          new file path
   Enter              set the new path (dedups if already indexed)
+  Ctrl+R             rescan the track's current path (file came back)
   Ctrl+D             delete the track from the index
   Esc                cancel
 

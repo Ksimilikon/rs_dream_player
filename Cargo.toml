@@ -17,7 +17,9 @@ tui = { path = "tui" }
 
 [features]
 default = []
-with_tui = []
+# пробрасывает фичу в dbus: Windows-бэкенд SMTC (souvlaki) собирается только с
+# ней, т.к. опирается на окно консоли и работает лишь в TUI-сборке.
+with_tui = ["dbus/with_tui"]
 
 [dependencies]
 tokio = { version = "1.50.0", features = ["full"] }

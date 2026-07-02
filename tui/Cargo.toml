@@ -4,4 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+# извлечение встроенной обложки из тегов аудиофайла живёт в audio_structs
+# (TrackMetadata::read_cover) — переиспользуем его, а не дублируем lofty здесь.
+audio_structs = { workspace = true }
 ratatui = { version = "0.30.2", features = ["crossterm"] }
+# без default-features: отключаем `chafa-dyn` (тянет системную libchafa через
+# pkg-config). Нужен только crossterm-бэкенд; изображения декодируем сами (image).
+ratatui-image = { version = "11.0.6", default-features = false, features = [
+    "crossterm",
+] }

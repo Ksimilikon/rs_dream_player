@@ -17,11 +17,19 @@ with_tui = ["dep:souvlaki", "dep:windows"]
 zbus = "5.16.0"
 
 # Windows: системный медиа-транспорт (SMTC) через кроссплатформенную souvlaki.
-# hwnd для консольного окна берём из windows-crate. Обе зависимости опциональны и
+# Своё скрытое окно-опору для SMTC создаём через windows-crate (регистрация
+# класса, создание окна, насос сообщений). Обе зависимости опциональны и
 # подтягиваются только фичей `with_tui` (см. выше).
 [target.'cfg(target_os = "windows")'.dependencies]
 souvlaki = { version = "0.8.3", optional = true }
 windows = { version = "0.58", optional = true, features = [
     "Win32_Foundation",
-    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+    # нужен для WNDCLASSEXW (поле hbrBackground: HBRUSH) и его Default.
+    "Win32_Graphics_Gdi",
+    # свой доступ к SMTC (тот же объект, что у souvlaki) ради очистки обложки:
+    # Media — SystemMediaTransportControls/DisplayUpdater, WinRT — interop-фабрика.
+    "Media",
+    "Win32_System_WinRT",
 ] }

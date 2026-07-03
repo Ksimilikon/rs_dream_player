@@ -81,9 +81,43 @@ fn push_meta(tx_data: &Sender<DBusData>, tx_ui: &Sender<Update>, manager: &Playl
         let _ = tx_data.send(DBusData {
             title: meta.title.clone(),
             artists: meta.artist.clone(),
-            art: None,
+            art_path: resolve_cover(track, &meta),
         });
     }
+}
+
+/// приводит обложку текущего трека к пути на файл (souvlaki/MPRIS работают только
+/// с файлом/URL, не с сырыми байтами):
+///   1) обложка, заданная пользователем и сохранённая в индекс, — берём как есть;
+///   2) иначе достаём встроенную в теги файла обложку и кладём её во временный
+///      файл (частый случай — путь пользователь не задавал);
+///   3) иначе `None` — картинки нет, транспорт затрёт обложку прошлого трека.
+fn resolve_cover(
+    track: &audio_structs::track_virtual::TrackVirtual,
+    meta: &audio_structs::track_metadata::TrackMetadata,
+) -> Option<PathBuf> {
+    // (1) явно заданный пользователем файл обложки.
+    if let Some(path) = meta.params.as_ref().and_then(|p| p.cover_art.clone()) {
+        return Some(path);
+    }
+
+    // (2) встроенная обложка из тегов файла -> временный файл. Имя стабильно на
+    // трек (id либо хеш пути), чтобы у каждого трека был свой URL: MPRIS кэширует
+    // обложку по URL, и одинаковое имя мешало бы клиентам обновлять картинку.
+    let path = track.get_path()?;
+    let bytes = TrackMetadata::read_cover(path)?;
+    let stem = match track.index_id() {
+        Some(id) => id.to_string(),
+        None => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            path.hash(&mut h);
+            format!("p{}", h.finish())
+        }
+    };
+    let dir = std::env::temp_dir().join("dream_player_covers");
+    // save_cover_art заодно валидирует формат (png/jpg/gif) — как и для (1).
+    cover_art::save_cover_art(&bytes, &dir, &stem).ok()
 }
 
 /// краткая инфа об одном треке для UI (с новыми полями: альбом/жанры/цвет/метка/invalid).

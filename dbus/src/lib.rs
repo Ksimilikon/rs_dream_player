@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 
 pub mod traits;
@@ -42,7 +43,11 @@ pub struct DBus {
 pub struct DBusData {
     pub title: String,
     pub artists: Vec<String>,
-    pub art: Option<Vec<u8>>,
+    /// путь к файлу обложки на диске (covers/<id>.<ext>), если у трека она есть.
+    /// Передаём именно путь, а не байты: обложка уже лежит файлом, а `file://`-URL
+    /// напрямую годится и для MPRIS (linux), и для SMTC (windows). `None` — у трека
+    /// обложки нет, тогда картинку не шлём, но обложку прошлого трека затираем.
+    pub art_path: Option<PathBuf>,
 }
 
 impl DBus {

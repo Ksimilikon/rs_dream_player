@@ -1,6 +1,5 @@
 #![cfg(target_os = "linux")]
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
 
@@ -160,10 +159,14 @@ impl DBusPlayer {
         );
         m.insert("xesam:title".to_string(), Value::from(data.title.clone()));
         m.insert("xesam:artist".to_string(), Value::from(data.artists.clone()));
-        if let Some(bytes) = &data.art {
-            if let Some(url) = write_art_tmp(bytes) {
-                m.insert("mpris:artUrl".to_string(), Value::from(url));
-            }
+        // обложку отдаём как file://-URL прямо на файл covers/<id>.<ext>. Если у
+        // трека обложки нет, ключ не добавляем — map пересобирается на каждый
+        // `metadata_changed`, поэтому обложка прошлого трека затирается сама.
+        if let Some(path) = &data.art_path {
+            m.insert(
+                "mpris:artUrl".to_string(),
+                Value::from(format!("file://{}", path.display())),
+            );
         }
 
         m
@@ -197,13 +200,4 @@ impl DBusPlayer {
     fn can_go_previous(&self) -> bool {
         true
     }
-}
-
-/// MPRIS принимает обложку только как URL, поэтому сырые байты пишем во
-/// временный файл и отдаём `file://`-ссылку.
-fn write_art_tmp(bytes: &[u8]) -> Option<String> {
-    let path = std::env::temp_dir().join("dream_player_art");
-    let mut f = std::fs::File::create(&path).ok()?;
-    f.write_all(bytes).ok()?;
-    Some(format!("file://{}", path.display()))
 }

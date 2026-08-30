@@ -13,12 +13,13 @@ mod traits;
 #[derive(clap::Parser, Debug)]
 #[command(version, about = "cli for music player core")]
 struct Args {
-    /// дефолтная директория музыки для индексации. Без аргумента берётся
-    /// системный каталог музыки (~/Music).
+    /// flag: default dir for local music storage in fs
     #[arg(short, long, value_name = "Dir")]
     path: Option<PathBuf>,
-    /// директория, из которой собрать плейлист и сразу проиграть его как
-    /// дефолтный. Индексация в бд при этом не выполняется.
+
+    /// flag: playlist is collected from music in target dir
+    /// DB isnt availible
+    /// not indexing ot DB
     #[arg(long, value_name = "Dir")]
     playlist: Option<PathBuf>,
 }
@@ -26,15 +27,14 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    // конфиг приложения (на ПК = ~/.config/dream_player/config.toml)
+    // user config, different for different OS
     let mut config = match config::config_file() {
         Some(p) => config::Config::load(&p).unwrap_or_default(),
         None => config::Config::default(),
     };
 
-    // источник: --playlist (из папки, без бд) проигрывается сразу; обычный режим
-    // индексирует каталог и предлагает выбрать плейлист из бд (без авто-старта).
-    // `playlists` — все плейлисты бд с их треками (для левой панели и предпросмотра).
+    // TODO: refactor
+    // handle flag: --playlist
     let (initial, playlists, db) = if let Some(dir) = args.playlist {
         (Some(Playlist::from_dir(&dir).unwrap()), Vec::new(), None)
     } else {
@@ -65,20 +65,27 @@ fn main() {
             pool: true,
             temp: false,
         }];
-        entries.extend(storage.list_playlists().unwrap_or_default().iter().map(|p| {
-            tui::PlaylistEntry {
-                name: p.get_name().unwrap_or_else(|| "---".to_string()),
-                tracks: track_infos(p),
-                pool: false,
-                temp: false,
-            }
-        }));
+        entries.extend(
+            storage
+                .list_playlists()
+                .unwrap_or_default()
+                .iter()
+                .map(|p| tui::PlaylistEntry {
+                    name: p.get_name().unwrap_or_else(|| "---".to_string()),
+                    tracks: track_infos(p),
+                    pool: false,
+                    temp: false,
+                }),
+        );
         (None, entries, Some(storage))
     };
 
     // стартовое состояние «играющего» плейлиста — только для --playlist
     let (playlist_name, tracks) = match &initial {
-        Some(p) => (p.get_name().unwrap_or_else(|| "---".to_string()), track_infos(p)),
+        Some(p) => (
+            p.get_name().unwrap_or_else(|| "---".to_string()),
+            track_infos(p),
+        ),
         None => ("---".to_string(), Vec::new()),
     };
 
@@ -100,9 +107,7 @@ fn main() {
                 tui::Control::Prev => controls.prev(),
                 tui::Control::PlayPause => controls.play_pause(),
                 tui::Control::Select(i) => controls.select(i),
-                tui::Control::LoadPlaylist { name, start } => {
-                    controls.load_playlist(name, start)
-                }
+                tui::Control::LoadPlaylist { name, start } => controls.load_playlist(name, start),
                 tui::Control::LoadPool { start } => controls.load_pool(start),
                 tui::Control::SongVolume(v) => controls.set_song_volume(v),
                 tui::Control::MasterVolume(v) => {
@@ -179,7 +184,14 @@ fn track_infos(playlist: &Playlist) -> Vec<tui::TrackInfo> {
                     m.genres.clone(),
                     m.params.as_ref().map(|p| p.duration_sec).unwrap_or(0),
                 ),
-                Err(_) => ("Unknown".to_string(), String::new(), None, None, Vec::new(), 0),
+                Err(_) => (
+                    "Unknown".to_string(),
+                    String::new(),
+                    None,
+                    None,
+                    Vec::new(),
+                    0,
+                ),
             };
             tui::TrackInfo {
                 id: t.index_id().unwrap_or(-1),
@@ -255,4 +267,3 @@ fn prompt_yes_no(question: &str) -> bool {
     }
     matches!(input.trim(), "y" | "Y")
 }
-

@@ -4,4 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+core = { workspace = true }
+audio_structs = { workspace = true }
+
 libloading = "0.9.0"

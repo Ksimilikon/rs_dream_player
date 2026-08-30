@@ -48,7 +48,7 @@ fn handler_engine(
         Ok(r) => engine = r,
         Err(err) => panic!("engine cant started::ERROR::{}", err),
     }
-    engine.set_master(master);
+    engine.set_volume_master(master);
 
     // ждём команду не дольше POSITION_TICK: по таймауту публикуем позицию, чтобы
     // прогресс-бар в UI двигался во время проигрывания.
@@ -82,8 +82,8 @@ fn handler_engine(
                         let _ = tx_ui.send(Update::Error(format!("seek failed: {e}")));
                     }
                 },
-                EngineEvent::SetVolume(v) => engine.set_volume(v),
-                EngineEvent::SetMaster(v) => engine.set_master(v),
+                EngineEvent::SetVolume(v) => engine.set_volume_track(v),
+                EngineEvent::SetMaster(v) => engine.set_volume_master(v),
             },
             Err(RecvTimeoutError::Timeout) => {
                 // публикуем позицию только когда есть что играть.

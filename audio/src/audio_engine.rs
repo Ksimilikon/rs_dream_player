@@ -2,6 +2,7 @@ use std::{error::Error, io::Cursor, time::Duration};
 
 use rodio::{
     Decoder, Player as RodioPlayer,
+    source::SeekError,
     stream::{DeviceSinkBuilder, MixerDeviceSink},
 };
 
@@ -13,19 +14,16 @@ use crate::source_callback::SourceCallback;
 pub struct AudioEngine {
     _device: MixerDeviceSink,
     player: RodioPlayer,
-    /// общая громкость (множитель ко всем трекам), 0.0..
-    master: f32,
-    /// громкость текущего трека (без учёта мастера).
-    current_volume: f32,
+    master_volume: f32,
+    track_volume: f32,
 }
 
 impl AudioEngine {
-    /// stops whatever is currently playing and queues `data` for playback.
-    /// arg: volume - volume from music
+    /// stop and clear any in player, and load new data
     pub fn load<F>(
         &mut self,
         data: Vec<u8>,
-        volume: f32,
+        volume_track: f32,
         f: Option<F>,
     ) -> Result<(), Box<dyn Error>>
     where
@@ -34,8 +32,8 @@ impl AudioEngine {
         let decoder = Decoder::new(Cursor::new(data))?;
 
         self.player.stop();
-        self.current_volume = volume;
-        self.player.set_volume(volume * self.master);
+        self.track_volume = volume_track;
+        self.player.set_volume(volume_track * self.master_volume);
         match f {
             Some(cb) => self
                 .player
@@ -54,8 +52,8 @@ impl AudioEngine {
         Ok(Self {
             _device: device,
             player,
-            master: 1.0,
-            current_volume: 1.0,
+            master_volume: 1.0,
+            track_volume: 1.0,
         })
     }
 
@@ -81,7 +79,7 @@ impl AudioEngine {
         self.player.stop();
     }
 
-    pub fn seek(&mut self, pos: Duration) -> Result<(), Box<dyn Error>> {
+    pub fn seek(&mut self, pos: Duration) -> Result<(), SeekError> {
         self.player.try_seek(pos)?;
         Ok(())
     }
@@ -92,17 +90,19 @@ impl AudioEngine {
 
     /// volume for current track
     /// `volume * master`.
-    pub fn set_volume(&mut self, volume: f32) {
-        self.current_volume = volume;
-        self.player.set_volume(volume * self.master);
+    pub fn set_volume_track(&mut self, volume_track: f32) {
+        self.track_volume = volume_track;
+        self.player.set_volume(volume_track * self.master_volume);
     }
 
     /// general volume
-    pub fn set_master(&mut self, master: f32) {
-        self.master = master;
-        self.player.set_volume(self.current_volume * self.master);
+    pub fn set_volume_master(&mut self, volume: f32) {
+        self.master_volume = volume;
+        self.player
+            .set_volume(self.track_volume * self.master_volume);
     }
 
+    /// return position seek
     pub fn get_pos(&self) -> Duration {
         self.player.get_pos()
     }
@@ -114,5 +114,13 @@ impl AudioEngine {
 
     pub fn is_pause(&self) -> bool {
         self.player.is_paused()
+    }
+
+    pub fn get_volume_master(&self) -> f32 {
+        self.master_volume
+    }
+
+    pub fn get_volume_track(&self) -> f32 {
+        self.track_volume
     }
 }

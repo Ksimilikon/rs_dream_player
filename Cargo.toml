@@ -4,7 +4,16 @@ version = "0.1.1"
 edition = "2024"
 
 [workspace]
-members = ["audio", "api", "audio_structs", "dbus", "storage", "tui", "notify_hub"]
+members = [
+  "audio",
+  "api",
+  "audio_structs",
+  "dbus",
+  "storage",
+  "tui",
+  "notify_hub",
+  "core",
+]
 resolver = "2"
 
 [workspace.dependencies]
@@ -14,6 +23,7 @@ audio_structs = { path = "audio_structs" }
 dbus = { path = "dbus" }
 storage = { path = "storage" }
 tui = { path = "tui" }
+core = { path = "core" }
 
 [features]
 default = []

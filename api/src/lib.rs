@@ -1,97 +1,44 @@
-use std::{path::PathBuf, sync::Arc, thread};
+use core::{Core, dirs::Dirs};
+use std::{
+    error::Error,
+    ffi::{CStr, OsStr, c_char},
+    os::unix::ffi::OsStrExt,
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+};
 
-use libloading::{Library, Symbol};
-pub mod bridge;
+pub mod idx;
+pub mod mem;
 pub mod player;
-pub mod playlist;
 
-// TODO: need const path for dir with mods
-// and special path for android/ios (other private systems)
+static GLOBAL_STATE: OnceLock<Mutex<Core>> = OnceLock::new();
 
-extern "C" fn on_mod_close() {
-    println!("[Core] Модуль сообщил о закрытии окна.");
-}
-
-#[derive(Debug)]
-pub enum ModStatus {
-    Running,
-    Failed(String),
-}
-
-#[derive(Debug)]
-pub struct Mod {
-    pub name: String,
-    pub path: PathBuf,
-    pub status: ModStatus,
-    pub lib: Option<Arc<Library>>,
-}
-
-#[derive(Debug)]
-pub struct ModManager {
-    pub mods: Vec<Mod>,
-}
-
-impl ModManager {
-    pub fn new() -> Self {
-        Self { mods: Vec::new() }
-    }
-
-    pub fn load_mods(&mut self, mods_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let path = std::env::current_dir()?.join(mods_dir);
-        if !path.exists() {
-            std::fs::create_dir_all(&path)?;
+pub(crate) fn ptr_to_path(ptr: *const c_char) -> Result<PathBuf, Box<dyn Error>> {
+    unsafe {
+        if ptr.is_null() {
+            return Err("FFI::null pointer for string".into());
         }
-
-        let entries = std::fs::read_dir(&path)?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() && is_library(&path) {
-                let mod_name = path.file_stem().unwrap().to_string_lossy().into_owned();
-
-                match self.spawn_mod(path.clone()) {
-                    Ok(lib_arc) => {
-                        self.mods.push(Mod {
-                            name: mod_name,
-                            path,
-                            status: ModStatus::Running,
-                            lib: Some(lib_arc),
-                        });
-                    }
-                    Err(e) => {
-                        self.mods.push(Mod {
-                            name: mod_name,
-                            path,
-                            status: ModStatus::Failed(e.to_string()),
-                            lib: None,
-                        });
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn spawn_mod(&self, path: PathBuf) -> Result<Arc<Library>, Box<dyn std::error::Error>> {
-        unsafe {
-            let lib = Arc::new(Library::new(&path)?);
-            let lib_for_thread = Arc::clone(&lib);
-
-            type LaunchFn = unsafe extern "C" fn(extern "C" fn());
-            let launch_symbol: Symbol<LaunchFn> = lib.get(b"launch")?;
-            let launch_ptr = *launch_symbol;
-
-            thread::spawn(move || {
-                let _keep_alive = lib_for_thread;
-                launch_ptr(on_mod_close);
-                println!("[Core] {} is closed", &path.to_string_lossy());
-            });
-
-            Ok(lib)
-        }
+        let c_str = CStr::from_ptr(ptr);
+        let bytes = c_str.to_bytes();
+        let os_str = OsStr::from_bytes(bytes);
+        let path = PathBuf::from(os_str);
+        Ok(path)
     }
 }
 
-fn is_library(path: &PathBuf) -> bool {
-    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-    ext == "so" || ext == "dll" || ext == "dylib"
+#[unsafe(no_mangle)]
+pub extern "C" fn init(
+    cache_dir: *const c_char,
+    config_dir: *const c_char,
+    data_dir: *const c_char,
+    music_dir: *const c_char,
+    need_db: bool,
+) {
+    let dirs = Dirs {
+        cache: ptr_to_path(cache_dir).unwrap(),
+        config: ptr_to_path(config_dir).unwrap(),
+        data: ptr_to_path(data_dir).unwrap(),
+        music_dir: ptr_to_path(music_dir).unwrap(),
+    };
+    let _ = GLOBAL_STATE.set(Mutex::new(Core::new(dirs, need_db)));
 }

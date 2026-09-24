@@ -122,4 +122,7 @@ impl Playlist {
     pub fn get_updated_at(&self) -> Option<u64> {
         self.updated_at
     }
+    pub fn get_tracks(&self) -> &Vec<TrackVirtual> {
+        self.tracks.as_ref()
+    }
 }

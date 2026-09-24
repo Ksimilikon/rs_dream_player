@@ -8,18 +8,18 @@ use super::GLOBAL_STATE;
 pub extern "C" fn engine_add_track(id_track: i64) {
     let mut guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
     let mut track: Option<TrackVirtual> = None;
-    // if let Some(db) = guard.get_db()
-    //     && let Ok(tracks) = db.find_track(None, None, Some(id_track), None)
-    //     && tracks.len() != 0
-    // {
-    //     track = Some(tracks.into_iter().next().unwrap());
-    // }
-    // if let Some(t) = track.as_mut() {
-    //     t.load_track();
-    //     guard
-    //         .get_engine_mut()
-    //         .load(t.take_track().unwrap(), t.volume, None);
-    // }
+    if let Some(db) = guard.get_db()
+        && let Ok(tracks) = db.find_track(None, None, Some(id_track), None)
+        && !tracks.is_empty()
+    {
+        track = Some(tracks.into_iter().next().unwrap());
+    }
+    if let Some(t) = track.as_mut() {
+        let _ = t.load_track();
+        let _ = guard
+            .get_engine_mut()
+            .load(t.take_track().unwrap(), t.volume, None::<fn()>);
+    }
 }
 // pub extern "C" fn engine_add_track_bytes()
 #[unsafe(no_mangle)]

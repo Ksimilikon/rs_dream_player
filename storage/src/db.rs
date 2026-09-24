@@ -1,3 +1,7 @@
+//! NOTATION
+//! save_*() -> saving or updating new element
+//! get_*() -> get element(s)
+
 use std::{
     error::Error,
     path::{Path, PathBuf},
@@ -417,11 +421,9 @@ impl Db {
         // если новым путём уже владеет другая запись — удаляем её.
         let dup: Option<i64> = self
             .conn
-            .query_row(
-                "SELECT id FROM tracks WHERE path = ?1",
-                [&path_s],
-                |r| r.get(0),
-            )
+            .query_row("SELECT id FROM tracks WHERE path = ?1", [&path_s], |r| {
+                r.get(0)
+            })
             .ok();
         if let Some(dup_id) = dup
             && dup_id != id
@@ -439,7 +441,9 @@ impl Db {
     /// (каскадом из плейлистов). Возвращает количество удалённых.
     pub fn remove_invalid(&self) -> Result<usize, Box<dyn Error>> {
         let ids: Vec<i64> = {
-            let mut stmt = self.conn.prepare("SELECT id FROM tracks WHERE invalid = 1")?;
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id FROM tracks WHERE invalid = 1")?;
             stmt.query_map([], |r| r.get::<_, i64>(0))?
                 .collect::<Result<Vec<_>, _>>()?
         };
@@ -461,10 +465,7 @@ impl Db {
     }
 
     /// пары (id, path) треков конкретного плейлиста по его имени.
-    pub fn playlist_track_paths(
-        &self,
-        name: &str,
-    ) -> Result<Vec<(i64, PathBuf)>, Box<dyn Error>> {
+    pub fn playlist_track_paths(&self, name: &str) -> Result<Vec<(i64, PathBuf)>, Box<dyn Error>> {
         let mut stmt = self.conn.prepare(
             "SELECT t.id, t.path FROM playlist_tracks pt \
              JOIN tracks t ON t.hash = pt.song_hash \
@@ -701,7 +702,9 @@ fn upsert_album(conn: &Connection, album: Option<&str>) -> Result<Option<i64>, B
         "INSERT INTO albums (name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
         [name],
     )?;
-    let id: i64 = conn.query_row("SELECT id FROM albums WHERE name = ?1", [name], |r| r.get(0))?;
+    let id: i64 = conn.query_row("SELECT id FROM albums WHERE name = ?1", [name], |r| {
+        r.get(0)
+    })?;
     Ok(Some(id))
 }
 
@@ -718,7 +721,9 @@ fn write_track_genres(
             [name],
         )?;
         let genre_id: i64 =
-            conn.query_row("SELECT id FROM genres WHERE name = ?1", [name], |r| r.get(0))?;
+            conn.query_row("SELECT id FROM genres WHERE name = ?1", [name], |r| {
+                r.get(0)
+            })?;
         conn.execute(
             "INSERT OR IGNORE INTO track_genres (track_id, genre_id) VALUES (?1, ?2)",
             params![track_id, genre_id],
@@ -1186,7 +1191,9 @@ mod tests {
 
         let id: i64 = db
             .conn
-            .query_row("SELECT id FROM tracks WHERE title = 'One'", [], |r| r.get(0))
+            .query_row("SELECT id FROM tracks WHERE title = 'One'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         db.remove_track(id).unwrap();
 
@@ -1211,7 +1218,9 @@ mod tests {
             .unwrap();
         let old_id: i64 = db
             .conn
-            .query_row("SELECT id FROM tracks WHERE title = 'Song'", [], |r| r.get(0))
+            .query_row("SELECT id FROM tracks WHERE title = 'Song'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         db.set_track_invalid(old_id, true).unwrap();
 
@@ -1236,7 +1245,9 @@ mod tests {
             .unwrap();
         let drop_id: i64 = db
             .conn
-            .query_row("SELECT id FROM tracks WHERE title = 'Drop'", [], |r| r.get(0))
+            .query_row("SELECT id FROM tracks WHERE title = 'Drop'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         db.set_track_invalid(drop_id, true).unwrap();
 

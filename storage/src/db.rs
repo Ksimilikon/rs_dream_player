@@ -102,6 +102,7 @@ impl Db {
                 sample_rate: 0,
                 bitrate: 0,
                 cover_art: row.cover_art.map(PathBuf::from),
+                listen_count: 0,
             }),
         };
         let mut track = TrackVirtual::new(row.id, PathBuf::from(row.path), metadata);
@@ -801,6 +802,7 @@ mod tests {
                 sample_rate: 44_100,
                 bitrate: 320,
                 cover_art: None,
+                listen_count: 0,
             }),
         };
         TrackVirtual::new(0, path, metadata)

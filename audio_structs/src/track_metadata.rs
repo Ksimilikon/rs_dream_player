@@ -35,6 +35,8 @@ pub struct TrackMetadataParams {
     /// path to a cover art file on disk (png/jpg/gif), extracted and validated
     /// by the indexer. `None` if the track has no (valid) cover art.
     pub cover_art: Option<PathBuf>,
+    /// NOTE: no impl in db
+    pub listen_count: i64,
 }
 
 impl TrackMetadata {
@@ -81,6 +83,7 @@ impl TrackMetadata {
                 sample_rate: properties.sample_rate().unwrap_or(0),
                 bitrate: properties.audio_bitrate().unwrap_or(0),
                 cover_art: None,
+                listen_count: 0,
             }),
         })
     }
@@ -159,7 +162,12 @@ impl TrackMetadata {
     /// the canonical embedded-cover extractor used by consumers that only have
     /// the file path (e.g. the UI cover preview, the indexer).
     pub fn read_cover(path: &Path) -> Option<Vec<u8>> {
-        let tagged_file = Probe::open(path).ok()?.guess_file_type().ok()?.read().ok()?;
+        let tagged_file = Probe::open(path)
+            .ok()?
+            .guess_file_type()
+            .ok()?
+            .read()
+            .ok()?;
         let tag = tagged_file
             .primary_tag()
             .or_else(|| tagged_file.first_tag())?;
@@ -219,9 +227,9 @@ mod tests {
 
     /// валидный 1×1 PNG (красный пиксель) — для проверки записи/чтения обложки.
     const PNG_1X1: &[u8] = &[
-        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8,
-        2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192,
-        0, 0, 3, 1, 1, 0, 201, 254, 146, 239, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2,
+        0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 0, 0,
+        3, 1, 1, 0, 201, 254, 146, 239, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
     ];
 
     #[test]

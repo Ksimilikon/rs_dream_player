@@ -76,6 +76,7 @@ impl Track {
                 bitrate: properties.audio_bitrate().unwrap_or(0),
                 // path-based cover art is filled in by the indexer, not here
                 cover_art: None,
+                listen_count: 0,
             }),
         })
     }

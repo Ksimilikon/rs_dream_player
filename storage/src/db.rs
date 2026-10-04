@@ -1,6 +1,12 @@
-//! NOTATION
-//! save_*() -> saving or updating new element
-//! get_*() -> get element(s)
+//! NOTATION (naming convention for the storage layer)
+//! get_*()    -> read: `get_tracks`/`get_playlists` query (many), trait
+//!               `get_track`/`get_playlist` fetch one by key (hash/name),
+//!               `get_pool`, `get_track_paths`, `get_playlist_track_paths`.
+//! save_*()   -> insert-or-update a whole entity (`save_track`, `save_playlist`).
+//! set_*()    -> update one field of an entity (`set_track_title`,
+//!               `set_track_meta`, `set_track_cover`, `set_track_path`, ...).
+//! remove_*() -> delete (`remove_track`, `remove_invalid_tracks`).
+//! index_*()  -> filesystem scan into the index (`index_dir`).
 
 use std::{
     error::Error,
@@ -93,6 +99,7 @@ impl Db {
             .collect::<Result<Vec<_>, _>>()?;
 
         let metadata = TrackMetadata {
+            id: Some(row.id),
             title: row.title,
             artist: artists,
             album: row.album,
@@ -153,14 +160,9 @@ impl Db {
         Ok(playlist)
     }
 
-    /// все плейлисты (полностью, с треками), упорядоченные по имени.
-    pub fn list_playlists(&self) -> Result<Vec<Playlist>, Box<dyn Error>> {
-        self.find_playlist(None, None)
-    }
-
     /// выборка плейлистов по параметрам: `name` — подстрока без учёта регистра,
     /// `id` — точное совпадение. Без фильтров возвращает все плейлисты.
-    pub fn find_playlist(
+    pub fn get_playlists(
         &self,
         name: Option<String>,
         id: Option<i64>,
@@ -206,7 +208,7 @@ impl Db {
     /// выборка песен из общего пула по параметрам. `name` и `artist` ищутся как
     /// подстроки без учёта регистра, `id` и `hash` — точное совпадение. Без
     /// фильтров возвращает всю библиотеку.
-    pub fn find_track(
+    pub fn get_tracks(
         &self,
         name: Option<String>,
         artist: Option<String>,
@@ -260,7 +262,7 @@ impl Db {
         if dir.is_dir() {
             self.index_dir_rec(dir)?;
         }
-        self.pool_playlist()
+        self.get_pool()
     }
 
     fn index_dir_rec(&self, dir: &Path) -> Result<(), Box<dyn Error>> {
@@ -292,16 +294,33 @@ impl Db {
         Ok(())
     }
 
+    /// обновляет сохранённую громкость трека по его id.
+    pub fn set_track_volume_id(&self, id: i64, volume: f32) -> Result<(), Box<dyn Error>> {
+        self.conn.execute(
+            "UPDATE tracks SET volume = ?2 WHERE id = ?1",
+            params![id, volume as f64],
+        )?;
+        Ok(())
+    }
+
+    /// удаляет плейлист по имени. Привязки треков (`playlist_tracks`) уходят
+    /// каскадом через FK; сами треки остаются в библиотеке.
+    pub fn remove_playlist(&self, name: &str) -> Result<(), Box<dyn Error>> {
+        self.conn
+            .execute("DELETE FROM playlists WHERE name = ?1", [name])?;
+        Ok(())
+    }
+
     /// плейлист из всего пула песен библиотеки (все треки таблицы `tracks`).
-    pub fn pool_playlist(&self) -> Result<Playlist, Box<dyn Error>> {
-        let tracks = self.find_track(None, None, None, None)?;
+    pub fn get_pool(&self) -> Result<Playlist, Box<dyn Error>> {
+        let tracks = self.get_tracks(None, None, None, None)?;
         Ok(Playlist::from_tracks(tracks))
     }
 
     /// обновляет метаданные трека по его id: `title` и/или список артистов.
     /// `None`-поля не трогаются. Артисты переписываются целиком (как в
     /// [`upsert_track`]). Хеш и путь трека не меняются.
-    pub fn update_track_meta(
+    pub fn set_track_meta(
         &self,
         id: i64,
         title: Option<&str>,
@@ -344,7 +363,7 @@ impl Db {
 
     /// меняет путь к файлу трека по его id (после переименования на диске).
     /// Хеш остаётся прежним, поэтому ссылки плейлистов не ломаются.
-    pub fn rename_track_path(&self, id: i64, new_path: &Path) -> Result<(), Box<dyn Error>> {
+    pub fn set_track_path(&self, id: i64, new_path: &Path) -> Result<(), Box<dyn Error>> {
         self.conn.execute(
             "UPDATE tracks SET path = ?2 WHERE id = ?1",
             params![id, new_path.to_string_lossy()],
@@ -417,7 +436,7 @@ impl Db {
     /// записью (например, приложение уже проиндексировало переименованный файл),
     /// та запись удаляется (каскадом из плейлистов), а путь достаётся исходному
     /// треку. Заодно снимается метка `invalid`.
-    pub fn reassign_path(&self, id: i64, new_path: &Path) -> Result<(), Box<dyn Error>> {
+    pub fn reassign_track_path(&self, id: i64, new_path: &Path) -> Result<(), Box<dyn Error>> {
         let path_s = new_path.to_string_lossy().into_owned();
         // если новым путём уже владеет другая запись — удаляем её.
         let dup: Option<i64> = self
@@ -440,7 +459,7 @@ impl Db {
 
     /// удаляет из индекса все треки, помеченные как недействительные
     /// (каскадом из плейлистов). Возвращает количество удалённых.
-    pub fn remove_invalid(&self) -> Result<usize, Box<dyn Error>> {
+    pub fn remove_invalid_tracks(&self) -> Result<usize, Box<dyn Error>> {
         let ids: Vec<i64> = {
             let mut stmt = self
                 .conn
@@ -455,7 +474,7 @@ impl Db {
     }
 
     /// пары (id, path) всех треков библиотеки — для проверки наличия файлов.
-    pub fn track_paths(&self) -> Result<Vec<(i64, PathBuf)>, Box<dyn Error>> {
+    pub fn get_track_paths(&self) -> Result<Vec<(i64, PathBuf)>, Box<dyn Error>> {
         let mut stmt = self.conn.prepare("SELECT id, path FROM tracks")?;
         let rows = stmt
             .query_map([], |r| {
@@ -466,7 +485,7 @@ impl Db {
     }
 
     /// пары (id, path) треков конкретного плейлиста по его имени.
-    pub fn playlist_track_paths(&self, name: &str) -> Result<Vec<(i64, PathBuf)>, Box<dyn Error>> {
+    pub fn get_playlist_track_paths(&self, name: &str) -> Result<Vec<(i64, PathBuf)>, Box<dyn Error>> {
         let mut stmt = self.conn.prepare(
             "SELECT t.id, t.path FROM playlist_tracks pt \
              JOIN tracks t ON t.hash = pt.song_hash \
@@ -489,7 +508,7 @@ impl Indexator for Db {
     }
 
     /// `key` — хеш песни.
-    fn load_track(&self, key: String) -> Result<TrackVirtual, Box<dyn Error>> {
+    fn get_track(&self, key: String) -> Result<TrackVirtual, Box<dyn Error>> {
         let sql = format!("SELECT {TRACK_COLUMNS} FROM tracks t WHERE t.hash = ?1");
         let row = self.conn.query_row(&sql, [&key], TrackRow::from_row)?;
         self.build_track(row)
@@ -545,7 +564,7 @@ impl Indexator for Db {
     }
 
     /// `name` — имя плейлиста; загружает его вместе с упорядоченными треками.
-    fn load_playlist(&self, name: String) -> Result<Playlist, Box<dyn Error>> {
+    fn get_playlist(&self, name: String) -> Result<Playlist, Box<dyn Error>> {
         let (id, cover, created, updated): (i64, Option<String>, Option<i64>, Option<i64>) =
             self.conn.query_row(
                 "SELECT id, cover_art, created_at, updated_at FROM playlists WHERE name = ?1",
@@ -748,6 +767,7 @@ fn resolve_metadata(track: &TrackVirtual, path: &Path) -> Arc<TrackMetadata> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Unknown".into());
     Arc::new(TrackMetadata {
+        id: None,
         title,
         artist: vec!["Unknown".into()],
         album: None,
@@ -793,6 +813,7 @@ mod tests {
         let path = dir.join(file);
         fs::write(&path, format!("dummy-{file}")).unwrap();
         let metadata = TrackMetadata {
+            id: None,
             title: title.into(),
             artist: vec![artist.into()],
             album: None,
@@ -862,7 +883,7 @@ mod tests {
             .unwrap();
         assert!(db.hash_exist(hash.clone()));
 
-        let loaded = db.load_track(hash).unwrap();
+        let loaded = db.get_track(hash).unwrap();
         let meta = loaded.get_metadata().unwrap();
         assert_eq!(meta.title, "Hello");
         assert_eq!(meta.artist, vec!["World".to_string()]);
@@ -908,24 +929,24 @@ mod tests {
             .unwrap();
 
         // весь пул.
-        assert_eq!(db.find_track(None, None, None, None).unwrap().len(), 3);
+        assert_eq!(db.get_tracks(None, None, None, None).unwrap().len(), 3);
         // по названию (подстрока).
         assert_eq!(
-            db.find_track(Some("hello".into()), None, None, None)
+            db.get_tracks(Some("hello".into()), None, None, None)
                 .unwrap()
                 .len(),
             2
         );
         // по артисту.
         assert_eq!(
-            db.find_track(None, Some("world".into()), None, None)
+            db.get_tracks(None, Some("world".into()), None, None)
                 .unwrap()
                 .len(),
             2
         );
         // комбинация name + artist.
         assert_eq!(
-            db.find_track(Some("hello".into()), Some("other".into()), None, None)
+            db.get_tracks(Some("hello".into()), Some("other".into()), None, None)
                 .unwrap()
                 .len(),
             1
@@ -949,14 +970,14 @@ mod tests {
         db.save_playlist(p2).unwrap();
 
         // получить все.
-        let all = db.list_playlists().unwrap();
+        let all = db.get_playlists(None, None).unwrap();
         assert_eq!(all.len(), 2);
         // упорядочены по имени: jazz, rock.
         assert_eq!(all[0].get_name().as_deref(), Some("jazz"));
         assert_eq!(all[1].get_name().as_deref(), Some("rock"));
 
         // выборка по параметру + обложка едет с плейлистом.
-        let found = db.find_playlist(Some("rock".into()), None).unwrap();
+        let found = db.get_playlists(Some("rock".into()), None).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(
             found[0].get_cover_art(),
@@ -966,7 +987,7 @@ mod tests {
         assert_eq!(found[0].get_created_at(), Some(1_000));
         assert_eq!(found[0].get_updated_at(), Some(2_000));
         // у jazz обложки и таймштампов нет.
-        let jazz = &db.find_playlist(Some("jazz".into()), None).unwrap()[0];
+        let jazz = &db.get_playlists(Some("jazz".into()), None).unwrap()[0];
         assert!(jazz.get_cover_art().is_none());
         assert!(jazz.get_created_at().is_none());
         assert!(jazz.get_updated_at().is_none());
@@ -985,7 +1006,7 @@ mod tests {
         playlist.set_name("mix".into());
         db.save_playlist(playlist).unwrap();
 
-        let loaded = db.load_playlist("mix".into()).unwrap();
+        let loaded = db.get_playlist("mix".into()).unwrap();
         assert_eq!(loaded.get_count(), 2);
         let titles: Vec<_> = loaded
             .tracks()
@@ -1010,17 +1031,17 @@ mod tests {
             .unwrap();
         let id = only_track_id(&db);
 
-        db.update_track_meta(id, Some("New"), Some(&["X".into(), "Y".into()]))
+        db.set_track_meta(id, Some("New"), Some(&["X".into(), "Y".into()]))
             .unwrap();
 
-        let track = &db.find_track(None, None, Some(id), None).unwrap()[0];
+        let track = &db.get_tracks(None, None, Some(id), None).unwrap()[0];
         let meta = track.get_metadata().unwrap();
         assert_eq!(meta.title, "New");
         assert_eq!(meta.artist, vec!["X".to_string(), "Y".to_string()]);
 
         // передача None не трогает поле: меняем только артистов, заголовок остаётся.
-        db.update_track_meta(id, None, Some(&["Z".into()])).unwrap();
-        let track = &db.find_track(None, None, Some(id), None).unwrap()[0];
+        db.set_track_meta(id, None, Some(&["Z".into()])).unwrap();
+        let track = &db.get_tracks(None, None, Some(id), None).unwrap()[0];
         assert_eq!(track.get_metadata().unwrap().title, "New");
         assert_eq!(track.get_metadata().unwrap().artist, vec!["Z".to_string()]);
     }
@@ -1038,9 +1059,9 @@ mod tests {
             .unwrap();
 
         let new_path = dir.path().join("renamed.mp3");
-        db.rename_track_path(id, &new_path).unwrap();
+        db.set_track_path(id, &new_path).unwrap();
 
-        let track = &db.find_track(None, None, Some(id), None).unwrap()[0];
+        let track = &db.get_tracks(None, None, Some(id), None).unwrap()[0];
         assert_eq!(track.get_path(), Some(new_path.as_path()));
         let after: String = db
             .conn
@@ -1086,7 +1107,7 @@ mod tests {
         let id = only_track_id(&db);
 
         db.remove_track(id).unwrap();
-        assert_eq!(db.find_track(None, None, None, None).unwrap().len(), 0);
+        assert_eq!(db.get_tracks(None, None, None, None).unwrap().len(), 0);
         let links: i64 = db
             .conn
             .query_row("SELECT count(*) FROM track_artists", [], |r| r.get(0))
@@ -1108,9 +1129,9 @@ mod tests {
             .unwrap();
 
         // весь пул — три трека.
-        assert_eq!(db.track_paths().unwrap().len(), 3);
+        assert_eq!(db.get_track_paths().unwrap().len(), 3);
         // плейлист — только два, в порядке позиций.
-        let pl = db.playlist_track_paths("mix").unwrap();
+        let pl = db.get_playlist_track_paths("mix").unwrap();
         assert_eq!(pl.len(), 2);
         assert!(pl[0].1.ends_with("1.mp3"));
         assert!(pl[1].1.ends_with("2.mp3"));
@@ -1128,7 +1149,7 @@ mod tests {
         db.set_track_genres(id, &["Grunge".into(), "Rock".into()])
             .unwrap();
 
-        let track = &db.find_track(None, None, Some(id), None).unwrap()[0];
+        let track = &db.get_tracks(None, None, Some(id), None).unwrap()[0];
         let meta = track.get_metadata().unwrap();
         assert_eq!(meta.album.as_deref(), Some("Nevermind"));
         assert_eq!(meta.genres, vec!["Grunge".to_string(), "Rock".to_string()]);
@@ -1136,7 +1157,7 @@ mod tests {
         // очистка альбома и жанров.
         db.set_track_album(id, None).unwrap();
         db.set_track_genres(id, &[]).unwrap();
-        let track = &db.find_track(None, None, Some(id), None).unwrap()[0];
+        let track = &db.get_tracks(None, None, Some(id), None).unwrap()[0];
         let meta = track.get_metadata().unwrap();
         assert!(meta.album.is_none());
         assert!(meta.genres.is_empty());
@@ -1154,7 +1175,7 @@ mod tests {
         db.set_track_label(id, Some("favourite")).unwrap();
         db.set_track_invalid(id, true).unwrap();
 
-        let track = &db.find_track(None, None, Some(id), None).unwrap()[0];
+        let track = &db.get_tracks(None, None, Some(id), None).unwrap()[0];
         assert_eq!(track.color.as_deref(), Some("red"));
         assert_eq!(track.user_label.as_deref(), Some("favourite"));
         assert!(track.invalid);
@@ -1174,7 +1195,7 @@ mod tests {
         // пользовательские color/invalid.
         db.save_track(fixture_track(dir.path(), "a.mp3", "T2", "A"))
             .unwrap();
-        let track = &db.find_track(None, None, Some(id), None).unwrap()[0];
+        let track = &db.get_tracks(None, None, Some(id), None).unwrap()[0];
         assert_eq!(track.get_metadata().unwrap().title, "T2");
         assert_eq!(track.color.as_deref(), Some("blue"));
         assert!(track.invalid);
@@ -1200,8 +1221,8 @@ mod tests {
         db.remove_track(id).unwrap();
 
         // трек ушёл и из индекса, и из плейлиста.
-        assert_eq!(db.find_track(None, None, None, None).unwrap().len(), 1);
-        assert_eq!(db.playlist_track_paths("mix").unwrap().len(), 1);
+        assert_eq!(db.get_tracks(None, None, None, None).unwrap().len(), 1);
+        assert_eq!(db.get_playlist_track_paths("mix").unwrap().len(), 1);
         let links: i64 = db
             .conn
             .query_row("SELECT count(*) FROM playlist_tracks", [], |r| r.get(0))
@@ -1227,12 +1248,12 @@ mod tests {
         db.set_track_invalid(old_id, true).unwrap();
 
         let new_path = dir.path().join("new.mp3");
-        db.reassign_path(old_id, &new_path).unwrap();
+        db.reassign_track_path(old_id, &new_path).unwrap();
 
         // дубликат удалён, у старой записи теперь новый путь и снят invalid.
-        let all = db.find_track(None, None, None, None).unwrap();
+        let all = db.get_tracks(None, None, None, None).unwrap();
         assert_eq!(all.len(), 1);
-        let track = &db.find_track(None, None, Some(old_id), None).unwrap()[0];
+        let track = &db.get_tracks(None, None, Some(old_id), None).unwrap()[0];
         assert_eq!(track.get_path(), Some(new_path.as_path()));
         assert!(!track.invalid);
     }
@@ -1253,8 +1274,8 @@ mod tests {
             .unwrap();
         db.set_track_invalid(drop_id, true).unwrap();
 
-        assert_eq!(db.remove_invalid().unwrap(), 1);
-        let all = db.find_track(None, None, None, None).unwrap();
+        assert_eq!(db.remove_invalid_tracks().unwrap(), 1);
+        let all = db.get_tracks(None, None, None, None).unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].get_metadata().unwrap().title, "Keep");
     }

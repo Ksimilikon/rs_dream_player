@@ -97,6 +97,10 @@ impl Playlist {
     pub fn tracks(&self) -> &[TrackVirtual] {
         &self.tracks
     }
+    /// consumes the playlist, returning its owned tracks.
+    pub fn into_tracks(self) -> Vec<TrackVirtual> {
+        self.tracks
+    }
     pub fn get_track(&self, i: usize) -> Option<&TrackVirtual> {
         self.tracks.get(i)
     }

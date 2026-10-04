@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# ядро плеера — работаем ТОЛЬКО через его FFI-поверхность (`init`/`idx_*`/
+# `engine_*`), демонстрируя крейт `api` как динамическую библиотеку.
+api = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 # извлечение встроенной обложки из тегов аудиофайла живёт в audio_structs
 # (TrackMetadata::read_cover) — переиспользуем его, а не дублируем lofty здесь.
@@ -13,4 +16,27 @@ ratatui = { version = "0.30.2", features = ["crossterm"] }
 # pkg-config). Нужен только crossterm-бэкенд; изображения декодируем сами (image).
 ratatui-image = { version = "11.0.6", default-features = false, features = [
     "crossterm",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# MPRIS-интеграция (перенесена из удалённого крейта `dbus`): системный медиа-
+# транспорт на Linux через zbus. Работает на одном однопоточном tokio-рантайме
+# нашего MPRIS-потока (feature `tokio`, без `async-io`) — чтобы не плодить
+# вспомогательные потоки (глобальный реактор async-io, пул blocking, отдельный
+# executor zbus). Итог: весь async живёт на одном дополнительном потоке.
+zbus = { version = "5.16.0", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "net", "time"] }
+
+# Windows: системный медиа-транспорт (SMTC) через souvlaki + собственное скрытое
+# окно-опору (windows-crate). Раньше жило в крейте `dbus` под фичей `with_tui`;
+# теперь tui сам является фронтендом, поэтому бэкенд всегда собирается под Windows.
+[target.'cfg(target_os = "windows")'.dependencies]
+souvlaki = "0.8.3"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Media",
+    "Win32_System_WinRT",
 ] }

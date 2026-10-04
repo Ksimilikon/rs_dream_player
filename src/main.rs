@@ -1,235 +1,75 @@
-use std::path::PathBuf;
+//! демонстрационный фронтенд ядра: готовит каталоги, выставляет стартовую
+//! громкость и передаёт управление TUI, который работает с ядром только через
+//! его FFI (крейт `api`).
 
-use audio_structs::playlist::Playlist;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
 use clap::Parser;
 
-use crate::orchestrator::Orchestrator;
-
 mod config;
-mod orchestrator;
-mod playlist_manager;
-mod traits;
 
 #[derive(clap::Parser, Debug)]
-#[command(version, about = "cli for music player core")]
+#[command(version, about = "TUI demo frontend for the music player core")]
 struct Args {
-    /// flag: default dir for local music storage in fs
+    /// каталог с музыкой для индексации (по умолчанию — системный `~/Music`).
     #[arg(short, long, value_name = "Dir")]
     path: Option<PathBuf>,
-
-    /// flag: playlist is collected from music in target dir
-    /// DB isnt availible
-    /// not indexing ot DB
-    #[arg(long, value_name = "Dir")]
-    playlist: Option<PathBuf>,
 }
 
 fn main() {
     let args = Args::parse();
 
-    // user config, different for different OS
-    let mut config = match config::config_file() {
-        Some(p) => config::Config::load(&p).unwrap_or_default(),
-        None => config::Config::default(),
+    // каталог приложения (конфиг/бд/кэш — в одном месте для демо).
+    let app_dir = config::config_dir().unwrap_or_else(|| PathBuf::from("."));
+    let _ = std::fs::create_dir_all(&app_dir);
+
+    // каталог музыки: явный --path берём как есть; иначе — системный по
+    // умолчанию, при его отсутствии предлагаем создать.
+    let music = match args.path {
+        Some(path) => path,
+        None => resolve_default_music_dir(),
     };
 
-    // TODO: refactor
-    // handle flag: --playlist
-    let (initial, playlists, db) = if let Some(dir) = args.playlist {
-        (Some(Playlist::from_dir(&dir).unwrap()), Vec::new(), None)
-    } else {
-        let db_path = config
-            .resolve_db_path()
-            .expect("failed to resolve data directory");
-        let storage = storage::Db::init(db_path).unwrap();
+    // показываем основные пути до запуска интерфейса.
+    print_dirs(&app_dir, &music);
 
-        // директория музыки: явный --path используем как есть, иначе системный
-        // каталог по умолчанию (с проверкой существования).
-        let music = match args.path {
-            Some(path) => Some(path),
-            None => ensure_default_music_dir(),
-        };
-        print_dirs(music.as_deref());
+    // стартовая мастер-громкость из конфига (если он есть).
+    let master = config::config_file()
+        .and_then(|p| config::Config::load(&p).ok())
+        .map(|c| c.master_volume)
+        .unwrap_or(1.0);
 
-        // индексируем каталог (наполняем бд); сам пул не запускаем.
-        if let Some(path) = &music {
-            let _ = storage.index_dir(path);
-        }
-        // первый пункт — виртуальный плейлист со всем пулом песен.
-        let pool = storage
-            .pool_playlist()
-            .unwrap_or_else(|_| Playlist::from_tracks(Vec::new()));
-        let mut entries = vec![tui::PlaylistEntry {
-            name: "ALL SONGS".to_string(),
-            tracks: track_infos(&pool),
-            pool: true,
-            temp: false,
-        }];
-        entries.extend(
-            storage
-                .list_playlists()
-                .unwrap_or_default()
-                .iter()
-                .map(|p| tui::PlaylistEntry {
-                    name: p.get_name().unwrap_or_else(|| "---".to_string()),
-                    tracks: track_infos(p),
-                    pool: false,
-                    temp: false,
-                }),
-        );
-        (None, entries, Some(storage))
+    let dirs = tui::Dirs {
+        cache: &app_dir,
+        config: &app_dir,
+        data: &app_dir,
+        music: &music,
     };
-
-    // стартовое состояние «играющего» плейлиста — только для --playlist
-    let (playlist_name, tracks) = match &initial {
-        Some(p) => (
-            p.get_name().unwrap_or_else(|| "---".to_string()),
-            track_infos(p),
-        ),
-        None => ("---".to_string(), Vec::new()),
-    };
-
-    // оркестратор играет в фоне, главный поток занимает интерфейс
-    let master = config.master_volume;
-    let (updates, controls) = Orchestrator::run(db, initial, master);
-
-    // текст конфига для вкладки настроек (до передачи config в поток-мост).
-    let config_text = config_view(&config, config::config_file().as_deref());
-
-    // мост: команды TUI -> управление оркестратором. Мастер-громкость
-    // дополнительно сохраняем в конфиг (песенная сохраняется в бд внутри менеджера).
-    let (tx_ctl, rx_ctl) = std::sync::mpsc::channel::<tui::Control>();
-    let config_path = config::config_file();
-    std::thread::spawn(move || {
-        while let Ok(c) = rx_ctl.recv() {
-            match c {
-                tui::Control::Next => controls.next(),
-                tui::Control::Prev => controls.prev(),
-                tui::Control::PlayPause => controls.play_pause(),
-                tui::Control::Select(i) => controls.select(i),
-                tui::Control::LoadPlaylist { name, start } => controls.load_playlist(name, start),
-                tui::Control::LoadPool { start } => controls.load_pool(start),
-                tui::Control::SongVolume(v) => controls.set_song_volume(v),
-                tui::Control::MasterVolume(v) => {
-                    controls.set_master_volume(v);
-                    config.master_volume = v;
-                    if let Some(path) = &config_path {
-                        let _ = config.save(path);
-                    }
-                }
-                tui::Control::SavePlaylist { name, ids } => controls.save_playlist(name, ids),
-                tui::Control::PlayTemp { ids, start } => controls.play_temp(ids, start),
-                tui::Control::SetTitle { id, title } => controls.set_title(id, title),
-                tui::Control::SetArtists { id, artists } => controls.set_artists(id, artists),
-                tui::Control::SetAlbum { id, album } => controls.set_album(id, album),
-                tui::Control::SetGenres { id, genres } => controls.set_genres(id, genres),
-                tui::Control::SetColor { id, color } => controls.set_color(id, color),
-                tui::Control::SetLabel { id, label } => controls.set_label(id, label),
-                tui::Control::RenameFile { id, name } => controls.rename_file(id, name),
-                tui::Control::SetCover { id, path } => controls.set_cover(id, path),
-                tui::Control::SetCoverTag { id, path } => controls.set_cover_tag(id, path),
-                tui::Control::SetPath { id, path } => controls.set_path(id, path),
-                tui::Control::RescanPath { id } => controls.rescan_path(id),
-                tui::Control::RemoveTrack(id) => controls.remove_track(id),
-                tui::Control::PurgeInvalid => controls.purge_invalid(),
-                tui::Control::Seek(secs) => controls.seek(secs),
-                tui::Control::Scan(dir) => controls.scan(dir),
-                tui::Control::Check(target) => {
-                    let playlist = match target {
-                        tui::CheckTarget::All => None,
-                        tui::CheckTarget::Playlist(name) => Some(name),
-                    };
-                    controls.check(playlist);
-                }
-            }
-        }
-    });
-
-    let view = tui::View {
-        playlist_name,
-        tracks,
-        playlists,
-        master_volume: master,
-        config_text,
-    };
-    if let Err(e) = tui::run(view, updates, tx_ctl) {
+    if let Err(e) = tui::run(dirs, master) {
         eprintln!("tui: {e}");
     }
 }
 
-/// готовит текст конфига для вкладки настроек: путь к файлу + его поля в toml.
-fn config_view(config: &config::Config, path: Option<&std::path::Path>) -> String {
-    let file = path
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "-".into());
-    let body = toml::to_string_pretty(config).unwrap_or_else(|_| "<serialization error>".into());
-    format!("file: {file}\n\n{body}")
+/// выводит основные пути приложения.
+fn print_dirs(app_dir: &Path, music: &Path) {
+    println!("config/data/cache dir: {}", app_dir.display());
+    println!(
+        "database file:         {}",
+        app_dir.join(storage::DB_FILE_NAME).display()
+    );
+    println!("music dir:             {}", music.display());
 }
 
-/// собирает краткую инфу о треках плейлиста для TUI.
-fn track_infos(playlist: &Playlist) -> Vec<tui::TrackInfo> {
-    playlist
-        .tracks()
-        .iter()
-        .map(|t| {
-            let (title, artists, cover, album, genres, duration) = match t.get_metadata() {
-                Ok(m) => (
-                    m.title.clone(),
-                    m.artist.join(", "),
-                    m.params
-                        .as_ref()
-                        .and_then(|p| p.cover_art.as_ref())
-                        .map(|c| c.to_string_lossy().into_owned()),
-                    m.album.clone(),
-                    m.genres.clone(),
-                    m.params.as_ref().map(|p| p.duration_sec).unwrap_or(0),
-                ),
-                Err(_) => (
-                    "Unknown".to_string(),
-                    String::new(),
-                    None,
-                    None,
-                    Vec::new(),
-                    0,
-                ),
-            };
-            tui::TrackInfo {
-                id: t.index_id().unwrap_or(-1),
-                title,
-                artists,
-                volume: t.volume,
-                duration,
-                cover,
-                path: t.get_path().map(|p| p.to_string_lossy().into_owned()),
-                album,
-                genres,
-                color: t.color.clone(),
-                user_label: t.user_label.clone(),
-                invalid: t.invalid,
-            }
-        })
-        .collect()
-}
-
-/// каталоги приложения: настроек, конфигов (пока совпадает с настройками)
-/// и музыки (может отсутствовать — тогда `—`).
-fn print_dirs(music: Option<&std::path::Path>) {
-    let fmt = |d: Option<PathBuf>| {
-        d.map(|p| p.display().to_string())
-            .unwrap_or_else(|| "-".into())
+/// системный каталог музыки по умолчанию. Если его нет на диске — объясняет
+/// варианты и предлагает создать. Путь возвращается в любом случае: при отказе
+/// он просто не существует, и индексация его пропустит.
+fn resolve_default_music_dir() -> PathBuf {
+    let Some(dir) = config::music_dir() else {
+        return PathBuf::from(".");
     };
-    println!("settings dir: {}", fmt(config::settings_dir()));
-    println!("config dir:   {}", fmt(config::config_dir()));
-    println!("music dir:    {}", fmt(music.map(|p| p.to_path_buf())));
-}
-
-/// определяет системный каталог музыки по умолчанию. Если его нет на диске —
-/// объясняет варианты и предлагает создать его. Возвращает каталог, только
-/// если он существует или был создан по согласию пользователя.
-fn ensure_default_music_dir() -> Option<PathBuf> {
-    let dir = config::music_dir()?;
     if dir.is_dir() {
-        return Some(dir);
+        return dir;
     }
 
     println!("default music directory not found: {}", dir.display());
@@ -239,26 +79,21 @@ fn ensure_default_music_dir() -> Option<PathBuf> {
     println!("  - set XDG_MUSIC_DIR (~/.config/user-dirs.dirs);");
     println!("  - pass the directory yourself via --path <Dir>.");
 
-    if !prompt_yes_no(&format!(
-        "create the default directory ({})? [y/N]:",
+    if prompt_yes_no(&format!(
+        "create the default music directory ({})? [y/N]:",
         dir.display()
     )) {
-        return None;
-    }
-
-    match std::fs::create_dir_all(&dir) {
-        Ok(()) => Some(dir),
-        Err(e) => {
-            println!("failed to create directory: {e}");
-            None
+        match std::fs::create_dir_all(&dir) {
+            Ok(()) => println!("created: {}", dir.display()),
+            Err(e) => println!("failed to create directory: {e}"),
         }
     }
+    dir
 }
 
 /// задаёт вопрос и читает ответ из stdin. По умолчанию (пустой ввод / ошибка) —
 /// «нет»; «да» только при `y`/`Y`.
 fn prompt_yes_no(question: &str) -> bool {
-    use std::io::Write;
     print!("{question} ");
     let _ = std::io::stdout().flush();
     let mut input = String::new();

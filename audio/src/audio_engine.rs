@@ -1,7 +1,8 @@
 use std::{error::Error, io::Cursor, time::Duration};
 
 use rodio::{
-    Decoder, Player as RodioPlayer,
+    Decoder, Player as RodioPlayer, Source,
+    cpal::traits::{DeviceTrait, HostTrait},
     source::SeekError,
     stream::{DeviceSinkBuilder, MixerDeviceSink},
 };
@@ -16,6 +17,11 @@ pub struct AudioEngine {
     player: RodioPlayer,
     master_volume: f32,
     track_volume: f32,
+    /// name of the active output device (from the default host), if known.
+    device_name: Option<String>,
+    /// total duration of the currently loaded track (`0` if unknown / nothing
+    /// loaded). Some formats don't report it, so treat `0` as "unknown".
+    duration: Duration,
 }
 
 impl AudioEngine {
@@ -30,6 +36,8 @@ impl AudioEngine {
         F: FnOnce() + Send + 'static,
     {
         let decoder = Decoder::new(Cursor::new(data))?;
+        // запоминаем длительность до перемещения декодера в очередь.
+        self.duration = decoder.total_duration().unwrap_or_default();
 
         self.player.stop();
         self.track_volume = volume_track;
@@ -49,12 +57,65 @@ impl AudioEngine {
     pub fn new() -> Result<Self, Box<dyn Error>> {
         let device = DeviceSinkBuilder::open_default_sink()?;
         let player = RodioPlayer::connect_new(device.mixer());
+        // best-effort: имя устройства по умолчанию (open_default_sink может
+        // уйти на резервное устройство, тогда имя будет приблизительным).
+        let device_name = rodio::cpal::default_host()
+            .default_output_device()
+            .and_then(|d| d.description().ok())
+            .map(|desc| desc.name().to_string());
         Ok(Self {
             _device: device,
             player,
             master_volume: 1.0,
             track_volume: 1.0,
+            device_name,
+            duration: Duration::ZERO,
         })
+    }
+
+    /// total duration of the loaded track (`Duration::ZERO` if unknown).
+    pub fn get_duration(&self) -> Duration {
+        self.duration
+    }
+
+    /// имена доступных устройств вывода (на хосте по умолчанию).
+    pub fn output_devices() -> Vec<String> {
+        match rodio::cpal::default_host().output_devices() {
+            Ok(devices) => devices
+                .filter_map(|d| d.description().ok().map(|desc| desc.name().to_string()))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// имя активного устройства вывода, если известно.
+    pub fn get_output_device(&self) -> Option<&str> {
+        self.device_name.as_deref()
+    }
+
+    /// переключает вывод на устройство с именем `name` (из [`Self::output_devices`]).
+    /// Текущий загруженный трек сбрасывается — воспроизведение нужно запустить
+    /// заново; громкость (master/track) сохраняется.
+    pub fn set_output_device(&mut self, name: &str) -> Result<(), Box<dyn Error>> {
+        let device = rodio::cpal::default_host()
+            .output_devices()?
+            .find(|d| {
+                d.description()
+                    .map(|desc| desc.name() == name)
+                    .unwrap_or(false)
+            })
+            .ok_or_else(|| format!("output device not found: {name}"))?;
+
+        let sink = DeviceSinkBuilder::from_device(device)?.open_stream()?;
+        let player = RodioPlayer::connect_new(sink.mixer());
+        player.set_volume(self.track_volume * self.master_volume);
+
+        self._device = sink;
+        self.player = player;
+        self.device_name = Some(name.to_string());
+        // трек сброшен вместе со старым плеером.
+        self.duration = Duration::ZERO;
+        Ok(())
     }
 
     pub fn play(&mut self) {
@@ -77,6 +138,7 @@ impl AudioEngine {
     /// stops playback and empties the queue.
     pub fn stop(&mut self) {
         self.player.stop();
+        self.duration = Duration::ZERO;
     }
 
     pub fn seek(&mut self, pos: Duration) -> Result<(), SeekError> {

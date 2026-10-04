@@ -66,6 +66,7 @@ impl Track {
             .map(str::to_string)
             .collect();
         Ok(TrackMetadata {
+            id: None,
             title: tag.title().map_or("Unknown".into(), |v| v.to_string()),
             artist: artists,
             album,

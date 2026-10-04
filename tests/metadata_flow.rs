@@ -35,7 +35,7 @@ fn scan_edit_and_check_flow() {
 
     // --- задача 3: сканирование каталога наполняет индекс ---
     db.index_dir(work.path()).unwrap();
-    let tracks = db.find_track(None, None, None, None).unwrap();
+    let tracks = db.get_tracks(None, None, None, None).unwrap();
     assert_eq!(tracks.len(), 2, "both samples should be indexed");
 
     // берём id трека, лежащего в файле a.mp3.
@@ -54,7 +54,7 @@ fn scan_edit_and_check_flow() {
         &["Rock".into(), "Indie".into()],
     )
     .unwrap();
-    db.update_track_meta(id, Some("Edited Title"), Some(&["New Artist".to_string()]))
+    db.set_track_meta(id, Some("Edited Title"), Some(&["New Artist".to_string()]))
         .unwrap();
     db.set_track_album(id, Some("New Album")).unwrap();
     db.set_track_genres(id, &["Rock".into(), "Indie".into()])
@@ -67,7 +67,7 @@ fn scan_edit_and_check_flow() {
     assert_eq!(on_disk.album.as_deref(), Some("New Album"));
     assert_eq!(on_disk.genres, vec!["Rock".to_string(), "Indie".to_string()]);
     // ...и индекс тоже (жанры из бд возвращаются отсортированными по имени).
-    let reloaded = db.find_track(None, None, Some(id), None).unwrap();
+    let reloaded = db.get_tracks(None, None, Some(id), None).unwrap();
     let meta = reloaded[0].get_metadata().unwrap();
     assert_eq!(meta.title, "Edited Title");
     assert_eq!(meta.album.as_deref(), Some("New Album"));
@@ -76,14 +76,14 @@ fn scan_edit_and_check_flow() {
     // db-only метки: цвет и текстовая метка.
     db.set_track_color(id, Some("red")).unwrap();
     db.set_track_label(id, Some("fav")).unwrap();
-    let track = &db.find_track(None, None, Some(id), None).unwrap()[0];
+    let track = &db.get_tracks(None, None, Some(id), None).unwrap()[0];
     assert_eq!(track.color.as_deref(), Some("red"));
     assert_eq!(track.user_label.as_deref(), Some("fav"));
 
     // --- задача 2/3: отсутствующий файл помечается invalid (а не удаляется) ---
     fs::remove_file(&b).unwrap();
     let b_id = db
-        .track_paths()
+        .get_track_paths()
         .unwrap()
         .into_iter()
         .find(|(_, p)| !p.exists())
@@ -91,16 +91,16 @@ fn scan_edit_and_check_flow() {
         .expect("missing file detected");
     db.set_track_invalid(b_id, true).unwrap();
     // трек всё ещё в индексе, но помечен недействительным.
-    let b_track = &db.find_track(None, None, Some(b_id), None).unwrap()[0];
+    let b_track = &db.get_tracks(None, None, Some(b_id), None).unwrap()[0];
     assert!(b_track.invalid);
-    assert_eq!(db.find_track(None, None, None, None).unwrap().len(), 2);
+    assert_eq!(db.get_tracks(None, None, None, None).unwrap().len(), 2);
 
     // --- задача 3: задать недействительному треку новый путь (дедуп) ---
     // возвращаем файл под новым именем и переуказываем путь.
     let b_new = work.path().join("b_renamed.mp3");
     fs::copy(&a, &b_new).unwrap();
-    db.reassign_path(b_id, &b_new).unwrap();
-    let b_track = &db.find_track(None, None, Some(b_id), None).unwrap()[0];
+    db.reassign_track_path(b_id, &b_new).unwrap();
+    let b_track = &db.get_tracks(None, None, Some(b_id), None).unwrap()[0];
     assert!(!b_track.invalid);
     assert_eq!(b_track.get_path(), Some(b_new.as_path()));
 
@@ -108,8 +108,8 @@ fn scan_edit_and_check_flow() {
     // снова ломаем b и чистим.
     fs::remove_file(&b_new).unwrap();
     db.set_track_invalid(b_id, true).unwrap();
-    assert_eq!(db.remove_invalid().unwrap(), 1);
-    let after = db.find_track(None, None, None, None).unwrap();
+    assert_eq!(db.remove_invalid_tracks().unwrap(), 1);
+    let after = db.get_tracks(None, None, None, None).unwrap();
     assert_eq!(after.len(), 1, "only the present track remains");
     assert_eq!(after[0].get_path(), Some(a.as_path()));
 }

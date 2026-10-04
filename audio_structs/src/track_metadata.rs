@@ -17,6 +17,9 @@ use crate::cover_art::detect_image_format;
 /// struct for metadata tracks
 #[derive(Debug)]
 pub struct TrackMetadata {
+    /// sqlite row id, present only when the track comes from the index.
+    /// `None` for tracks built straight from a file (not yet indexed).
+    pub id: Option<i64>,
     pub title: String,
     pub artist: Vec<String>,
     /// album name from the file tags, if any (1:N — one album per song).
@@ -74,6 +77,7 @@ impl TrackMetadata {
             .collect();
 
         Ok(TrackMetadata {
+            id: None,
             title: tag.title().map_or("Unknown".into(), |v| v.to_string()),
             artist: artists,
             album,

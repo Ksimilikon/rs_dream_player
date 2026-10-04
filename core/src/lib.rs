@@ -2,14 +2,14 @@ pub mod config;
 pub mod dirs;
 pub mod event_loop;
 
-use std::thread::{self, JoinHandle};
-
 use audio::AudioEngine;
 use storage::Db;
 
 use crate::{config::Config, dirs::Dirs};
 
-pub const FILE_NAME_DB: &str = "index.sqlite";
+/// имя файла бд — канонічное из крейта storage (совпадает с тем, что писала
+/// прежняя версия приложения; иначе существующие плейлисты не подхватятся).
+pub const FILE_NAME_DB: &str = storage::DB_FILE_NAME;
 pub const FILE_NAME_CONFIG: &str = "config.toml";
 
 pub struct Core {
@@ -17,7 +17,6 @@ pub struct Core {
     db: Option<Db>,
     dirs: Dirs,
     engine: AudioEngine,
-    worker: JoinHandle<()>,
 }
 impl Core {
     pub fn new(dirs: Dirs, need_db: bool) -> Self {
@@ -29,14 +28,13 @@ impl Core {
         };
         // WARN: panic
         let config = Config::load(&dirs.data.join(FILE_NAME_CONFIG)).unwrap();
+        // единственные потоки ядра — звуковые, их поднимает AudioEngine (cpal).
         let engine = AudioEngine::new().unwrap();
-        let thread = thread::spawn(move || {});
         Self {
             config,
             db,
             dirs,
             engine,
-            worker: thread,
         }
     }
 }

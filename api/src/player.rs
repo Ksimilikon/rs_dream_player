@@ -136,10 +136,12 @@ pub extern "C" fn engine_set_volume_track(volume: f32) {
     let mut guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
     guard.get_engine_mut().set_volume_track(volume);
 }
+/// мастер-громкость: применяется к движку И сохраняется в конфиг ядра на диск
+/// (переживает перезапуск).
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_set_volume_master(volume: f32) {
     let mut guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
-    guard.get_engine_mut().set_volume_master(volume);
+    guard.set_master_volume(volume);
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_get_volume_track() -> f32 {

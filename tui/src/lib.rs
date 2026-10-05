@@ -25,10 +25,10 @@ pub struct Dirs<'a> {
 
 /// инициализирует ядро, индексирует каталог музыки и запускает интерфейс.
 /// Захватывает текущий поток до выхода пользователя.
-pub fn run(dirs: Dirs, master_volume: f32) -> std::io::Result<()> {
-    // поднимаем ядро (нужна бд) и выставляем стартовую мастер-громкость.
+pub fn run(dirs: Dirs) -> std::io::Result<()> {
+    // поднимаем ядро (нужна бд). Мастер-громкость ядро само применяет из своего
+    // сохранённого конфига — здесь её не трогаем.
     ffi::engine::init(dirs.cache, dirs.config, dirs.data, dirs.music, true);
-    ffi::engine::set_master_volume(master_volume);
     // наполняем индекс каталогом музыки (idempotent).
     ffi::db::index_dir(None);
 

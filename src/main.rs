@@ -34,19 +34,14 @@ fn main() {
     // показываем основные пути до запуска интерфейса.
     print_dirs(&app_dir, &music);
 
-    // стартовая мастер-громкость из конфига (если он есть).
-    let master = config::config_file()
-        .and_then(|p| config::Config::load(&p).ok())
-        .map(|c| c.master_volume)
-        .unwrap_or(1.0);
-
+    // мастер-громкость теперь хранит и применяет само ядро (его config.toml).
     let dirs = tui::Dirs {
         cache: &app_dir,
         config: &app_dir,
         data: &app_dir,
         music: &music,
     };
-    if let Err(e) = tui::run(dirs, master) {
+    if let Err(e) = tui::run(dirs) {
         eprintln!("tui: {e}");
     }
 }

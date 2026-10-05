@@ -7,8 +7,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// total volume
-    master_volume: f32,
+    /// total (master) volume, 0.0..=1.0
+    pub master_volume: f32,
 }
 
 impl Default for Config {

@@ -658,8 +658,10 @@ fn upsert_track(conn: &Connection, track: &TrackVirtual) -> Result<String, Box<d
     let album_id = upsert_album(conn, meta.album.as_deref())?;
 
     // на новый трек попадёт этот случайный хеш; при конфликте по `path`
-    // существующий хеш не трогаем. color/user_label/invalid — пользовательское
-    // состояние, при повторном скане (ON CONFLICT) их НЕ перезаписываем.
+    // существующий хеш не трогаем. color/user_label/invalid/volume —
+    // пользовательское состояние, при повторном скане (ON CONFLICT) их НЕ
+    // перезаписываем (иначе ре-индекс при каждом старте сбрасывал бы громкость
+    // к дефолту 1.0 из свеже-прочитанного файла).
     let new_hash = random_hash();
     conn.execute(
         "INSERT INTO tracks \
@@ -668,7 +670,7 @@ fn upsert_track(conn: &Connection, track: &TrackVirtual) -> Result<String, Box<d
          ON CONFLICT(path) DO UPDATE SET \
             title = excluded.title, duration = excluded.duration, \
             cover_art = excluded.cover_art, source_type = excluded.source_type, \
-            volume = excluded.volume, album_id = excluded.album_id",
+            album_id = excluded.album_id",
         params![
             new_hash,
             meta.title,
@@ -1190,15 +1192,18 @@ mod tests {
         let id = only_track_id(&db);
         db.set_track_color(id, Some("blue")).unwrap();
         db.set_track_invalid(id, true).unwrap();
+        db.set_track_volume_id(id, 0.3).unwrap();
 
         // повторный upsert того же пути (как при re-scan) не должен затирать
-        // пользовательские color/invalid.
+        // пользовательские color/invalid/volume (у свеже-прочитанного трека
+        // громкость дефолтная 1.0 — она НЕ должна перезаписать сохранённую).
         db.save_track(fixture_track(dir.path(), "a.mp3", "T2", "A"))
             .unwrap();
         let track = &db.get_tracks(None, None, Some(id), None).unwrap()[0];
         assert_eq!(track.get_metadata().unwrap().title, "T2");
         assert_eq!(track.color.as_deref(), Some("blue"));
         assert!(track.invalid);
+        assert_eq!(track.volume, 0.3);
     }
 
     #[test]

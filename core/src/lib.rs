@@ -33,13 +33,23 @@ impl Core {
         // отсутствующий/битый конфиг не должен ронять запуск — берём дефолт.
         let config = Config::load(&dirs.data.join(FILE_NAME_CONFIG)).unwrap_or_default();
         // единственные потоки ядра — звуковые, их поднимает AudioEngine (cpal).
-        let engine = AudioEngine::new().unwrap();
+        let mut engine = AudioEngine::new().unwrap();
+        // применяем сохранённую мастер-громкость к движку.
+        engine.set_volume_master(config.master_volume);
         Self {
             config,
             db,
             dirs,
             engine,
         }
+    }
+
+    /// задаёт мастер-громкость: применяет к движку и сохраняет в конфиг на диск,
+    /// чтобы значение пережило перезапуск.
+    pub fn set_master_volume(&mut self, v: f32) {
+        self.config.master_volume = v;
+        self.engine.set_volume_master(v);
+        let _ = self.config.save(&self.dirs.data.join(FILE_NAME_CONFIG));
     }
 }
 

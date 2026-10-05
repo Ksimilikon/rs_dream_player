@@ -1,6 +1,6 @@
 [package]
 name = "dream_player"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 
 [workspace]
@@ -23,17 +23,36 @@ storage = { path = "storage" }
 tui = { path = "tui" }
 core = { path = "core" }
 
-[dependencies]
-clap = { version = "4.6.0", features = ["derive"] }
-directories = "6.0.0"
-serde = { version = "1", features = ["derive"] }
-toml = "1"
+[lib]
+crate-type = ["cdylib", "staticlib"]
 
-# фронтенд (TUI) и хранилище (нужно config.rs для имени файла бд).
-tui = { workspace = true }
-storage = { workspace = true }
+[[bin]]
+name = "dream_player_tui"
+path = "src/main.rs"
+required-features = ["cli"]
+
+# По умолчанию собирается ТОЛЬКО ядро-библиотека (cdylib/staticlib),
+# реэкспортирующая FFI из `api` — без TUI и прочего бинарного обвеса.
+[dependencies]
+api = { workspace = true }
+
+# Всё ниже нужно лишь бинарю-демо (TUI); включается фичей `cli`.
+tui = { workspace = true, optional = true }
+clap = { version = "4.6.0", features = ["derive"], optional = true }
+directories = { version = "6.0.0", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+toml = { version = "1", optional = true }
+# storage нужен config.rs (имя файла бд) только в бинаре.
+storage = { workspace = true, optional = true }
+
+[features]
+# `cli` добавляет сборку демо-бинаря `dream_player_tui` поверх ядра-библиотеки:
+#   cargo build                 -> только ядро (lib), без TUI
+#   cargo build --features cli  -> ещё и бинарь с TUI
+cli = ["dep:tui", "dep:clap", "dep:directories", "dep:serde", "dep:toml", "dep:storage"]
 
 [dev-dependencies]
+storage = { workspace = true }
 audio_structs = { workspace = true }
 tempfile = "3.24.0"
 serial_test = "3.3.1"

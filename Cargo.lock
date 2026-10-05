@@ -852,8 +852,9 @@ dependencies = [
 
 [[package]]
 name = "dream_player"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
+ "api",
  "audio_structs",
  "clap",
  "directories",

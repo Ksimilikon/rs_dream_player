@@ -141,7 +141,9 @@ impl App {
                 }
             }
             if self.force_clear {
-                terminal.clear()?;
+                // очистку не делаем фатальной: промежуточный ресайз может дать
+                // временную ошибку, из-за которой не стоит падать/выходить.
+                let _ = terminal.clear();
                 self.force_clear = false;
             }
         }
@@ -152,6 +154,11 @@ impl App {
     /// фактический размер бэкенда и полная очистка.
     fn startup_resync(&self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         std::thread::sleep(Duration::from_millis(30));
+        // трюк 1×1 + autoresize — обходной путь для части Unix-терминалов
+        // (kitty/tty/zellij). На Windows он лишний и может рассинхронизировать
+        // буфер бэкенда с окном консоли, роняя следующий ресайз, — поэтому
+        // ограничен Unix.
+        #[cfg(unix)]
         if let Ok(size) = terminal.size()
             && size.width > 0
             && size.height > 0
@@ -717,12 +724,18 @@ impl App {
     // ───────────────────────── render ─────────────────────────
 
     fn draw(&mut self, frame: &mut Frame) {
+        // слишком маленькая область (сворачивание/промежуточный ресайз) — ничего
+        // не рисуем, чтобы не делить площадь в ноль и не писать мимо буфера.
+        let area = frame.area();
+        if area.width < 4 || area.height < 6 {
+            return;
+        }
         let [tabbar, content, bottom] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(4),
         ])
-        .areas(frame.area());
+        .areas(area);
 
         self.draw_tabbar(frame, tabbar);
         self.screens[self.current].render(frame, content, &self.model);

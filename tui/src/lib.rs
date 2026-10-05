@@ -7,7 +7,7 @@
 // как демонстрацию API; allow снимет свои предупреждения о них.
 #![allow(dead_code)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 mod app;
 mod ffi;
@@ -33,8 +33,26 @@ pub fn run(dirs: Dirs, master_volume: f32) -> std::io::Result<()> {
     ffi::db::index_dir(None);
 
     let mut terminal = ratatui::init();
+    // паника не должна «уносить» консоль: возвращаем терминал в норму и пишем
+    // причину в лог-файл (консоль под Windows может закрыться — лог останется).
+    install_panic_hook(dirs.config.join("tui_panic.log"));
     let mut app = app::App::new();
     let res = app.run(&mut terminal);
     ratatui::restore();
     res
+}
+
+/// оборачивает текущий обработчик паники: сначала восстанавливает терминал
+/// (raw/alt-экран), затем дописывает сообщение+бэктрейс в `log_path`, затем
+/// вызывает прежний обработчик.
+fn install_panic_hook(log_path: PathBuf) {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // вернуть терминал в нормальный режим до любого вывода.
+        ratatui::restore();
+        let bt = std::backtrace::Backtrace::force_capture();
+        let msg = format!("{info}\n\nbacktrace:\n{bt}\n");
+        let _ = std::fs::write(&log_path, &msg);
+        prev(info);
+    }));
 }

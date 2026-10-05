@@ -1,7 +1,8 @@
 //! вкладка SONG: появляется с началом проигрывания плейлиста. Слева — список
 //! треков играющего плейлиста (играющий выделен зелёным), справа — все
 //! метаданные трека под селектором и обложка под ними. Команды: правка
-//! метаданных (E), правка плейлиста (P), перестановка (Shift+J/K, временно),
+//! метаданных (E), правка плейлиста (P), перестановка (Shift+J/K или ввод
+//! номера позиции цифрами + Enter — всё временно, без записи в бд),
 //! удаление (x — временно, D — ещё и из плейлиста в бд).
 
 use ratatui::{
@@ -15,12 +16,14 @@ use ratatui::{
 use crate::images::ImageManager;
 use crate::ui::{
     Model, Tab, TabEvent,
-    layouts::{Hint, ListLine, ListView, two_pane},
+    layouts::{Hint, ListLine, ListView, target_index, two_pane},
 };
 
 pub struct SongTab {
     list: ListView,
     images: ImageManager,
+    /// набираемый номер позиции для перемещения трека (цифры, Enter — применить).
+    move_buf: String,
 }
 
 impl SongTab {
@@ -28,6 +31,7 @@ impl SongTab {
         Self {
             list: ListView::default(),
             images,
+            move_buf: String::new(),
         }
     }
 
@@ -80,8 +84,13 @@ impl Tab for SongTab {
                     .playing(i == playing.current)
             })
             .collect();
-        self.list
-            .render(frame, left, &playing.name, lines, true);
+        // заголовок левого списка показывает набираемый номер перемещения.
+        let left_title = if self.move_buf.is_empty() {
+            playing.name.clone()
+        } else {
+            format!("{}  move→{}", playing.name, self.move_buf)
+        };
+        self.list.render(frame, left, &left_title, lines, true);
 
         // правая панель: метаданные сверху, обложка снизу.
         let [meta_area, cover_area] =
@@ -95,14 +104,20 @@ impl Tab for SongTab {
                 meta_area,
             );
             // обложка: отдельный файл из индекса либо встроенная в аудиофайл.
-            self.images.set_source(track.cover_art.as_deref(), track.path.as_deref());
             let cover_block = Block::default().borders(Borders::ALL).title(" COVER ");
             let inner = cover_block.inner(cover_area);
             frame.render_widget(cover_block, cover_area);
-            if self.images.supported() && self.images.has_image() {
-                self.images.render(frame, inner);
-            } else {
-                frame.render_widget(Paragraph::new("(no cover / unsupported terminal)"), inner);
+            // ВАЖНО: рендер картинки (ratatui-image) в почти нулевую площадь
+            // паникует (особенно на Windows при ресайзе) — рисуем только если
+            // области хватает.
+            if inner.width >= 2 && inner.height >= 2 {
+                self.images
+                    .set_source(track.cover_art.as_deref(), track.path.as_deref());
+                if self.images.supported() && self.images.has_image() {
+                    self.images.render(frame, inner);
+                } else {
+                    frame.render_widget(Paragraph::new("(no cover / unsupported terminal)"), inner);
+                }
             }
         }
     }
@@ -110,12 +125,38 @@ impl Tab for SongTab {
     fn on_key(&mut self, key: KeyEvent, model: &Model) -> TabEvent {
         let len = model.playing.as_ref().map(|p| p.tracks.len()).unwrap_or(0);
         let sel = self.list.selected();
+        // набор номера позиции: цифры копим, Enter применяет (перемещение
+        // временное, в бд не пишется).
+        if let KeyCode::Char(c) = key.code
+            && c.is_ascii_digit()
+        {
+            if self.move_buf.len() < 6 {
+                self.move_buf.push(c);
+            }
+            return TabEvent::None;
+        }
         match key.code {
+            KeyCode::Enter if !self.move_buf.is_empty() => {
+                let buf = std::mem::take(&mut self.move_buf);
+                match target_index(&buf, len) {
+                    Some(to) => {
+                        self.list.select(to);
+                        TabEvent::MovePlaying { from: sel, to }
+                    }
+                    None => TabEvent::None,
+                }
+            }
+            KeyCode::Esc => {
+                self.move_buf.clear();
+                TabEvent::None
+            }
             KeyCode::Char('j') | KeyCode::Down => {
+                self.move_buf.clear();
                 self.list.down();
                 TabEvent::None
             }
             KeyCode::Char('k') | KeyCode::Up => {
+                self.move_buf.clear();
                 self.list.up();
                 TabEvent::None
             }
@@ -144,11 +185,13 @@ impl Tab for SongTab {
             ("E", "meta"),
             ("P", "pl"),
             ("JK", "move"),
+            ("0-9+Ent", "to#"),
             ("x/D", "del"),
         ]
     }
 
     fn on_tracks_changed(&mut self) {
+        self.move_buf.clear();
         self.list.select(0);
     }
 }

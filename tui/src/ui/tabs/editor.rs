@@ -14,7 +14,7 @@ use ratatui::{
 use crate::ffi::TrackMeta;
 use crate::ui::{
     Model, Tab, TabEvent,
-    layouts::{Hint, ListLine, ListView, SortDir, SortKey, TextField},
+    layouts::{Hint, ListLine, ListView, SortDir, SortKey, TextField, target_index},
 };
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -36,6 +36,8 @@ pub struct PlaylistEditor {
     sort_key: SortKey,
     sort_dir: SortDir,
     hide_added: bool,
+    /// набираемый номер позиции для перемещения трека в собираемом списке.
+    move_buf: String,
 }
 
 impl PlaylistEditor {
@@ -62,6 +64,7 @@ impl PlaylistEditor {
             sort_key: SortKey::Title,
             sort_dir: SortDir::Asc,
             hide_added: true,
+            move_buf: String::new(),
         }
     }
 
@@ -167,8 +170,13 @@ impl Tab for PlaylistEditor {
             .enumerate()
             .map(|(i, t)| ListLine::new(format!("{:>3}. {} — {}", i + 1, t.title, t.artists_line())))
             .collect();
+        let left_title = if self.move_buf.is_empty() {
+            "PLAYLIST".to_string()
+        } else {
+            format!("PLAYLIST  move→{}", self.move_buf)
+        };
         self.left
-            .render(frame, left_area, "PLAYLIST", left_lines, self.focus == Focus::Left);
+            .render(frame, left_area, &left_title, left_lines, self.focus == Focus::Left);
 
         // справа — пул с чекбоксами и строкой настроек в заголовке.
         let view = self.pool_view();
@@ -195,6 +203,28 @@ impl Tab for PlaylistEditor {
             self.handle_edit_name(key);
             return TabEvent::None;
         }
+        // набор номера позиции (только в собираемом списке): копим цифры,
+        // Enter — переместить выбранный трек на эту позицию.
+        if let KeyCode::Char(c) = key.code
+            && c.is_ascii_digit()
+        {
+            if self.focus == Focus::Left && self.move_buf.len() < 6 {
+                self.move_buf.push(c);
+            }
+            return TabEvent::None;
+        }
+        if key.code == KeyCode::Enter && self.focus == Focus::Left && !self.move_buf.is_empty() {
+            let buf = std::mem::take(&mut self.move_buf);
+            if let Some(to) = target_index(&buf, self.assembled.len()) {
+                let from = self.left.selected();
+                let item = self.assembled.remove(from);
+                self.assembled.insert(to, item);
+                self.left.select(to);
+            }
+            return TabEvent::None;
+        }
+        // любая другая клавиша сбрасывает набранный номер.
+        self.move_buf.clear();
         match key.code {
             KeyCode::Esc => TabEvent::Close,
             KeyCode::Char('W') => {
@@ -266,6 +296,7 @@ impl Tab for PlaylistEditor {
             ("Tab/hl", "foc"),
             ("jk", "nav"),
             ("Ent", "add/edit"),
+            ("0-9+Ent", "to#"),
             ("SRT", "sort"),
             ("W", "save"),
             ("Esc", "cxl"),

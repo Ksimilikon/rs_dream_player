@@ -1,8 +1,7 @@
 use core::{Core, dirs::Dirs};
 use std::{
     error::Error,
-    ffi::{CStr, OsStr, c_char},
-    os::unix::ffi::OsStrExt,
+    ffi::{CStr, c_char},
     path::PathBuf,
     sync::{Mutex, OnceLock},
 };
@@ -13,16 +12,24 @@ pub mod player;
 
 static GLOBAL_STATE: OnceLock<Mutex<Core>> = OnceLock::new();
 
+/// превращает C-строку в путь. На Unix байты интерпретируются как есть
+/// (пути — произвольные байты), на Windows/прочих — как UTF-8.
 pub(crate) fn ptr_to_path(ptr: *const c_char) -> Result<PathBuf, Box<dyn Error>> {
-    unsafe {
-        if ptr.is_null() {
-            return Err("FFI::null pointer for string".into());
-        }
-        let c_str = CStr::from_ptr(ptr);
-        let bytes = c_str.to_bytes();
-        let os_str = OsStr::from_bytes(bytes);
-        let path = PathBuf::from(os_str);
-        Ok(path)
+    if ptr.is_null() {
+        return Err("FFI::null pointer for string".into());
+    }
+    let c_str = unsafe { CStr::from_ptr(ptr) };
+
+    #[cfg(unix)]
+    {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        Ok(PathBuf::from(OsStr::from_bytes(c_str.to_bytes())))
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows и прочие: фронтенд передаёт путь в UTF-8.
+        Ok(PathBuf::from(c_str.to_str()?))
     }
 }
 

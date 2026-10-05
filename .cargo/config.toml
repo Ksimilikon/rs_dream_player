@@ -1,6 +1,13 @@
 # Export the binary's dynamic symbols so mods loaded at runtime via libloading
 # (dlopen) can resolve the `extern "C"` API functions (next, prev, get_playlist,
 # ...). Without this the symbols stay private to the executable and mods fail to
-# link against them.
+# link against them. (cfg(unix) => не применяется при кросс-сборке под Windows.)
 [target.'cfg(unix)']
 rustflags = ["-C", "link-args=-rdynamic"]
+
+# Кросс-компиляция Linux -> Windows (GNU ABI). Требует установленного таргета
+# `x86_64-pc-windows-gnu` и MinGW-w64 (gcc/ar) — он же компилирует bundled sqlite3.c.
+# Сборка: `cargo build --target x86_64-pc-windows-gnu`.
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-ar"

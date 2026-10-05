@@ -20,14 +20,18 @@ pub struct Core {
 }
 impl Core {
     pub fn new(dirs: Dirs, need_db: bool) -> Self {
+        // каталог данных может ещё не существовать (первый запуск) — сюда лягут
+        // бд и конфиг; без него Db::init/сохранение конфига упадут.
+        let _ = std::fs::create_dir_all(&dirs.data);
+
         let db = if need_db {
             // WARN: panic
             Some(storage::Db::init(dirs.data.join(FILE_NAME_DB)).unwrap())
         } else {
             None
         };
-        // WARN: panic
-        let config = Config::load(&dirs.data.join(FILE_NAME_CONFIG)).unwrap();
+        // отсутствующий/битый конфиг не должен ронять запуск — берём дефолт.
+        let config = Config::load(&dirs.data.join(FILE_NAME_CONFIG)).unwrap_or_default();
         // единственные потоки ядра — звуковые, их поднимает AudioEngine (cpal).
         let engine = AudioEngine::new().unwrap();
         Self {

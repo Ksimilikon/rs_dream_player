@@ -17,7 +17,12 @@ impl Default for Config {
     }
 }
 impl Config {
+    /// загружает конфиг из `path`. Если файла нет — возвращает значения по
+    /// умолчанию (файл не создаётся), чтобы первый запуск не падал.
     pub fn load(path: &Path) -> Result<Self, Box<dyn Error>> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
         let text = fs::read_to_string(path)?;
         let config: Config = toml::from_str(&text)?;
         Ok(config)

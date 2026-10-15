@@ -798,6 +798,14 @@ impl App {
             );
             return;
         }
+        // строка ввода вкладки (поиск `/`) — с курсором в позиции каретки.
+        if self.command.is_none()
+            && let Some((text, caret)) = self.screens[self.current].prompt()
+        {
+            frame.render_widget(Paragraph::new(text), hints);
+            frame.set_cursor_position((hints.x + caret as u16, hints.y));
+            return;
+        }
         match (&self.command, &self.status) {
             (Some(buf), _) => {
                 frame.render_widget(Paragraph::new(format!(":{}", buf.text())), hints);

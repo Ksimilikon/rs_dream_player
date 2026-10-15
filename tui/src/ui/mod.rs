@@ -121,6 +121,11 @@ pub trait Tab {
     fn wants_input(&self) -> bool {
         false
     }
+    /// строка ввода вкладки для нижней панели (поиск `/`): текст и позиция
+    /// курсора в символах. `None` — вкладка ничего не вводит.
+    fn prompt(&self) -> Option<(String, usize)> {
+        None
+    }
     /// список треков сменился — сбросить курсоры.
     fn on_tracks_changed(&mut self) {}
 }

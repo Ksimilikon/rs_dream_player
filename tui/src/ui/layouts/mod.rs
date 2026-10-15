@@ -1,14 +1,16 @@
 //! переиспользуемые заготовки интерфейса: унифицированный список, поле ввода с
-//! кареткой, строка подсказок, прогресс-бар и общие схемы расположения вкладок.
+//! кареткой, поиск по списку треков, строка подсказок, прогресс-бар и общие схемы расположения вкладок.
 
 mod hints;
 mod list;
 mod progress;
+mod search;
 mod text;
 
 pub use hints::{Hint, hints_line};
 pub use list::{ListLine, ListView, SortDir, SortKey};
 pub use progress::progress_bar;
+pub use search::{Search, SearchInput};
 pub use text::TextField;
 
 use ratatui::layout::{Constraint, Layout, Rect};

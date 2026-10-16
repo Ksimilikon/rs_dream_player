@@ -1,13 +1,18 @@
 //! переиспользуемые заготовки интерфейса: унифицированный список, поле ввода с
-//! кареткой, поиск по списку треков, строка подсказок, прогресс-бар и общие схемы расположения вкладок.
+//! кареткой, поиск по списку треков, строка подсказок, прогресс-бар, форма
+//! «метка — значение», журнал сообщений и общие схемы расположения вкладок.
 
+mod form;
 mod hints;
 mod list;
+mod log;
 mod progress;
 mod search;
 mod text;
 
+pub use form::{Form, FormField};
 pub use hints::{Hint, hints_line};
+pub use log::MessageLog;
 pub use list::{ListLine, ListView, SortDir, SortKey};
 pub use progress::progress_bar;
 pub use search::{Search, SearchInput};

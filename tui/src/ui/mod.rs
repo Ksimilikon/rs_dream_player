@@ -84,6 +84,8 @@ pub enum TabEvent {
     SaveMeta(MetaEdit),
     /// переключить устройство вывода по имени.
     SetOutputDevice(String),
+    /// библиотека изменилась извне (импорт) — перечитать.
+    LibraryChanged,
     /// разовое сообщение в статус-строку.
     Status(String),
 }

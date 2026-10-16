@@ -244,8 +244,8 @@ enum Selection<'a> {
     Library,
     /// треки по id, без плейлистов.
     Tracks(&'a [i64]),
-    /// плейлисты по id и все их песни.
-    Playlists(&'a [i64]),
+    /// плейлисты по имени и все их песни.
+    Playlists(&'a [String]),
 }
 
 /// общая упаковка из бд.
@@ -276,9 +276,9 @@ fn pack_from_db(
                 }
                 (tracks, Vec::new())
             }
-            Selection::Playlists(ids) => {
-                let playlists = db.get_playlist_hashes(Some(ids)).map_err(read)?;
-                if playlists.len() != ids.len() {
+            Selection::Playlists(names) => {
+                let playlists = db.get_playlist_hashes(Some(names)).map_err(read)?;
+                if playlists.len() != names.len() {
                     return Err(FFICdcStatus::PlaylistNotFound);
                 }
                 // песни всех плейлистов без повторов, в порядке первого
@@ -683,18 +683,19 @@ pub unsafe extern "C" fn cdc_pack_tracks(
     unsafe { finish_bytes(res, out_ptr, out_len) }
 }
 
-/// пакет из плейлистов бд по их id (`ids[..ids_len]`, порядок сохраняется)
-/// вместе со всеми их песнями (без повторов). Любой ненайденный id ->
-/// `PlaylistNotFound`. Освобождать `cdc_free_bytes`.
+/// пакет из плейлистов бд по их именам (`names[..names_len]`, порядок
+/// сохраняется) вместе со всеми их песнями (без повторов). Имя — идентификатор
+/// плейлиста (локальный id между устройствами не совпадает). Любое ненайденное
+/// имя -> `PlaylistNotFound`. Освобождать `cdc_free_bytes`.
 ///
 /// # Safety
-/// `ids` валиден на `ids_len` элементов (null допустим при `ids_len == 0`);
-/// `out_ptr`/`out_len` — валидные указатели.
+/// `names` валиден на `names_len` нуль-терминированных строк (null допустим
+/// при `names_len == 0`); `out_ptr`/`out_len` — валидные указатели.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cdc_pack_playlists(
     version: u32,
-    ids: *const i64,
-    ids_len: usize,
+    names: *const *const c_char,
+    names_len: usize,
     with_audio: bool,
     with_names: bool,
     with_covers: bool,
@@ -704,10 +705,20 @@ pub unsafe extern "C" fn cdc_pack_playlists(
     if !unsafe { reset_bytes(out_ptr, out_len) } {
         return FFICdcStatus::NullPointer;
     }
-    let Some(ids) = (unsafe { raw_slice(ids, ids_len) }) else {
+    let Some(raw) = (unsafe { raw_slice(names, names_len) }) else {
         return FFICdcStatus::NullPointer;
     };
-    let res = pack_from_db(version, Selection::Playlists(ids), with_audio, with_names, with_covers);
+    let mut list = Vec::with_capacity(raw.len());
+    for &p in raw {
+        if p.is_null() {
+            return FFICdcStatus::NullPointer;
+        }
+        match unsafe { c_to_name(p) } {
+            Ok(name) => list.push(name),
+            Err(e) => return e,
+        }
+    }
+    let res = pack_from_db(version, Selection::Playlists(&list), with_audio, with_names, with_covers);
     unsafe { finish_bytes(res, out_ptr, out_len) }
 }
 

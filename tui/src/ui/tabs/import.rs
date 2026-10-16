@@ -1,0 +1,213 @@
+//! вкладка IMPORT (`:import`): импорт файла пакета в библиотеку. TUI здесь —
+//! фронтенд из двухшагового импорта ядра: ядро отдаёт файлы (песни и
+//! обложки), вкладка пишет их в каталог SAVE TO (по умолчанию — каталог
+//! музыки) и передаёт ядру итоговые пути. Путь к пакету по умолчанию —
+//! каталог, из которого запущено приложение. Запуск — Shift+W.
+
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+
+use api::cdc::FFICdcStatus;
+use ratatui::{
+    Frame,
+    crossterm::event::{KeyCode, KeyEvent},
+    layout::{Constraint, Layout, Rect},
+};
+
+use super::export::human_size;
+use crate::ffi::cdc::{self, PreparedImport};
+use crate::ui::{
+    Model, Tab, TabEvent,
+    layouts::{Form, FormField, Hint, MessageLog},
+};
+
+const F_PACKET: usize = 0;
+const F_SAVE_TO: usize = 1;
+const F_FORCE: usize = 2;
+
+pub struct ImportTab {
+    form: Form,
+    log: MessageLog,
+}
+
+impl ImportTab {
+    pub fn new(music_dir: &Path) -> Self {
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let form = Form::new(vec![
+            FormField::text("PACKET", &cwd),
+            FormField::text("SAVE TO", &music_dir.to_string_lossy()),
+            FormField::toggle("FORCE", false),
+        ]);
+        let mut log = MessageLog::default();
+        log.info("set the packet file and target dir, then Shift+W to import");
+        Self { form, log }
+    }
+
+    /// весь импорт; `true` — библиотека изменилась.
+    fn run(&mut self) -> bool {
+        let packet = PathBuf::from(self.form.text(F_PACKET).trim());
+        let save_to = PathBuf::from(self.form.text(F_SAVE_TO).trim());
+        let force = self.form.toggle(F_FORCE);
+
+        if packet.is_dir() {
+            self.log.error(format!("packet path is a directory: {}", packet.display()));
+            return false;
+        }
+        let bytes = match fs::read(&packet) {
+            Ok(b) => b,
+            Err(e) => {
+                self.log.error(format!("failed to read {}: {e}", packet.display()));
+                return false;
+            }
+        };
+        self.log.info(format!(
+            "read {} from {}{}",
+            human_size(bytes.len()),
+            packet.display(),
+            if force { " (force)" } else { "" }
+        ));
+
+        // шаг 1: ядро проверяет пакет и даты.
+        let prepared = match PreparedImport::prepare(&bytes, force) {
+            Ok(p) => p,
+            Err(FFICdcStatus::Outdated) => {
+                self.log.warn(cdc::describe(FFICdcStatus::Outdated));
+                return false;
+            }
+            Err(st) => {
+                self.log.error(format!("import rejected: {}", cdc::describe(st)));
+                return false;
+            }
+        };
+        drop(bytes);
+
+        // шаг 2: пишем файлы сами.
+        let files = prepared.files();
+        let (songs, covers) = files.iter().fold((0, 0), |(s, c), f| match f.cover {
+            true => (s, c + 1),
+            false => (s + 1, c),
+        });
+        self.log.info(format!(
+            "{songs} new song(s), {covers} cover(s) to write into {}",
+            save_to.display()
+        ));
+        let mut written: Vec<PathBuf> = Vec::with_capacity(files.len());
+        for f in &files {
+            match write_unique(&save_to, &f.name, f.data) {
+                Ok(path) => written.push(path),
+                Err(e) => {
+                    self.log.error(format!("failed to write {}: {e}", f.name));
+                    remove_all(&written);
+                    // prepared отменяется в Drop.
+                    return false;
+                }
+            }
+        }
+        drop(files);
+
+        // шаг 3: ядро сохраняет пути.
+        let paths: Vec<Option<&Path>> = written.iter().map(|p| Some(p.as_path())).collect();
+        match prepared.commit(&paths) {
+            Ok(()) => {
+                self.log.ok(format!("imported: {songs} song(s), {covers} cover(s)"));
+                true
+            }
+            Err(st) => {
+                remove_all(&written);
+                match st {
+                    FFICdcStatus::Outdated => self.log.warn(format!(
+                        "{} (library changed during import)",
+                        cdc::describe(st)
+                    )),
+                    _ => self.log.error(format!("import failed: {}", cdc::describe(st))),
+                }
+                false
+            }
+        }
+    }
+}
+
+impl Tab for ImportTab {
+    fn title(&self) -> String {
+        "IMPORT".to_string()
+    }
+
+    fn render(&mut self, frame: &mut Frame, area: Rect, _model: &Model) {
+        let [top, bottom] =
+            Layout::vertical([Constraint::Length(5), Constraint::Min(4)]).areas(area);
+        self.form.render(frame, top, "import", true);
+        self.log.render(frame, bottom);
+    }
+
+    fn on_key(&mut self, key: KeyEvent, _model: &Model) -> TabEvent {
+        if self.form.editing {
+            self.form.edit_key(key);
+            return TabEvent::None;
+        }
+        match key.code {
+            KeyCode::Char('W') => {
+                if self.run() {
+                    return TabEvent::LibraryChanged;
+                }
+            }
+            KeyCode::Char('j') | KeyCode::Down => self.form.down(),
+            KeyCode::Char('k') | KeyCode::Up => self.form.up(),
+            KeyCode::Enter | KeyCode::Char('i') => {
+                self.form.activate();
+            }
+            _ => {}
+        }
+        TabEvent::None
+    }
+
+    fn hints(&self) -> Vec<Hint> {
+        vec![("jk", "fld"), ("Ent", "edit"), ("W", "import")]
+    }
+
+    fn wants_input(&self) -> bool {
+        self.form.editing
+    }
+}
+
+/// пишет `data` в `dir/name`, не перезаписывая существующие файлы: при
+/// занятом имени — `name (1).ext`, `name (2).ext`, ...
+fn write_unique(dir: &Path, name: &str, data: &[u8]) -> io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
+    let (path, mut file) = create_unique(dir, name)?;
+    if let Err(e) = file.write_all(data) {
+        let _ = fs::remove_file(&path);
+        return Err(e);
+    }
+    Ok(path)
+}
+
+fn create_unique(dir: &Path, name: &str) -> io::Result<(PathBuf, File)> {
+    let base = Path::new(name);
+    let stem = base.file_stem().map_or(name.into(), |s| s.to_string_lossy());
+    let ext = base
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    for n in 0..10_000 {
+        let candidate = match n {
+            0 => name.to_owned(),
+            _ => format!("{stem} ({n}){ext}"),
+        };
+        let path = dir.join(candidate);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::ErrorKind::AlreadyExists.into())
+}
+
+fn remove_all(paths: &[PathBuf]) {
+    for p in paths {
+        let _ = fs::remove_file(p);
+    }
+}

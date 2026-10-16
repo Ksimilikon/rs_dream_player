@@ -18,7 +18,10 @@ use crate::integration::{Media, MediaCommand, MediaMeta};
 use crate::ui::{
     MetaEdit, Model, Playing, PlaylistView, Tab, TabEvent,
     layouts::{Hint, TextField, hints_line, progress_bar},
-    tabs::{HelpTab, PlaylistEditor, PlaylistsTab, SettingsTab, SongEditor, SongTab},
+    tabs::{
+        ExportTab, HelpTab, ImportTab, PlaylistEditor, PlaylistsTab, SettingsTab, SongEditor,
+        SongTab,
+    },
 };
 
 const VOL_STEP: f32 = 0.05;
@@ -63,10 +66,12 @@ pub struct App {
     quit: bool,
     /// системная медиа-интеграция (MPRIS/SMTC) — команды и метаданные.
     media: Media,
+    /// каталог музыки (куда по умолчанию пишет импорт).
+    music_dir: std::path::PathBuf,
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(music_dir: std::path::PathBuf) -> Self {
         let mut app = Self {
             model: Model {
                 playlists: Vec::new(),
@@ -82,6 +87,7 @@ impl App {
             force_clear: false,
             quit: false,
             media: Media::start(),
+            music_dir,
         };
         app.reload_library();
         app
@@ -473,6 +479,13 @@ impl App {
                 self.set_status("metadata saved", Status::Info);
             }
             TabEvent::SetOutputDevice(name) => self.switch_device(name),
+            TabEvent::LibraryChanged => {
+                self.reload_library();
+                self.refresh_playing();
+                for t in self.screens.iter_mut() {
+                    t.on_tracks_changed();
+                }
+            }
             TabEvent::Status(msg) => self.set_status(msg, Status::Warn),
         }
     }
@@ -684,6 +697,11 @@ impl App {
             "help" => self.open_help(),
             "settings" | "device" | "dev" => {
                 self.push_transient(Box::new(SettingsTab::default()))
+            }
+            "export" => self.push_transient(Box::new(ExportTab::new())),
+            "import" => {
+                let tab = ImportTab::new(&self.music_dir);
+                self.push_transient(Box::new(tab))
             }
             "seek" => match arg.parse::<u64>() {
                 Ok(secs) => {

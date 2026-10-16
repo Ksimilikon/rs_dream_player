@@ -547,11 +547,13 @@ impl Db {
         Ok(out)
     }
 
-    /// плейлисты с хешами их песен в порядке плейлиста. `ids` == `None` -> все
-    /// (по возрастанию id); иначе — в порядке `ids`, ненайденные id пропускаются.
+    /// плейлисты с хешами их песен в порядке плейлиста. `names` == `None` ->
+    /// все (по возрастанию id); иначе — в порядке `names`, ненайденные имена
+    /// пропускаются. Имя — идентификатор плейлиста (уникально и одинаково на
+    /// всех устройствах, в отличие от локального id).
     pub fn get_playlist_hashes(
         &self,
-        ids: Option<&[i64]>,
+        names: Option<&[String]>,
     ) -> Result<Vec<PlaylistHashRow>, Box<dyn Error>> {
         const COLUMNS: &str = "SELECT id, name, cover_art, created_at, updated_at FROM playlists";
         let meta = |r: &rusqlite::Row<'_>| {
@@ -564,17 +566,17 @@ impl Db {
                 hashes: Vec::new(),
             })
         };
-        let mut metas = match ids {
+        let mut metas = match names {
             None => self
                 .conn
                 .prepare(&format!("{COLUMNS} ORDER BY id"))?
                 .query_map([], meta)?
                 .collect::<Result<Vec<_>, _>>()?,
-            Some(ids) => {
-                let mut stmt = self.conn.prepare(&format!("{COLUMNS} WHERE id = ?1"))?;
-                let mut out = Vec::with_capacity(ids.len());
-                for id in ids {
-                    if let Some(found) = stmt.query_map([id], meta)?.next() {
+            Some(names) => {
+                let mut stmt = self.conn.prepare(&format!("{COLUMNS} WHERE name = ?1"))?;
+                let mut out = Vec::with_capacity(names.len());
+                for name in names {
+                    if let Some(found) = stmt.query_map([name], meta)?.next() {
                         out.push(found?);
                     }
                 }
@@ -760,6 +762,8 @@ pub type TrackHashRow = (i64, String, PathBuf);
 
 /// плейлист с хешами песен — см. [`Db::get_playlist_hashes`].
 pub struct PlaylistHashRow {
+    /// локальный id в бд этого устройства (в пакет не попадает; при
+    /// `save_import` игнорируется — плейлист ищется по имени).
     pub id: i64,
     pub name: String,
     pub cover_art: Option<PathBuf>,
@@ -1213,9 +1217,9 @@ mod tests {
         assert_eq!((pls[0].created_at, pls[0].updated_at), (Some(100), Some(200)));
         assert!(pls[1].hashes.is_empty() && pls[1].created_at.is_none());
 
-        // по id: порядок запроса, ненайденные пропускаются.
+        // по имени: порядок запроса, ненайденные пропускаются.
         let picked = db
-            .get_playlist_hashes(Some(&[pls[1].id, 9_999, pls[0].id]))
+            .get_playlist_hashes(Some(&["empty".into(), "nope".into(), "mix".into()]))
             .unwrap();
         assert_eq!(
             picked.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),

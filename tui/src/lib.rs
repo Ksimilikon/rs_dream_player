@@ -36,7 +36,7 @@ pub fn run(dirs: Dirs) -> std::io::Result<()> {
     // паника не должна «уносить» консоль: возвращаем терминал в норму и пишем
     // причину в лог-файл (консоль под Windows может закрыться — лог останется).
     install_panic_hook(dirs.config.join("tui_panic.log"));
-    let mut app = app::App::new();
+    let mut app = app::App::new(dirs.music.to_path_buf());
     let res = app.run(&mut terminal);
     ratatui::restore();
     res

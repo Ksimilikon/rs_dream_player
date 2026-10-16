@@ -11,7 +11,7 @@ members = [
   "storage",
   "tui",
   "notify_hub",
-  "core",
+  "core", "codec",
 ]
 resolver = "2"
 
@@ -22,6 +22,7 @@ audio_structs = { path = "audio_structs" }
 storage = { path = "storage" }
 tui = { path = "tui" }
 core = { path = "core" }
+codec = { path = "codec" }
 
 [lib]
 crate-type = ["cdylib", "staticlib"]

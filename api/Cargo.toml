@@ -13,5 +13,6 @@ core = { workspace = true }
 audio = { workspace = true }
 audio_structs = { workspace = true }
 storage = { workspace = true }
+codec = { workspace = true }
 
 libloading = "0.9.0"

@@ -107,6 +107,7 @@ version = "0.1.0"
 dependencies = [
  "audio",
  "audio_structs",
+ "codec",
  "core",
  "libloading",
  "storage",
@@ -439,6 +440,10 @@ dependencies = [
  "libc",
  "objc",
 ]
+
+[[package]]
+name = "codec"
+version = "0.1.0"
 
 [[package]]
 name = "color_quant"

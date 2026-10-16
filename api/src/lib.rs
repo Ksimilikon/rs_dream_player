@@ -6,6 +6,7 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+pub mod cdc;
 pub mod idx;
 pub mod mem;
 pub mod player;

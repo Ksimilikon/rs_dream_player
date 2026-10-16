@@ -1,0 +1,35 @@
+//! packet format versions.
+
+use crate::CodecError;
+
+/// packet format version. On the wire it is a plain `u32` number: the
+/// discriminant of the variant (`V0_1` → `1`). New versions get the next
+/// number; existing numbers never change.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Version {
+    /// v0.1: layout described in the crate docs.
+    V0_1 = 1,
+}
+
+impl Version {
+    /// the newest version, used for new packets.
+    pub const LATEST: Version = Version::V0_1;
+}
+
+impl From<Version> for u32 {
+    fn from(v: Version) -> u32 {
+        v as u32
+    }
+}
+
+impl TryFrom<u32> for Version {
+    type Error = CodecError;
+
+    fn try_from(n: u32) -> Result<Self, Self::Error> {
+        match n {
+            1 => Ok(Version::V0_1),
+            _ => Err(CodecError::UnsupportedVersion),
+        }
+    }
+}

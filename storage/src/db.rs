@@ -1,8 +1,11 @@
 //! NOTATION (naming convention for the storage layer)
 //! get_*()    -> read: `get_tracks`/`get_playlists` query (many), trait
 //!               `get_track`/`get_playlist` fetch one by key (hash/name),
-//!               `get_pool`, `get_track_paths`, `get_playlist_track_paths`.
-//! save_*()   -> insert-or-update a whole entity (`save_track`, `save_playlist`).
+//!               `get_pool`, `get_track_paths`, `get_track_hashes`,
+//!               `get_track_hashes_by_hash`, `get_playlist_hashes`,
+//!               `get_playlist_track_paths`.
+//! save_*()   -> insert-or-update a whole entity (`save_track`, `save_playlist`,
+//!               `save_import` — a whole imported packet in one transaction).
 //! set_*()    -> update one field of an entity (`set_track_title`,
 //!               `set_track_meta`, `set_track_cover`, `set_track_path`, ...).
 //! remove_*() -> delete (`remove_track`, `remove_invalid_tracks`).
@@ -271,7 +274,7 @@ impl Db {
             if path.is_dir() {
                 self.index_dir_rec(&path)?;
             } else if let Ok(track) = TrackVirtual::from_file(path, false) {
-                upsert_track(&self.conn, &track)?;
+                upsert_track(&self.conn, &track, None)?;
             }
         }
         Ok(())
@@ -484,6 +487,162 @@ impl Db {
         Ok(rows)
     }
 
+    /// тройки (id, hash, path) треков. `ids` == `None` -> вся библиотека
+    /// (по возрастанию id); иначе — в порядке `ids`, ненайденные id пропускаются.
+    pub fn get_track_hashes(
+        &self,
+        ids: Option<&[i64]>,
+    ) -> Result<Vec<TrackHashRow>, Box<dyn Error>> {
+        let row = |r: &rusqlite::Row<'_>| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                PathBuf::from(r.get::<_, String>(2)?),
+            ))
+        };
+        let Some(ids) = ids else {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, hash, path FROM tracks ORDER BY id")?;
+            let rows = stmt.query_map([], row)?.collect::<Result<Vec<_>, _>>()?;
+            return Ok(rows);
+        };
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, hash, path FROM tracks WHERE id = ?1")?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(found) = stmt.query_map([id], row)?.next() {
+                out.push(found?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// тройки (id, hash, path) треков по их хешам, в порядке `hashes`;
+    /// ненайденные хеши пропускаются.
+    pub fn get_track_hashes_by_hash(
+        &self,
+        hashes: &[String],
+    ) -> Result<Vec<TrackHashRow>, Box<dyn Error>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, hash, path FROM tracks WHERE hash = ?1")?;
+        let mut out = Vec::with_capacity(hashes.len());
+        for hash in hashes {
+            let found = stmt
+                .query_map([hash], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        PathBuf::from(r.get::<_, String>(2)?),
+                    ))
+                })?
+                .next();
+            if let Some(found) = found {
+                out.push(found?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// плейлисты с хешами их песен в порядке плейлиста. `ids` == `None` -> все
+    /// (по возрастанию id); иначе — в порядке `ids`, ненайденные id пропускаются.
+    pub fn get_playlist_hashes(
+        &self,
+        ids: Option<&[i64]>,
+    ) -> Result<Vec<PlaylistHashRow>, Box<dyn Error>> {
+        const COLUMNS: &str = "SELECT id, name, cover_art, created_at, updated_at FROM playlists";
+        let meta = |r: &rusqlite::Row<'_>| {
+            Ok(PlaylistHashRow {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                cover_art: r.get::<_, Option<String>>(2)?.map(PathBuf::from),
+                created_at: r.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                updated_at: r.get::<_, Option<i64>>(4)?.map(|v| v as u64),
+                hashes: Vec::new(),
+            })
+        };
+        let mut metas = match ids {
+            None => self
+                .conn
+                .prepare(&format!("{COLUMNS} ORDER BY id"))?
+                .query_map([], meta)?
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(ids) => {
+                let mut stmt = self.conn.prepare(&format!("{COLUMNS} WHERE id = ?1"))?;
+                let mut out = Vec::with_capacity(ids.len());
+                for id in ids {
+                    if let Some(found) = stmt.query_map([id], meta)?.next() {
+                        out.push(found?);
+                    }
+                }
+                out
+            }
+        };
+
+        let mut tracks = self.conn.prepare(
+            "SELECT song_hash FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position",
+        )?;
+        for pl in &mut metas {
+            pl.hashes = tracks
+                .query_map([pl.id], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        Ok(metas)
+    }
+
+    /// сохраняет импорт пакета одной транзакцией (всё или ничего):
+    /// - `tracks` — новые треки (файл уже лежит по `get_path()`) с хешами из
+    ///   пакета;
+    /// - `playlists` — плейлисты по имени (`id` игнорируется): создаются или
+    ///   переписываются целиком списком `hashes`. `None` в обложке/датах не
+    ///   затирает уже сохранённое значение.
+    pub fn save_import(
+        &self,
+        tracks: &[(TrackVirtual, String)],
+        playlists: &[PlaylistHashRow],
+    ) -> Result<(), Box<dyn Error>> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (track, hash) in tracks {
+            upsert_track(&tx, track, Some(hash))?;
+        }
+        for pl in playlists {
+            tx.execute(
+                "INSERT INTO playlists (name, cover_art, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(name) DO UPDATE SET \
+                    cover_art = COALESCE(excluded.cover_art, cover_art), \
+                    created_at = COALESCE(excluded.created_at, created_at), \
+                    updated_at = COALESCE(excluded.updated_at, updated_at)",
+                params![
+                    pl.name,
+                    pl.cover_art.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                    pl.created_at.map(|t| t as i64),
+                    pl.updated_at.map(|t| t as i64),
+                ],
+            )?;
+            let playlist_id: i64 =
+                tx.query_row("SELECT id FROM playlists WHERE name = ?1", [&pl.name], |r| {
+                    r.get(0)
+                })?;
+            tx.execute(
+                "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
+                [playlist_id],
+            )?;
+            for (pos, hash) in pl.hashes.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO playlist_tracks (playlist_id, song_hash, position) \
+                     VALUES (?1, ?2, ?3)",
+                    params![playlist_id, hash, pos as i64],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// пары (id, path) треков конкретного плейлиста по его имени.
     pub fn get_playlist_track_paths(&self, name: &str) -> Result<Vec<(i64, PathBuf)>, Box<dyn Error>> {
         let mut stmt = self.conn.prepare(
@@ -503,7 +662,7 @@ impl Db {
 
 impl Indexator for Db {
     fn save_track(&self, track: TrackVirtual) -> Result<(), Box<dyn Error>> {
-        upsert_track(&self.conn, &track)?;
+        upsert_track(&self.conn, &track, None)?;
         Ok(())
     }
 
@@ -551,7 +710,7 @@ impl Indexator for Db {
             [playlist_id],
         )?;
         for (pos, track) in playlist.tracks().iter().enumerate() {
-            let hash = upsert_track(&tx, track)?;
+            let hash = upsert_track(&tx, track, None)?;
             tx.execute(
                 "INSERT INTO playlist_tracks (playlist_id, song_hash, position) \
                  VALUES (?1, ?2, ?3)",
@@ -596,6 +755,20 @@ impl Indexator for Db {
     }
 }
 
+/// (id, hash, path) трека — см. [`Db::get_track_hashes`].
+pub type TrackHashRow = (i64, String, PathBuf);
+
+/// плейлист с хешами песен — см. [`Db::get_playlist_hashes`].
+pub struct PlaylistHashRow {
+    pub id: i64,
+    pub name: String,
+    pub cover_art: Option<PathBuf>,
+    pub created_at: Option<u64>,
+    pub updated_at: Option<u64>,
+    /// хеши песен в порядке плейлиста.
+    pub hashes: Vec<String>,
+}
+
 /// сырые столбцы `tracks`, общие для всех запросов, возвращающих треки.
 /// Порядок совпадает с [`TRACK_COLUMNS`].
 struct TrackRow {
@@ -637,7 +810,14 @@ impl TrackRow {
 /// или транзакции, возвращая хранимый хеш. Уже известный трек (та же `path`)
 /// сохраняет свой исходный хеш, чтобы ссылки плейлистов оставались валидными
 /// даже после правки его метаданных.
-fn upsert_track(conn: &Connection, track: &TrackVirtual) -> Result<String, Box<dyn Error>> {
+///
+/// `hash` задаёт хеш нового трека (импорт пакета, хеш едет с другого
+/// устройства); `None` -> случайный.
+fn upsert_track(
+    conn: &Connection,
+    track: &TrackVirtual,
+    hash: Option<&str>,
+) -> Result<String, Box<dyn Error>> {
     let path = track
         .get_path()
         .ok_or("track has no file path and cannot be stored")?;
@@ -662,7 +842,7 @@ fn upsert_track(conn: &Connection, track: &TrackVirtual) -> Result<String, Box<d
     // пользовательское состояние, при повторном скане (ON CONFLICT) их НЕ
     // перезаписываем (иначе ре-индекс при каждом старте сбрасывал бы громкость
     // к дефолту 1.0 из свеже-прочитанного файла).
-    let new_hash = random_hash();
+    let new_hash = hash.map_or_else(random_hash, str::to_owned);
     conn.execute(
         "INSERT INTO tracks \
             (hash, title, duration, cover_art, path, source_type, volume, album_id, color, user_label, invalid) \
@@ -993,6 +1173,101 @@ mod tests {
         assert!(jazz.get_cover_art().is_none());
         assert!(jazz.get_created_at().is_none());
         assert!(jazz.get_updated_at().is_none());
+    }
+
+    #[test]
+    fn track_and_playlist_hashes() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+
+        let mut p = Playlist::from_tracks(vec![
+            fixture_track(dir.path(), "1.mp3", "First", "A"),
+            fixture_track(dir.path(), "2.mp3", "Second", "B"),
+        ]);
+        p.set_name("mix".into());
+        p.set_cover_art(Some(dir.path().join("mix.png")));
+        p.set_created_at(100);
+        p.set_updated_at(200);
+        db.save_playlist(p).unwrap();
+        let mut empty = Playlist::from_tracks(vec![]);
+        empty.set_name("empty".into());
+        db.save_playlist(empty).unwrap();
+
+        // вся библиотека: по возрастанию id.
+        let all = db.get_track_hashes(None).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all[0].0 < all[1].0);
+        assert!(all.iter().all(|(_, h, _)| h.len() == 32));
+
+        // по id: порядок запроса, ненайденные пропускаются.
+        let picked = db
+            .get_track_hashes(Some(&[all[1].0, 9_999, all[0].0]))
+            .unwrap();
+        assert_eq!(picked, vec![all[1].clone(), all[0].clone()]);
+
+        // плейлист ссылается на те же хеши в своём порядке.
+        let pls = db.get_playlist_hashes(None).unwrap();
+        assert_eq!(pls.len(), 2);
+        assert_eq!(pls[0].name, "mix");
+        assert_eq!(pls[0].cover_art, Some(dir.path().join("mix.png")));
+        assert_eq!((pls[0].created_at, pls[0].updated_at), (Some(100), Some(200)));
+        assert!(pls[1].hashes.is_empty() && pls[1].created_at.is_none());
+
+        // по id: порядок запроса, ненайденные пропускаются.
+        let picked = db
+            .get_playlist_hashes(Some(&[pls[1].id, 9_999, pls[0].id]))
+            .unwrap();
+        assert_eq!(
+            picked.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["empty", "mix"]
+        );
+        let by_path = |file: &str| {
+            all.iter()
+                .find(|(_, _, p)| p.ends_with(file))
+                .unwrap()
+                .1
+                .clone()
+        };
+        assert_eq!(pls[0].hashes, vec![by_path("1.mp3"), by_path("2.mp3")]);
+
+        // по хешам: порядок запроса, ненайденные пропускаются.
+        let by_hash = db
+            .get_track_hashes_by_hash(&[by_path("2.mp3"), "nope".into(), by_path("1.mp3")])
+            .unwrap();
+        assert_eq!(by_hash, vec![all[1].clone(), all[0].clone()]);
+    }
+
+    #[test]
+    fn save_import_keeps_given_hashes() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+
+        let mut old = Playlist::from_tracks(vec![]);
+        old.set_name("mix".into());
+        old.set_cover_art(Some(dir.path().join("old.png")));
+        old.set_created_at(10);
+        db.save_playlist(old).unwrap();
+
+        let track = fixture_track(dir.path(), "1.mp3", "First", "A");
+        let hash = "0123456789abcdef0123456789abcdef".to_string();
+        let pl = PlaylistHashRow {
+            id: 0,
+            name: "mix".into(),
+            cover_art: None,
+            created_at: None,
+            updated_at: Some(20),
+            hashes: vec![hash.clone(), "ffffffffffffffffffffffffffffffff".into()],
+        };
+        db.save_import(&[(track, hash.clone())], &[pl]).unwrap();
+
+        // трек сохранён с хешем из пакета.
+        assert!(db.hash_exist(hash.clone()));
+        // плейлист переписан, но None не затёр обложку и created_at.
+        let pls = db.get_playlist_hashes(None).unwrap();
+        assert_eq!(pls.len(), 1);
+        assert_eq!(pls[0].hashes.len(), 2);
+        assert_eq!(pls[0].cover_art, Some(dir.path().join("old.png")));
+        assert_eq!((pls[0].created_at, pls[0].updated_at), (Some(10), Some(20)));
     }
 
     #[test]

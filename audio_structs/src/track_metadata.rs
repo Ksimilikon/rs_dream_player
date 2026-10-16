@@ -48,7 +48,8 @@ impl TrackMetadata {
     // }
 
     /// reads tags directly from `path` via lofty without loading the whole
-    /// audio file into memory. `cover_art` is always `None` here — extracting,
+    /// audio file into memory. A file without tags is not an error: title and
+    /// artist become "Unknown", album / genres are empty. `cover_art` is always `None` here — extracting,
     /// validating and saving embedded cover art is the indexer's job
     /// (see `crate::storage::index` and `crate::music::cover_art`).
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn Error>> {
@@ -57,28 +58,30 @@ impl TrackMetadata {
 
         let properties = tagged_file.properties();
 
+        // a file without tags is still a valid song: every field falls back
+        // to "Unknown" / empty instead of failing.
         let tag = tagged_file
             .primary_tag()
-            .or_else(|| tagged_file.first_tag())
-            .ok_or("No tags found")?;
+            .or_else(|| tagged_file.first_tag());
 
         let mut artists: Vec<String> = tag
-            .get_strings(ItemKey::TrackArtist)
-            .map(|s| s.to_string())
-            .collect();
+            .map(|t| t.get_strings(ItemKey::TrackArtist).map(str::to_string).collect())
+            .unwrap_or_default();
         if artists.is_empty() {
             artists.push("Unknown".into());
         }
 
-        let album = tag.get_string(ItemKey::AlbumTitle).map(str::to_string);
+        let album = tag.and_then(|t| t.get_string(ItemKey::AlbumTitle).map(str::to_string));
         let genres: Vec<String> = tag
-            .get_strings(ItemKey::Genre)
-            .map(str::to_string)
-            .collect();
+            .map(|t| t.get_strings(ItemKey::Genre).map(str::to_string).collect())
+            .unwrap_or_default();
+        let title = tag
+            .and_then(|t| t.title().map(|v| v.to_string()))
+            .unwrap_or_else(|| "Unknown".into());
 
         Ok(TrackMetadata {
             id: None,
-            title: tag.title().map_or("Unknown".into(), |v| v.to_string()),
+            title,
             artist: artists,
             album,
             genres,

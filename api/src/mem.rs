@@ -4,6 +4,7 @@
 
 use std::ffi::{CString, c_char};
 
+use crate::cdc::FFIPacket;
 use crate::idx::{
     FFIPlaylist, FFIPlaylistsList, FFIStringList, FFITrackMetadata, FFITracksList,
 };
@@ -102,5 +103,56 @@ pub unsafe extern "C" fn idx_free_playlists_list(list: FFIPlaylistsList) {
     let slice = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(list.ptr, list.len)) };
     for pl in slice.iter() {
         unsafe { free_playlist_fields(pl) };
+    }
+}
+
+/// освобождает байты пакета (из `cdc_encode`/`cdc_pack_*`). Null игнорируется.
+///
+/// # Safety
+/// `ptr`/`len` получены из `cdc_*` и ещё не освобождались.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cdc_free_bytes(ptr: *mut u8, len: usize) {
+    if !ptr.is_null() {
+        unsafe { drop(Box::from_raw(std::slice::from_raw_parts_mut(ptr, len))) };
+    }
+}
+
+/// освобождает распакованный пакет (из `cdc_decode`) вместе с песнями
+/// (имена, аудио) и плейлистами (имена, хеши, обложки и их имена).
+///
+/// # Safety
+/// `packet` получен из `cdc_decode` и ещё не освобождался.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cdc_free_packet(packet: FFIPacket) {
+    if !packet.songs.is_null() {
+        let songs =
+            unsafe { Box::from_raw(std::slice::from_raw_parts_mut(packet.songs, packet.songs_len)) };
+        for song in songs.iter() {
+            unsafe {
+                idx_free_string(song.name);
+                cdc_free_bytes(song.data, song.data_len);
+            }
+        }
+    }
+    if !packet.playlists.is_null() {
+        let playlists = unsafe {
+            Box::from_raw(std::slice::from_raw_parts_mut(
+                packet.playlists,
+                packet.playlists_len,
+            ))
+        };
+        for pl in playlists.iter() {
+            unsafe {
+                idx_free_string(pl.name);
+                idx_free_string(pl.cover_name);
+                if !pl.tracks.is_null() {
+                    drop(Box::from_raw(std::slice::from_raw_parts_mut(
+                        pl.tracks,
+                        pl.tracks_len,
+                    )));
+                }
+                cdc_free_bytes(pl.cover, pl.cover_len);
+            }
+        }
     }
 }

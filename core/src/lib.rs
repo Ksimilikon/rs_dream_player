@@ -7,8 +7,9 @@ use storage::Db;
 
 use crate::{config::Config, dirs::Dirs};
 
-/// имя файла бд — канонічное из крейта storage (совпадает с тем, что писала
-/// прежняя версия приложения; иначе существующие плейлисты не подхватятся).
+/// db file name — the canonical one from the storage crate (matches what the
+/// previous app version wrote; otherwise existing playlists won't be picked
+/// up).
 pub const FILE_NAME_DB: &str = storage::DB_FILE_NAME;
 pub const FILE_NAME_CONFIG: &str = "config.toml";
 
@@ -20,8 +21,8 @@ pub struct Core {
 }
 impl Core {
     pub fn new(dirs: Dirs, need_db: bool) -> Self {
-        // каталог данных может ещё не существовать (первый запуск) — сюда лягут
-        // бд и конфиг; без него Db::init/сохранение конфига упадут.
+        // the data directory may not exist yet (first launch) — the db and
+        // config go there; without it Db::init / config saving would fail.
         let _ = std::fs::create_dir_all(&dirs.data);
 
         let db = if need_db {
@@ -30,11 +31,11 @@ impl Core {
         } else {
             None
         };
-        // отсутствующий/битый конфиг не должен ронять запуск — берём дефолт.
+        // a missing / broken config must not break startup — use the default.
         let config = Config::load(&dirs.data.join(FILE_NAME_CONFIG)).unwrap_or_default();
-        // единственные потоки ядра — звуковые, их поднимает AudioEngine (cpal).
+        // the only core threads are audio ones, started by AudioEngine (cpal).
         let mut engine = AudioEngine::new().unwrap();
-        // применяем сохранённую мастер-громкость к движку.
+        // apply the saved master volume to the engine.
         engine.set_volume_master(config.master_volume);
         Self {
             config,
@@ -44,8 +45,8 @@ impl Core {
         }
     }
 
-    /// задаёт мастер-громкость: применяет к движку и сохраняет в конфиг на диск,
-    /// чтобы значение пережило перезапуск.
+    /// sets the master volume: applies it to the engine and saves it to the
+    /// config on disk, so the value survives a restart.
     pub fn set_master_volume(&mut self, v: f32) {
         self.config.master_volume = v;
         self.engine.set_volume_master(v);

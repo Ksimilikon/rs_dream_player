@@ -1,6 +1,7 @@
-//! вкладка PLAYLISTS: слева список плейлистов (пул «ALL SONGS» первым), справа —
-//! треки выбранного плейлиста. Переход вправо позволяет выбрать трек, с которого
-//! начнётся воспроизведение. Команды: новый / правка / удаление плейлиста.
+//! PLAYLISTS tab: the playlist list on the left (the "ALL SONGS" pool first),
+//! the tracks of the selected playlist on the right. Moving right lets you
+//! pick the track playback starts from. Commands: new / edit / delete a
+//! playlist.
 
 use ratatui::{Frame, crossterm::event::KeyEvent, crossterm::event::KeyCode, layout::Rect};
 
@@ -32,7 +33,7 @@ impl Default for PlaylistsTab {
 }
 
 impl PlaylistsTab {
-    /// треки выбранного слева плейлиста.
+    /// tracks of the playlist selected on the left.
     fn selected_tracks<'a>(&self, model: &'a Model) -> &'a [crate::ffi::TrackMeta] {
         model
             .playlists
@@ -50,7 +51,7 @@ impl Tab for PlaylistsTab {
     fn render(&mut self, frame: &mut Frame, area: Rect, model: &Model) {
         let (left_area, right_area) = two_pane(area, 40);
 
-        // левая панель: имена плейлистов.
+        // left pane: playlist names.
         let playing_name = model.playing.as_ref().map(|p| p.name.as_str());
         let left_lines: Vec<ListLine> = model
             .playlists
@@ -64,7 +65,7 @@ impl Tab for PlaylistsTab {
         self.left
             .render(frame, left_area, "PLAYLISTS", left_lines, self.focus == Focus::Left);
 
-        // правая панель: треки выбранного плейлиста.
+        // right pane: tracks of the selected playlist.
         let tracks = self.selected_tracks(model);
         let right_lines: Vec<ListLine> = tracks
             .iter()

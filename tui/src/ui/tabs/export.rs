@@ -1,9 +1,10 @@
-//! вкладка EXPORT (`:export`): упаковка библиотеки / выбранных плейлистов /
-//! выбранных треков в файл пакета. Слева форма (путь, что, флаги), справа —
-//! список выбора (для плейлистов/треков), снизу — журнал сообщений.
-//! Путь по умолчанию — каталог, из которого запущено приложение; если путь —
-//! каталог, файл создаётся в нём с именем `dream_player_<unix-time>.dplr`.
-//! Существующий файл не перезаписывается. Запуск — Shift+W.
+//! EXPORT tab (`:export`): packs the library / selected playlists / selected
+//! tracks into a packet file. The form on the left (path, what, flags), the
+//! selection list on the right (for playlists / tracks), the message log at
+//! the bottom. The default path is the directory the app was launched from;
+//! if the path is a directory, the file is created in it as
+//! `dream_player_<unix-time>.dplr`. An existing file is never overwritten.
+//! Run — Shift+W.
 
 use std::collections::HashSet;
 use std::fs::OpenOptions;
@@ -29,7 +30,7 @@ const F_AUDIO: usize = 2;
 const F_NAMES: usize = 3;
 const F_COVERS: usize = 4;
 
-/// пункт списка выбора: плейлист — по имени (его идентификатор), трек — по id.
+/// a selection list item: a playlist — by name (its identifier), a track — by id.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum Item {
     Playlist(String),
@@ -39,9 +40,9 @@ enum Item {
 pub struct ExportTab {
     form: Form,
     list: ListView,
-    /// фокус на списке выбора (иначе — на форме).
+    /// focus is on the selection list (otherwise on the form).
     in_list: bool,
-    /// отмеченные пункты (плейлисты или треки — по режиму).
+    /// marked items (playlists or tracks — depending on the mode).
     checked: HashSet<Item>,
     log: MessageLog,
 }
@@ -73,7 +74,7 @@ impl ExportTab {
         self.form.choice(F_WHAT)
     }
 
-    /// (пункт, подпись) для списка выбора текущего режима.
+    /// (item, label) pairs for the selection list of the current mode.
     fn items(&self, model: &Model) -> Vec<(Item, String)> {
         match self.what() {
             1 => model
@@ -97,14 +98,15 @@ impl ExportTab {
         }
     }
 
-    /// режим сменился: выбор сбрасывается, обложки без плейлистов недоступны.
+    /// the mode changed: the selection is reset, covers are unavailable
+    /// without playlists.
     fn on_what_changed(&mut self) {
         self.checked.clear();
         self.list = ListView::default();
         self.form.fields[F_COVERS].disabled = self.what() == 2;
     }
 
-    /// итоговый путь файла: каталог -> файл с именем по времени.
+    /// the final file path: a directory -> a file named by the time.
     fn target(&self) -> Result<PathBuf, String> {
         let raw = self.form.text(F_PATH);
         let raw = raw.trim();
@@ -126,7 +128,7 @@ impl ExportTab {
             Ok(p) => p,
             Err(e) => return self.log.error(e),
         };
-        // отмеченные — в порядке списка.
+        // marked items — in list order.
         let picked: Vec<Item> = self
             .items(model)
             .into_iter()
@@ -174,7 +176,7 @@ impl ExportTab {
             Ok(b) => b,
             Err(st) => return self.log.error(format!("export failed: {}", cdc::describe(st))),
         };
-        // существующий файл не перезаписываем.
+        // don't overwrite an existing file.
         let res = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -246,7 +248,7 @@ impl Tab for ExportTab {
                 }
             }
             KeyCode::Char('a') if self.in_list => {
-                // отметить все / снять все.
+                // mark all / unmark all.
                 let all: Vec<Item> = self.items(model).into_iter().map(|(i, _)| i).collect();
                 if all.iter().all(|i| self.checked.contains(i)) {
                     self.checked.clear();
@@ -277,7 +279,7 @@ impl Tab for ExportTab {
     }
 }
 
-/// размер в человекочитаемом виде.
+/// size in human-readable form.
 pub(super) fn human_size(n: usize) -> String {
     const MB: f64 = 1024.0 * 1024.0;
     match n {

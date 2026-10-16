@@ -1,26 +1,26 @@
 use audio_structs::{playlist::Playlist, track_virtual::TrackVirtual};
 
-/// события для работы с бд (по аналогии с `DBusEvent` в dbus-слое).
-/// именование повторяет методы [`crate::db::Db`]: `get_*` — чтение,
-/// `save_*` — upsert. `String`-поля — это ключи: хеш песни для треков и имя
-/// для плейлистов.
+/// events for working with the db (similar to `DBusEvent` in the dbus layer).
+/// The naming follows the [`crate::db::Db`] methods: `get_*` — read,
+/// `save_*` — upsert. `String` fields are keys: the song hash for tracks and
+/// the name for playlists.
 pub enum DbEvent {
-    /// сохранить/проиндексировать трек.
+    /// save / index a track.
     SaveTrack(TrackVirtual),
-    /// загрузить трек по хешу.
+    /// load a track by hash.
     GetTrack(String),
-    /// сохранить плейлист.
+    /// save a playlist.
     SavePlaylist(Playlist),
-    /// загрузить плейлист по имени.
+    /// load a playlist by name.
     GetPlaylist(String),
-    /// проверить наличие песни с таким хешем.
+    /// check whether a song with this hash exists.
     HashExist(String),
-    /// выборка плейлистов по параметрам (name, id). Без фильтров — все.
+    /// select playlists by parameters (name, id). Without filters — all.
     GetPlaylists {
         name: Option<String>,
         id: Option<i64>,
     },
-    /// выборка песен из общего пула по параметрам (name, artist, id, hash).
+    /// select songs from the shared pool by parameters (name, artist, id, hash).
     GetTracks {
         name: Option<String>,
         artist: Option<String>,

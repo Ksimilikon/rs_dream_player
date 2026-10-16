@@ -1,6 +1,6 @@
-//! освобождение памяти, выданной через FFI. На каждый владеющий тип — свой
-//! `idx_free_*`. Все функции идемпотентны к null и забирают владение переданным
-//! буфером (повторный вызов — UB).
+//! freeing memory handed out via FFI. Each owning type has its own
+//! `idx_free_*`. Every function is idempotent for null and takes ownership of
+//! the passed buffer (a second call is UB).
 
 use std::ffi::{CString, c_char};
 
@@ -9,10 +9,10 @@ use crate::idx::{
     FFIPlaylist, FFIPlaylistsList, FFIStringList, FFITrackMetadata, FFITracksList,
 };
 
-/// освобождает одну C-строку, ранее выданную ядром. Null игнорируется.
+/// frees one C string previously handed out by the core. Null is ignored.
 ///
 /// # Safety
-/// `s` — либо null, либо указатель, полученный из `idx_*` и ещё не освобождённый.
+/// `s` is either null or a pointer obtained from `idx_*` and not freed yet.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_free_string(s: *mut c_char) {
     if !s.is_null() {
@@ -20,7 +20,7 @@ pub unsafe extern "C" fn idx_free_string(s: *mut c_char) {
     }
 }
 
-/// освобождает `*mut *mut c_char` длины `len` вместе со всеми строками.
+/// frees a `*mut *mut c_char` of length `len` together with every string.
 unsafe fn free_string_array(ptr: *mut *mut c_char, len: usize) {
     if ptr.is_null() {
         return;
@@ -31,8 +31,8 @@ unsafe fn free_string_array(ptr: *mut *mut c_char, len: usize) {
     }
 }
 
-/// освобождает содержимое метадаты (строки и массивы). Сама структура обычно
-/// лежит на стеке вызывающего либо внутри буфера списка.
+/// frees the metadata contents (strings and arrays). The struct itself
+/// usually lives on the caller's stack or inside a list buffer.
 unsafe fn free_metadata_fields(meta: &FFITrackMetadata) {
     unsafe {
         idx_free_string(meta.path);
@@ -44,19 +44,19 @@ unsafe fn free_metadata_fields(meta: &FFITrackMetadata) {
     }
 }
 
-/// освобождает метадату трека (из `idx_get_track`).
+/// frees track metadata (from `idx_get_track`).
 ///
 /// # Safety
-/// `meta` получена из `idx_*` и ещё не освобождалась.
+/// `meta` comes from `idx_*` and wasn't freed yet.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_free_track_metadata(meta: FFITrackMetadata) {
     unsafe { free_metadata_fields(&meta) };
 }
 
-/// освобождает список треков (из `idx_get_tracks`/`idx_get_playlist_tracks`).
+/// frees a track list (from `idx_get_tracks`/`idx_get_playlist_tracks`).
 ///
 /// # Safety
-/// `list` получен из `idx_*` и ещё не освобождался.
+/// `list` comes from `idx_*` and wasn't freed yet.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_free_tracks_list(list: FFITracksList) {
     if list.ptr.is_null() {
@@ -68,7 +68,7 @@ pub unsafe extern "C" fn idx_free_tracks_list(list: FFITracksList) {
     }
 }
 
-/// освобождает содержимое одного плейлиста (строки и массив id).
+/// frees the contents of one playlist (strings and the id array).
 unsafe fn free_playlist_fields(pl: &FFIPlaylist) {
     unsafe {
         idx_free_string(pl.name);
@@ -82,19 +82,19 @@ unsafe fn free_playlist_fields(pl: &FFIPlaylist) {
     }
 }
 
-/// освобождает список строк (из `engine_get_output_devices`).
+/// frees a string list (from `engine_get_output_devices`).
 ///
 /// # Safety
-/// `list` получен из `engine_*` и ещё не освобождался.
+/// `list` comes from `engine_*` and wasn't freed yet.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn engine_free_output_devices(list: FFIStringList) {
     unsafe { free_string_array(list.ptr, list.len) };
 }
 
-/// освобождает список плейлистов (из `idx_get_playlists`).
+/// frees a playlist list (from `idx_get_playlists`).
 ///
 /// # Safety
-/// `list` получен из `idx_*` и ещё не освобождался.
+/// `list` comes from `idx_*` and wasn't freed yet.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_free_playlists_list(list: FFIPlaylistsList) {
     if list.ptr.is_null() {
@@ -106,10 +106,10 @@ pub unsafe extern "C" fn idx_free_playlists_list(list: FFIPlaylistsList) {
     }
 }
 
-/// освобождает байты пакета (из `cdc_encode`/`cdc_pack_*`). Null игнорируется.
+/// frees packet bytes (from `cdc_encode`/`cdc_pack_*`). Null is ignored.
 ///
 /// # Safety
-/// `ptr`/`len` получены из `cdc_*` и ещё не освобождались.
+/// `ptr`/`len` come from `cdc_*` and weren't freed yet.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cdc_free_bytes(ptr: *mut u8, len: usize) {
     if !ptr.is_null() {
@@ -117,11 +117,11 @@ pub unsafe extern "C" fn cdc_free_bytes(ptr: *mut u8, len: usize) {
     }
 }
 
-/// освобождает распакованный пакет (из `cdc_decode`) вместе с песнями
-/// (имена, аудио) и плейлистами (имена, хеши, обложки и их имена).
+/// frees an unpacked packet (from `cdc_decode`) together with its songs
+/// (names, audio) and playlists (names, hashes, covers and their names).
 ///
 /// # Safety
-/// `packet` получен из `cdc_decode` и ещё не освобождался.
+/// `packet` comes from `cdc_decode` and wasn't freed yet.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cdc_free_packet(packet: FFIPacket) {
     if !packet.songs.is_null() {

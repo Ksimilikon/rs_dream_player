@@ -1,10 +1,11 @@
-//! TUI-фронтенд ядра плеера: демонстрирует крейт `api` (динамическую библиотеку)
-//! целиком через его FFI. Вся работа с ядром идёт через [`ffi`]; интерфейс — в
-//! [`ui`]. `main` лишь готовит каталоги и зовёт [`run`].
+//! TUI frontend of the player core: demonstrates the `api` crate (a dynamic
+//! library) entirely through its FFI. All work with the core goes through
+//! [`ffi`]; the interface lives in [`ui`]. `main` only prepares directories
+//! and calls [`run`].
 
-// Часть FFI-поверхности ядра обёрнута в `ffi/`, но ещё не вынесена в интерфейс
-// (переключение устройств вывода, отдельные сеттеры/геттеры). Обёртки держим
-// как демонстрацию API; allow снимет свои предупреждения о них.
+// Part of the core FFI surface is wrapped in `ffi/` but not yet exposed in
+// the interface (output device switching, some setters / getters). The
+// wrappers are kept as an API demo; the allow silences their warnings.
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
@@ -15,7 +16,7 @@ mod images;
 mod integration;
 mod ui;
 
-/// каталоги, нужные ядру для инициализации (передаются в FFI `init`).
+/// directories the core needs for initialization (passed to FFI `init`).
 pub struct Dirs<'a> {
     pub cache: &'a Path,
     pub config: &'a Path,
@@ -23,18 +24,18 @@ pub struct Dirs<'a> {
     pub music: &'a Path,
 }
 
-/// инициализирует ядро, индексирует каталог музыки и запускает интерфейс.
-/// Захватывает текущий поток до выхода пользователя.
+/// initializes the core, indexes the music directory and starts the
+/// interface. Takes over the current thread until the user quits.
 pub fn run(dirs: Dirs) -> std::io::Result<()> {
-    // поднимаем ядро (нужна бд). Мастер-громкость ядро само применяет из своего
-    // сохранённого конфига — здесь её не трогаем.
+    // bring up the core (a db is needed). The core applies the master volume
+    // from its own saved config — don't touch it here.
     ffi::engine::init(dirs.cache, dirs.config, dirs.data, dirs.music, true);
-    // наполняем индекс каталогом музыки (idempotent).
+    // fill the index from the music directory (idempotent).
     ffi::db::index_dir(None);
 
     let mut terminal = ratatui::init();
-    // паника не должна «уносить» консоль: возвращаем терминал в норму и пишем
-    // причину в лог-файл (консоль под Windows может закрыться — лог останется).
+    // a panic must not "take down" the console: restore the terminal and write
+    // the cause to a log file (the console may close on Windows — the log stays).
     install_panic_hook(dirs.config.join("tui_panic.log"));
     let mut app = app::App::new(dirs.music.to_path_buf());
     let res = app.run(&mut terminal);
@@ -42,13 +43,13 @@ pub fn run(dirs: Dirs) -> std::io::Result<()> {
     res
 }
 
-/// оборачивает текущий обработчик паники: сначала восстанавливает терминал
-/// (raw/alt-экран), затем дописывает сообщение+бэктрейс в `log_path`, затем
-/// вызывает прежний обработчик.
+/// wraps the current panic handler: first restores the terminal (raw / alt
+/// screen), then appends the message + backtrace to `log_path`, then calls the
+/// previous handler.
 fn install_panic_hook(log_path: PathBuf) {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        // вернуть терминал в нормальный режим до любого вывода.
+        // return the terminal to normal mode before any output.
         ratatui::restore();
         let bt = std::backtrace::Backtrace::force_capture();
         let msg = format!("{info}\n\nbacktrace:\n{bt}\n");

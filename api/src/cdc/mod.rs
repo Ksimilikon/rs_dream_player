@@ -1,23 +1,27 @@
-//! FFI поверх крейта `codec`. Префикс `cdc_` = упаковка/распаковка пакетов.
+//! FFI over the `codec` crate. Prefix `cdc_` = packet pack / unpack.
 //!
-//! - версия пакета передаётся числом `u32` (= дискриминант `codec::Version`,
-//!   сейчас `1` = v0.1); неизвестное число -> `UnsupportedVersion`.
-//! - все функции возвращают [`FFICdcStatus`] (`0` = ok), результат — через
-//!   out-параметры. При ошибке out-параметры обнулены (null/0).
-//! - хеш песни на границе FFI — `[u8; 16]` big-endian: байты идут в том же
-//!   порядке, что и hex-строка хеша в бд (`u128` в C-ABI не переносим).
-//! - флаги `with_audio`/`with_names` есть во всех функциях: `false` ->
-//!   аудио/имена файлов песен не пакуются (в пакете длина 0) или не отдаются
-//!   при распаковке (null). Имена плейлистов флаг не трогает.
-//! - флаг `with_covers` — во всех функциях, где есть плейлисты: обложки
-//!   плейлистов читаются с диска по пути ОС и пакуются последней секцией
-//!   вместе с именем файла (подсказка формата для получателя).
-//! - даты плейлистов (`created_at`/`updated_at`, unix-секунды) едут всегда —
-//!   по ним потом выбирается подлинная версия плейлиста между устройствами.
-//! - выданные буферы освобождаются парными `cdc_free_*` из [`crate::mem`].
-//! - импорт пакета в бд в два шага — `cdc_import_prepare` ->
-//!   (фронтенд пишет файлы) -> `cdc_import_commit` / `cdc_import_cancel`
-//!   (см. [`import`]).
+//! - the packet version is passed as a `u32` number (= `codec::Version`
+//!   discriminant, currently `1` = v0.1); an unknown number ->
+//!   `UnsupportedVersion`.
+//! - every function returns [`FFICdcStatus`] (`0` = ok), results go through
+//!   out-parameters. On error the out-parameters are zeroed (null/0).
+//! - a song hash at the FFI boundary is `[u8; 16]` big-endian: the bytes go in
+//!   the same order as the hex hash string in the db (`u128` is not portable
+//!   in the C ABI).
+//! - the `with_audio`/`with_names` flags exist in every function: `false` ->
+//!   song audio / file names are not packed (length 0 in the packet) or not
+//!   returned on unpack (null). Playlist names are not affected.
+//! - the `with_covers` flag exists in every function that has playlists:
+//!   playlist covers are read from disk by OS path and packed as the last
+//!   section together with the file name (a format hint for the receiver).
+//! - playlist dates (`created_at`/`updated_at`, unix seconds) are always
+//!   packed — they later decide which playlist version is the genuine one
+//!   across devices.
+//! - returned buffers are freed by the paired `cdc_free_*` from
+//!   [`crate::mem`].
+//! - packet import into the db takes two steps — `cdc_import_prepare` ->
+//!   (the frontend writes the files) -> `cdc_import_commit` /
+//!   `cdc_import_cancel` (see [`import`]).
 
 use std::{
     ffi::{CStr, c_char},
@@ -38,17 +42,17 @@ pub use import::{
     cdc_import_commit, cdc_import_prepare,
 };
 
-/// результат любой `cdc_*` функции — единая база кодов для всех функций
-/// упаковки/распаковки/импорта. Диапазоны:
+/// result of any `cdc_*` function — one shared code base for every pack /
+/// unpack / import function. Ranges:
 /// - `0` — ok;
-/// - `1..=99` — `codec::CodecError` один в один;
-/// - `100..=199` — статусы импорта (решения, а не сбои: пакет корректен, но
-///   применён не был);
-/// - `200..` — ошибки уровня ядра.
+/// - `1..=99` — `codec::CodecError` one to one;
+/// - `100..=199` — import statuses (decisions, not failures: the packet is
+///   valid but was not applied);
+/// - `200..` — core-level errors.
 ///
-/// один enum на всех — компилятор сам не даст выдать два статуса с одним
-/// кодом. `repr(u32)`: на стороне C это просто число; коды не
-/// перенумеровывать, только добавлять в свой диапазон.
+/// one enum for everything — the compiler itself won't allow two statuses
+/// with the same code. `repr(u32)`: on the C side it is a plain number; never
+/// renumber, only append within the range.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FFICdcStatus {
@@ -66,29 +70,29 @@ pub enum FFICdcStatus {
     DuplicateSection = 9,
     CountMismatch = 10,
 
-    // ── импорт (100..=199) ──
-    /// пакет устарел: какой-то плейлист в нём старше (`updated_at`), чем
-    /// локальный. Импорт отклонён целиком, ничего не записано; применить
-    /// можно только с `force`.
+    // ── import (100..=199) ──
+    /// the packet is outdated: some playlist in it is older (`updated_at`)
+    /// than the local one. The whole import is rejected, nothing is written;
+    /// it can only be applied with `force`.
     Outdated = 100,
 
-    // ── ядро (200..) ──
-    /// обязательный указатель равен null.
+    // ── core (200..) ──
+    /// a required pointer is null.
     NullPointer = 200,
-    /// ядро запущено без бд (`need_db == false`).
+    /// the core runs without a db (`need_db == false`).
     NoDatabase = 201,
-    /// какого-то id из списка нет в бд.
+    /// some id from the list is not in the db.
     TrackNotFound = 202,
-    /// хеш в бд не является 32-символьным hex.
+    /// a hash in the db is not a 32-character hex string.
     InvalidHash = 203,
-    /// не удалось прочитать аудиофайл / обложку (или запрос к бд упал).
+    /// failed to read an audio file / cover (or a db query failed).
     ReadFailed = 204,
-    /// какого-то id плейлиста из списка нет в бд.
+    /// some playlist from the list is not in the db.
     PlaylistNotFound = 205,
-    /// не удалось сохранить импорт в бд.
+    /// failed to save the import into the db.
     WriteFailed = 206,
-    /// аргумент не согласован с остальными (например, число путей в
-    /// `cdc_import_commit` не равно числу файлов из `cdc_import_prepare`).
+    /// an argument is inconsistent with the others (e.g. the number of paths
+    /// in `cdc_import_commit` differs from the files of `cdc_import_prepare`).
     InvalidArgument = 207,
 }
 
@@ -109,20 +113,20 @@ impl From<CodecError> for FFICdcStatus {
     }
 }
 
-/// одна песня распакованного пакета.
+/// one song of an unpacked packet.
 #[repr(C)]
 pub struct FFIPacketSong {
     pub hash: [u8; 16],    // big-endian
-    pub name: *mut c_char, // null: имени нет / `with_names == false`
-    pub data: *mut u8,     // null: аудио нет / `with_audio == false`
+    pub name: *mut c_char, // null: no name / `with_names == false`
+    pub data: *mut u8,     // null: no audio / `with_audio == false`
     pub data_len: usize,
 }
 
-/// один плейлист распакованного пакета.
+/// one playlist of an unpacked packet.
 #[repr(C)]
 pub struct FFIPacketPlaylist {
-    pub name: *mut c_char,     // null: пустое имя
-    pub tracks: *mut [u8; 16], // хеши песен (big-endian) в порядке плейлиста
+    pub name: *mut c_char,     // null: empty name
+    pub tracks: *mut [u8; 16], // song hashes (big-endian) in playlist order
     pub tracks_len: usize,
 
     pub has_created_at: bool, // Option<u64>
@@ -130,12 +134,12 @@ pub struct FFIPacketPlaylist {
     pub has_updated_at: bool, // Option<u64>
     pub updated_at: u64,
 
-    pub cover_name: *mut c_char, // null: имени нет / `with_covers == false`
-    pub cover: *mut u8,          // null: обложки нет / `with_covers == false`
+    pub cover_name: *mut c_char, // null: no name / `with_covers == false`
+    pub cover: *mut u8,          // null: no cover / `with_covers == false`
     pub cover_len: usize,
 }
 
-/// распакованный пакет (владеет буферами песен и плейлистов).
+/// unpacked packet (owns the song and playlist buffers).
 #[repr(C)]
 pub struct FFIPacket {
     pub version: u32,
@@ -159,10 +163,10 @@ impl FFIPacket {
 
 // ───────────────────────── helpers (crate-private) ─────────────────────────
 
-/// обнуляет out-параметры байтов; `false`, если какой-то из них null.
+/// zeroes the byte out-parameters; `false` if any of them is null.
 ///
 /// # Safety
-/// `out_ptr`/`out_len` — null или валидные указатели.
+/// `out_ptr`/`out_len` are null or valid pointers.
 unsafe fn reset_bytes(out_ptr: *mut *mut u8, out_len: *mut usize) -> bool {
     if out_ptr.is_null() || out_len.is_null() {
         return false;
@@ -174,10 +178,10 @@ unsafe fn reset_bytes(out_ptr: *mut *mut u8, out_len: *mut usize) -> bool {
     true
 }
 
-/// результат упаковки -> out-параметры + статус.
+/// pack result -> out-parameters + status.
 ///
 /// # Safety
-/// `out_ptr`/`out_len` — валидные ненулевые указатели.
+/// `out_ptr`/`out_len` are valid non-null pointers.
 unsafe fn finish_bytes(
     res: Result<Vec<u8>, FFICdcStatus>,
     out_ptr: *mut *mut u8,
@@ -196,7 +200,7 @@ unsafe fn finish_bytes(
     }
 }
 
-/// `(ptr, len)` -> срез; null допустим только при `len == 0`.
+/// `(ptr, len)` -> slice; null is allowed only when `len == 0`.
 pub(crate) unsafe fn raw_slice<'a, T>(p: *const T, len: usize) -> Option<&'a [T]> {
     match (p.is_null(), len) {
         (true, 0) => Some(&[]),
@@ -205,7 +209,7 @@ pub(crate) unsafe fn raw_slice<'a, T>(p: *const T, len: usize) -> Option<&'a [T]
     }
 }
 
-/// C-строка -> `String`; null -> пустая строка.
+/// C string -> `String`; null -> empty string.
 unsafe fn c_to_name(p: *const c_char) -> Result<String, FFICdcStatus> {
     if p.is_null() {
         return Ok(String::new());
@@ -216,39 +220,39 @@ unsafe fn c_to_name(p: *const c_char) -> Result<String, FFICdcStatus> {
     }
 }
 
-/// hex-хеш из бд -> `u128`.
+/// hex hash from the db -> `u128`.
 fn parse_hash(hex: &str) -> Option<u128> {
     (hex.len() == 32)
         .then(|| u128::from_str_radix(hex, 16).ok())
         .flatten()
 }
 
-/// имя файла по пути ОС (пустое, если его нет).
+/// file name of an OS path (empty if there is none).
 fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
 
-/// обложка по пути ОС: `(имя файла, байты)`. Отсутствующий файл обложки — не
-/// ошибка (обложка декоративна, а битая ссылка в бд не должна блокировать
-/// экспорт): тогда обложки просто нет.
+/// cover by OS path: `(file name, bytes)`. A missing cover file is not an
+/// error (a cover is decorative, and a broken link in the db must not block
+/// the export): there is simply no cover then.
 fn read_cover(path: Option<&Path>) -> (String, Vec<u8>) {
     path.and_then(|p| Some((file_name(p), std::fs::read(p).ok()?)))
         .unwrap_or_default()
 }
 
-/// что упаковать из бд.
+/// what to pack from the db.
 enum Selection<'a> {
-    /// все треки и все плейлисты.
+    /// all tracks and all playlists.
     Library,
-    /// треки по id, без плейлистов.
+    /// tracks by id, without playlists.
     Tracks(&'a [i64]),
-    /// плейлисты по имени и все их песни.
+    /// playlists by name and all their songs.
     Playlists(&'a [String]),
 }
 
-/// общая упаковка из бд.
+/// common packing from the db.
 fn pack_from_db(
     version: u32,
     selection: Selection<'_>,
@@ -258,8 +262,8 @@ fn pack_from_db(
 ) -> Result<Vec<u8>, FFICdcStatus> {
     let version = Version::try_from(version)?;
 
-    // под блокировкой только выборка из бд; чтение аудио/обложек — уже без
-    // неё, чтобы не держать ядро (плеер) на время чтения гигабайтов с диска.
+    // only the db query runs under the lock; audio / covers are read without
+    // it, so the core (player) isn't held while gigabytes are read from disk.
     let (tracks, playlists) = {
         let guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
         let db = guard.get_db().ok_or(FFICdcStatus::NoDatabase)?;
@@ -281,9 +285,9 @@ fn pack_from_db(
                 if playlists.len() != names.len() {
                     return Err(FFICdcStatus::PlaylistNotFound);
                 }
-                // песни всех плейлистов без повторов, в порядке первого
-                // появления. Хеши без трека в бд в песни не попадают, но в
-                // списке плейлиста остаются.
+                // songs of all playlists without repeats, in order of first
+                // appearance. Hashes without a track in the db don't become
+                // songs but stay in the playlist list.
                 let mut seen = std::collections::HashSet::new();
                 let hashes: Vec<String> = playlists
                     .iter()
@@ -307,7 +311,7 @@ fn pack_from_db(
     Ok(codec::encode(version, &songs, &playlists)?)
 }
 
-/// строка бд -> песня пакета.
+/// db row -> packet song.
 fn song_from_db(
     hash: &str,
     path: &Path,
@@ -326,7 +330,7 @@ fn song_from_db(
     Ok(Song { hash, name, data })
 }
 
-/// плейлист бд -> плейлист пакета.
+/// db playlist -> packet playlist.
 fn playlist_from_db(row: PlaylistHashRow, with_covers: bool) -> Result<Playlist, FFICdcStatus> {
     let tracks = row
         .hashes
@@ -347,7 +351,7 @@ fn playlist_from_db(row: PlaylistHashRow, with_covers: bool) -> Result<Playlist,
     })
 }
 
-/// песня пакета -> FFI (с учётом флагов).
+/// packet song -> FFI (honouring the flags).
 fn song_to_ffi(song: Song, with_audio: bool, with_names: bool) -> FFIPacketSong {
     let name = match with_names && !song.name.is_empty() {
         true => to_c(&song.name),
@@ -365,7 +369,7 @@ fn song_to_ffi(song: Song, with_audio: bool, with_names: bool) -> FFIPacketSong 
     }
 }
 
-/// непустая строка -> C-строка, пустая -> null.
+/// non-empty string -> C string, empty -> null.
 fn non_empty_to_c(s: &str) -> *mut c_char {
     match s.is_empty() {
         true => ptr::null_mut(),
@@ -373,7 +377,7 @@ fn non_empty_to_c(s: &str) -> *mut c_char {
     }
 }
 
-/// плейлист пакета -> FFI (с учётом флага обложек).
+/// packet playlist -> FFI (honouring the covers flag).
 fn playlist_to_ffi(playlist: Playlist, with_covers: bool) -> FFIPacketPlaylist {
     let name = non_empty_to_c(&playlist.name);
     let (tracks, tracks_len) = vec_to_raw(
@@ -401,10 +405,10 @@ fn playlist_to_ffi(playlist: Playlist, with_covers: bool) -> FFIPacketPlaylist {
     }
 }
 
-/// песни из параллельных массивов `cdc_encode`.
+/// songs from the parallel arrays of `cdc_encode`.
 ///
 /// # Safety
-/// см. `cdc_encode`.
+/// see `cdc_encode`.
 unsafe fn songs_from_c(
     count: usize,
     hashes: *const [u8; 16],
@@ -448,10 +452,10 @@ unsafe fn songs_from_c(
     Ok(songs)
 }
 
-/// плейлисты из параллельных массивов `cdc_encode`.
+/// playlists from the parallel arrays of `cdc_encode`.
 ///
 /// # Safety
-/// см. `cdc_encode`.
+/// see `cdc_encode`.
 #[allow(clippy::too_many_arguments)]
 unsafe fn playlists_from_c(
     count: usize,
@@ -470,7 +474,7 @@ unsafe fn playlists_from_c(
         .try_fold(0usize, |acc, &l| acc.checked_add(l))
         .ok_or(FFICdcStatus::TooManyRows)?;
     let tracks = unsafe { raw_slice(tracks, total) }.ok_or(FFICdcStatus::NullPointer)?;
-    // массив дат null -> дат нет ни у кого; элемент 0 -> даты нет.
+    // null dates array -> no playlist has dates; element 0 -> no date.
     let dates = |p: *const u64| match p.is_null() {
         true => None,
         false => Some(unsafe { slice::from_raw_parts(p, count) }),
@@ -511,30 +515,31 @@ unsafe fn playlists_from_c(
 
 // ───────────────────────────────── API ─────────────────────────────────────
 
-/// пакует песни и плейлисты, переданные снаружи. Все массивы параллельные.
+/// packs songs and playlists passed from outside. All arrays are parallel.
 ///
-/// песни (длины `songs_len`):
-/// - `hashes` — обязателен при `songs_len > 0`;
-/// - `names` — обязателен при `with_names`; элемент null = без имени;
-/// - `data`/`data_lens` — обязательны при `with_audio`; элемент `data[i]`
-///   null допустим только при `data_lens[i] == 0`.
+/// songs (length `songs_len`):
+/// - `hashes` — required when `songs_len > 0`;
+/// - `names` — required with `with_names`; a null element = no name;
+/// - `data`/`data_lens` — required with `with_audio`; a null `data[i]` is
+///   allowed only when `data_lens[i] == 0`.
 ///
-/// плейлисты (длины `playlists_len`):
-/// - `pl_names` — обязателен при `playlists_len > 0`; элемент null = без имени;
-/// - `pl_tracks_lens` — число песен каждого плейлиста;
-/// - `pl_tracks` — хеши песен всех плейлистов подряд (сначала песни 1-го
-///   плейлиста, затем 2-го, ...), длины `sum(pl_tracks_lens)`;
-/// - `pl_created_at`/`pl_updated_at` — даты (unix-секунды); массив null = дат
-///   нет ни у одного плейлиста, элемент 0 = даты нет;
-/// - `pl_covers` — пути ОС к обложкам, обязателен при `with_covers`; элемент
-///   null = без обложки. В пакет едут байты файла и его имя. Здесь путь задан
-///   явно, поэтому нечитаемый файл — ошибка `ReadFailed`.
+/// playlists (length `playlists_len`):
+/// - `pl_names` — required when `playlists_len > 0`; a null element = no name;
+/// - `pl_tracks_lens` — number of songs of each playlist;
+/// - `pl_tracks` — song hashes of all playlists back to back (first the songs
+///   of the 1st playlist, then the 2nd, ...), length `sum(pl_tracks_lens)`;
+/// - `pl_created_at`/`pl_updated_at` — dates (unix seconds); a null array =
+///   no playlist has dates, an element 0 = no date;
+/// - `pl_covers` — OS paths to covers, required with `with_covers`; a null
+///   element = no cover. The file bytes and its name go into the packet. The
+///   path is given explicitly here, so an unreadable file is `ReadFailed`.
 ///
-/// пакет пишется в `out_ptr`/`out_len`, освобождать `cdc_free_bytes`.
+/// the packet is written to `out_ptr`/`out_len`, free it with
+/// `cdc_free_bytes`.
 ///
 /// # Safety
-/// все ненулевые указатели валидны на указанное число элементов; строки
-/// нуль-терминированы; `data[i]` валиден на `data_lens[i]` байт.
+/// every non-null pointer is valid for the given number of elements; strings
+/// are nul-terminated; `data[i]` is valid for `data_lens[i]` bytes.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cdc_encode(
@@ -582,12 +587,12 @@ pub unsafe extern "C" fn cdc_encode(
     unsafe { finish_bytes(res, out_ptr, out_len) }
 }
 
-/// распаковывает пакет `bytes[..len]` в `out`. При выключенном флаге
-/// соответствующие поля — null. Освобождать `cdc_free_packet`.
+/// unpacks the packet `bytes[..len]` into `out`. With a flag off, the matching
+/// fields are null. Free it with `cdc_free_packet`.
 ///
 /// # Safety
-/// `bytes` валиден на `len` байт (null допустим при `len == 0`); `out` —
-/// валидный указатель.
+/// `bytes` is valid for `len` bytes (null is allowed when `len == 0`); `out`
+/// is a valid pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cdc_decode(
     bytes: *const u8,
@@ -635,11 +640,11 @@ pub unsafe extern "C" fn cdc_decode(
     FFICdcStatus::Ok
 }
 
-/// пакет-снапшот всей бд: все треки (по возрастанию id) и все плейлисты.
-/// Освобождать `cdc_free_bytes`.
+/// snapshot packet of the whole db: all tracks (by ascending id) and all
+/// playlists. Free it with `cdc_free_bytes`.
 ///
 /// # Safety
-/// `out_ptr`/`out_len` — валидные указатели.
+/// `out_ptr`/`out_len` are valid pointers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cdc_pack_library(
     version: u32,
@@ -656,13 +661,13 @@ pub unsafe extern "C" fn cdc_pack_library(
     unsafe { finish_bytes(res, out_ptr, out_len) }
 }
 
-/// пакет из треков бд по их id (`ids[..ids_len]`, порядок сохраняется), без
-/// плейлистов. Любой ненайденный id -> `TrackNotFound`. Освобождать
+/// packet of db tracks by their ids (`ids[..ids_len]`, order is kept),
+/// without playlists. Any id not found -> `TrackNotFound`. Free it with
 /// `cdc_free_bytes`.
 ///
 /// # Safety
-/// `ids` валиден на `ids_len` элементов (null допустим при `ids_len == 0`);
-/// `out_ptr`/`out_len` — валидные указатели.
+/// `ids` is valid for `ids_len` elements (null is allowed when
+/// `ids_len == 0`); `out_ptr`/`out_len` are valid pointers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cdc_pack_tracks(
     version: u32,
@@ -683,14 +688,14 @@ pub unsafe extern "C" fn cdc_pack_tracks(
     unsafe { finish_bytes(res, out_ptr, out_len) }
 }
 
-/// пакет из плейлистов бд по их именам (`names[..names_len]`, порядок
-/// сохраняется) вместе со всеми их песнями (без повторов). Имя — идентификатор
-/// плейлиста (локальный id между устройствами не совпадает). Любое ненайденное
-/// имя -> `PlaylistNotFound`. Освобождать `cdc_free_bytes`.
+/// packet of db playlists by their names (`names[..names_len]`, order is
+/// kept) together with all their songs (without repeats). The name is the
+/// playlist identifier (local ids differ between devices). Any name not found
+/// -> `PlaylistNotFound`. Free it with `cdc_free_bytes`.
 ///
 /// # Safety
-/// `names` валиден на `names_len` нуль-терминированных строк (null допустим
-/// при `names_len == 0`); `out_ptr`/`out_len` — валидные указатели.
+/// `names` is valid for `names_len` nul-terminated strings (null is allowed
+/// when `names_len == 0`); `out_ptr`/`out_len` are valid pointers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cdc_pack_playlists(
     version: u32,
@@ -727,7 +732,7 @@ mod tests {
     use super::*;
     use crate::mem::{cdc_free_bytes, cdc_free_packet};
 
-    /// `cdc_encode` только с песнями.
+    /// `cdc_encode` with songs only.
     unsafe fn encode_songs(
         version: u32,
         hashes: &[[u8; 16]],
@@ -791,7 +796,7 @@ mod tests {
         };
         assert_eq!(st, FFICdcStatus::Ok);
 
-        // полная распаковка.
+        // full unpack.
         let mut pk = FFIPacket::empty();
         assert_eq!(
             unsafe { cdc_decode(p, l, true, true, true, &mut pk) },
@@ -810,7 +815,7 @@ mod tests {
         assert!(songs[1].name.is_null() && songs[1].data.is_null());
         unsafe { cdc_free_packet(pk) };
 
-        // без аудио и имён.
+        // without audio and names.
         let mut pk = FFIPacket::empty();
         assert_eq!(
             unsafe { cdc_decode(p, l, false, false, false, &mut pk) },
@@ -885,7 +890,7 @@ mod tests {
         assert!(pls[1].tracks.is_null() && pls[1].cover.is_null() && pls[1].cover_name.is_null());
         unsafe { cdc_free_packet(pk) };
 
-        // без обложек при распаковке.
+        // without covers on unpack.
         let mut pk = FFIPacket::empty();
         assert_eq!(
             unsafe { cdc_decode(p, l, false, false, false, &mut pk) },
@@ -918,7 +923,7 @@ mod tests {
         assert_eq!(st, FFICdcStatus::UnsupportedVersion);
         assert!(p.is_null() && l == 0);
 
-        // имена включены, а массив null.
+        // names enabled, but the array is null.
         let (st, _, _) = unsafe {
             encode_songs(1, &[[0; 16]], ptr::null(), ptr::null(), ptr::null(), false, true)
         };

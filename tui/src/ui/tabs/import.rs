@@ -1,8 +1,9 @@
-//! вкладка IMPORT (`:import`): импорт файла пакета в библиотеку. TUI здесь —
-//! фронтенд из двухшагового импорта ядра: ядро отдаёт файлы (песни и
-//! обложки), вкладка пишет их в каталог SAVE TO (по умолчанию — каталог
-//! музыки) и передаёт ядру итоговые пути. Путь к пакету по умолчанию —
-//! каталог, из которого запущено приложение. Запуск — Shift+W.
+//! IMPORT tab (`:import`): imports a packet file into the library. The TUI is
+//! the frontend of the core's two-step import here: the core hands out the
+//! files (songs and covers), the tab writes them into the SAVE TO directory
+//! (default — the music directory) and passes the resulting paths to the
+//! core. The default packet path is the directory the app was launched from.
+//! Run — Shift+W.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -46,7 +47,7 @@ impl ImportTab {
         Self { form, log }
     }
 
-    /// весь импорт; `true` — библиотека изменилась.
+    /// the whole import; `true` — the library changed.
     fn run(&mut self) -> bool {
         let packet = PathBuf::from(self.form.text(F_PACKET).trim());
         let save_to = PathBuf::from(self.form.text(F_SAVE_TO).trim());
@@ -70,7 +71,7 @@ impl ImportTab {
             if force { " (force)" } else { "" }
         ));
 
-        // шаг 1: ядро проверяет пакет и даты.
+        // step 1: the core checks the packet and the dates.
         let prepared = match PreparedImport::prepare(&bytes, force) {
             Ok(p) => p,
             Err(FFICdcStatus::Outdated) => {
@@ -84,7 +85,7 @@ impl ImportTab {
         };
         drop(bytes);
 
-        // шаг 2: пишем файлы сами.
+        // step 2: we write the files ourselves.
         let files = prepared.files();
         let (songs, covers) = files.iter().fold((0, 0), |(s, c), f| match f.cover {
             true => (s, c + 1),
@@ -101,14 +102,14 @@ impl ImportTab {
                 Err(e) => {
                     self.log.error(format!("failed to write {}: {e}", f.name));
                     remove_all(&written);
-                    // prepared отменяется в Drop.
+                    // `prepared` is cancelled in Drop.
                     return false;
                 }
             }
         }
         drop(files);
 
-        // шаг 3: ядро сохраняет пути.
+        // step 3: the core saves the paths.
         let paths: Vec<Option<&Path>> = written.iter().map(|p| Some(p.as_path())).collect();
         match prepared.commit(&paths) {
             Ok(()) => {
@@ -172,8 +173,8 @@ impl Tab for ImportTab {
     }
 }
 
-/// пишет `data` в `dir/name`, не перезаписывая существующие файлы: при
-/// занятом имени — `name (1).ext`, `name (2).ext`, ...
+/// writes `data` into `dir/name` without overwriting existing files: if the
+/// name is taken — `name (1).ext`, `name (2).ext`, ...
 fn write_unique(dir: &Path, name: &str, data: &[u8]) -> io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
     let (path, mut file) = create_unique(dir, name)?;

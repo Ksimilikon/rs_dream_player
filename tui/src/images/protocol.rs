@@ -1,17 +1,17 @@
-//! детекция graphics-протокола терминала.
+//! detection of the terminal graphics protocol.
 //!
-//! ratatui-image умеет запросить терминал (через управляющие последовательности
-//! к stdio) и определить доступный протокол: Sixel / Kitty / iTerm2, либо
-//! откатиться на «halfblocks» (юникодные полублоки — работает везде, но это не
-//! настоящая графика). По требованию halfblocks-фолбэк считаем «не поддерживается»:
-//! в этом случае место под изображение на вкладке SONG схлопывается.
+//! ratatui-image can query the terminal (via escape sequences on stdio) and
+//! detect the available protocol: Sixel / Kitty / iTerm2, or fall back to
+//! "halfblocks" (unicode half blocks — works everywhere, but it isn't real
+//! graphics). As required, the halfblocks fallback counts as "not supported":
+//! in that case the image area on the SONG tab collapses.
 
 use ratatui_image::picker::{Picker, ProtocolType};
 
-/// пытается детектировать НАСТОЯЩИЙ graphics-протокол (sixel/kitty/iterm2).
-/// Возвращает `Some(Picker)` только если протокол реальный. Halfblocks-фолбэк и
-/// любые ошибки запроса (например, stdout не является терминалом) → `None` —
-/// терминал считается не поддерживающим показ изображений.
+/// tries to detect a REAL graphics protocol (sixel/kitty/iterm2). Returns
+/// `Some(Picker)` only if the protocol is real. The halfblocks fallback and any
+/// query error (e.g. stdout is not a terminal) → `None` — the terminal is
+/// considered unable to show images.
 pub fn detect_graphics_picker() -> Option<Picker> {
     let picker = Picker::from_query_stdio().ok()?;
     match picker.protocol_type() {

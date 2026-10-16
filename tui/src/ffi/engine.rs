@@ -1,8 +1,8 @@
-//! безопасная обёртка над движком ядра (`engine_*`) и инициализацией (`init`).
+//! safe wrapper over the core engine (`engine_*`) and initialization (`init`).
 //!
-//! конец трека приходит через необязательный C-колбэк, который `engine_add_*`
-//! принимает от нас: он поднимает атомарный флаг, а цикл приложения опрашивает
-//! его ([`take_track_ended`]) и переходит к следующему треку (автоплей).
+//! the end of a track arrives through an optional C callback that
+//! `engine_add_*` takes from us: it raises an atomic flag, and the app loop
+//! polls it ([`take_track_ended`]) and moves on to the next track (autoplay).
 
 use std::ffi::CString;
 use std::path::Path;
@@ -12,15 +12,15 @@ use api::player;
 
 use super::types::opt_string;
 
-/// поднимается колбэком ядра, когда трек доиграл до конца.
+/// raised by the core callback when a track has played to the end.
 static TRACK_ENDED: AtomicBool = AtomicBool::new(false);
 
-/// C-колбэк конца трека (вызывается из аудио-потока ядра).
+/// end-of-track C callback (called from the core audio thread).
 extern "C" fn on_track_end() {
     TRACK_ENDED.store(true, Ordering::SeqCst);
 }
 
-/// забирает флаг «трек закончился» (сбрасывая его). `true` — пора играть следующий.
+/// takes the "track ended" flag (resetting it). `true` — time to play the next.
 pub fn take_track_ended() -> bool {
     TRACK_ENDED.swap(false, Ordering::SeqCst)
 }
@@ -29,7 +29,8 @@ fn path_cstr(p: &Path) -> CString {
     CString::new(p.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-/// инициализирует ядро: каталоги + флаг нужды в бд. Вызывать один раз до всего.
+/// initializes the core: directories + the needs-a-db flag. Call once before
+/// anything else.
 pub fn init(cache: &Path, config: &Path, data: &Path, music: &Path, need_db: bool) {
     let (c, cfg, d, m) = (
         path_cstr(cache),
@@ -40,15 +41,15 @@ pub fn init(cache: &Path, config: &Path, data: &Path, music: &Path, need_db: boo
     api::init(c.as_ptr(), cfg.as_ptr(), d.as_ptr(), m.as_ptr(), need_db);
 }
 
-/// играть трек из индекса по id (с автоплеем следующего по завершении).
+/// plays a track from the index by id (autoplaying the next one when done).
 pub fn play_track_id(id: i64) -> bool {
     player::engine_add_track_id(id, Some(on_track_end))
 }
 
-/// играть трек по пути к файлу (с автоплеем следующего по завершении).
+/// plays a track by file path (autoplaying the next one when done).
 pub fn play_track_path(path: &str) -> bool {
     let c = CString::new(path).unwrap_or_default();
-    // сбрасываем возможный «висящий» флаг конца прошлого трека.
+    // reset a possibly "stale" end flag of the previous track.
     TRACK_ENDED.store(false, Ordering::SeqCst);
     unsafe { player::engine_add_track_path(c.as_ptr(), Some(on_track_end)) }
 }
@@ -96,7 +97,7 @@ pub fn track_volume() -> f32 {
     player::engine_get_volume_track()
 }
 
-/// имена доступных устройств вывода.
+/// names of the available output devices.
 pub fn output_devices() -> Vec<String> {
     let list = player::engine_get_output_devices();
     let out = if list.ptr.is_null() {
@@ -111,7 +112,7 @@ pub fn output_devices() -> Vec<String> {
     out
 }
 
-/// имя текущего устройства вывода.
+/// name of the current output device.
 pub fn current_output_device() -> Option<String> {
     let ptr = player::engine_get_output_device();
     let out = unsafe { opt_string(ptr) };
@@ -119,7 +120,7 @@ pub fn current_output_device() -> Option<String> {
     out
 }
 
-/// переключает устройство вывода по имени.
+/// switches the output device by name.
 pub fn set_output_device(name: &str) -> bool {
     let c = CString::new(name).unwrap_or_default();
     unsafe { player::engine_set_output_device(c.as_ptr()) }

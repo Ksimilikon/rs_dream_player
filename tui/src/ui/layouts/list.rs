@@ -1,6 +1,6 @@
-//! унифицированный список: селектор, прокрутка (через `ListState`), подсветка
-//! «текущего» (проигрываемого) элемента и опциональная сортировка. Данные
-//! (строки) передаются при отрисовке — виджет хранит лишь состояние навигации.
+//! unified list: selector, scrolling (via `ListState`), highlighting of the
+//! "current" (playing) item and optional sorting. The data (lines) is passed
+//! at draw time — the widget only keeps the navigation state.
 
 use ratatui::{
     Frame,
@@ -12,7 +12,7 @@ use ratatui::{
 
 use crate::ui::PLAYING_GREEN;
 
-/// направление сортировки.
+/// sort direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortDir {
     Asc,
@@ -34,7 +34,7 @@ impl SortDir {
     }
 }
 
-/// по какому полю метаданных сортировать пул.
+/// which metadata field the pool is sorted by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
     Title,
@@ -59,12 +59,12 @@ impl SortKey {
     }
 }
 
-/// одна строка списка на отрисовку.
+/// one list line to draw.
 pub struct ListLine {
     pub text: String,
-    /// подсветить зелёным (проигрываемый трек и т.п.).
+    /// highlight in green (the playing track, etc.).
     pub playing: bool,
-    /// необязательный цвет текста (напр. красный для недействительных).
+    /// optional text color (e.g. red for invalid ones).
     pub color: Option<Color>,
 }
 
@@ -86,7 +86,7 @@ impl ListLine {
     }
 }
 
-/// состояние навигации по списку.
+/// list navigation state.
 pub struct ListView {
     state: ListState,
     len: usize,
@@ -105,7 +105,7 @@ impl ListView {
         self.state.selected().unwrap_or(0)
     }
 
-    /// синхронизирует длину и зажимает селектор в диапазон `[0, len)`.
+    /// syncs the length and clamps the selector into `[0, len)`.
     pub fn set_len(&mut self, len: usize) {
         self.len = len;
         if len == 0 {
@@ -133,7 +133,7 @@ impl ListView {
         self.state.select(Some(s));
     }
 
-    /// рисует список с заголовком-рамкой. `focused` — подсвечивать рамку.
+    /// draws the list with a titled border. `focused` — highlight the border.
     pub fn render(
         &mut self,
         frame: &mut Frame,

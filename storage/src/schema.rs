@@ -1,6 +1,7 @@
-//! авторазворачивание sqlite-бд: создаёт файл вместе со всей структурой, если
-//! его нет, и проверяет структуру существующего файла. Реакция на неверную
-//! структуру решается вызывающим кодом (см. [`crate::db::Db::init`]).
+//! auto-deployment of the sqlite db: creates the file with the whole
+//! structure if it is missing, and verifies the structure of an existing file.
+//! The reaction to an invalid structure is up to the caller (see
+//! [`crate::db::Db::init`]).
 
 use std::{
     error::Error,
@@ -10,11 +11,12 @@ use std::{
 
 use rusqlite::Connection;
 
-/// стандартное имя файла бд.
+/// the standard db file name.
 pub const DB_FILE_NAME: &str = "music_db.sqlite";
 
-/// обязательная структура рабочей бд: для каждой таблицы — её обязательные
-/// столбцы. Если таблицы или столбца не хватает, бд считается несовместимой.
+/// the required structure of a working db: for each table — its required
+/// columns. If a table or column is missing, the db is considered
+/// incompatible.
 const REQUIRED_SCHEMA: &[(&str, &[&str])] = &[
     (
         "tracks",
@@ -45,8 +47,8 @@ const REQUIRED_SCHEMA: &[(&str, &[&str])] = &[
     ("playlist_tracks", &["playlist_id", "song_hash", "position"]),
 ];
 
-/// вся структура бд. Каждое выражение идемпотентно (`IF NOT EXISTS`), поэтому
-/// повторный прогон только дозаполняет недостающее.
+/// the whole db structure. Every statement is idempotent (`IF NOT EXISTS`),
+/// so a repeated run only fills in what is missing.
 const SCHEMA_SQL: &str = "\
 CREATE TABLE IF NOT EXISTS albums (
     id   INTEGER PRIMARY KEY,
@@ -108,8 +110,8 @@ CREATE TABLE IF NOT EXISTS playlist_tracks (
 );
 ";
 
-/// бд существует, но её структура не проходит проверку (битый файл или
-/// отсутствующие таблицы).
+/// the db exists but its structure fails verification (a broken file or
+/// missing tables).
 #[derive(Debug)]
 pub struct InvalidStructure(pub String);
 
@@ -121,14 +123,14 @@ impl fmt::Display for InvalidStructure {
 
 impl Error for InvalidStructure {}
 
-/// разворачивает всю структуру на свежем (или починяемом) соединении.
+/// deploys the whole structure on a fresh (or repaired) connection.
 pub fn deploy(conn: &Connection) -> Result<(), Box<dyn Error>> {
     conn.pragma_update(None, "foreign_keys", true)?;
     conn.execute_batch(SCHEMA_SQL)?;
     Ok(())
 }
 
-/// проверяет целостность файла и наличие всех обязательных таблиц.
+/// checks the file integrity and the presence of every required table.
 pub fn verify_structure(conn: &Connection) -> Result<(), InvalidStructure> {
     let integrity: String = conn
         .query_row("PRAGMA integrity_check", [], |r| r.get(0))
@@ -149,7 +151,7 @@ pub fn verify_structure(conn: &Connection) -> Result<(), InvalidStructure> {
             return Err(InvalidStructure(format!("missing table `{table}`")));
         }
 
-        // фактические столбцы таблицы (имя — второй столбец PRAGMA table_info).
+        // actual table columns (the name is the second PRAGMA table_info column).
         let mut stmt = conn
             .prepare(&format!("PRAGMA table_info({table})"))
             .map_err(|e| InvalidStructure(format!("{e}")))?;
@@ -169,7 +171,7 @@ pub fn verify_structure(conn: &Connection) -> Result<(), InvalidStructure> {
     Ok(())
 }
 
-/// путь резервной копии — к имени файла добавляется суффикс `_bak`
+/// backup path — the `_bak` suffix is appended to the file name
 /// (`music_db.sqlite` -> `music_db.sqlite_bak`).
 pub fn backup_path(path: &Path) -> PathBuf {
     let mut name = path

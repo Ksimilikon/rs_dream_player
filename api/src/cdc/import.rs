@@ -1,25 +1,28 @@
-//! импорт пакета в бд в два шага. Ядро само файлы не пишет (на мобильных у
-//! него нет прав на общие каталоги) — это делает фронтенд средствами своей
-//! платформы. Набор функций одинаков на всех платформах:
+//! two-step packet import into the db. The core doesn't write files itself
+//! (on mobile it has no rights to shared directories) — the frontend does it
+//! with its platform's means. The set of functions is the same on every
+//! platform:
 //!
-//! 1. `cdc_import_prepare` — распаковка, проверка дат, список файлов на запись
-//!    (песни и обложки: предлагаемое имя + байты). Бд не меняется.
-//! 2. фронтенд пишет файлы куда может (MediaStore, SAF, выбранная папка,
-//!    песочница, ...) и собирает итоговые пути.
-//! 3. `cdc_import_commit` — повторная проверка дат и запись в бд одной
-//!    транзакцией: в бд сохраняются переданные пути. Либо `cdc_import_cancel`.
+//! 1. `cdc_import_prepare` — unpack, check dates, list the files to write
+//!    (songs and covers: suggested name + bytes). The db doesn't change.
+//! 2. the frontend writes the files wherever it can (MediaStore, SAF, a
+//!    picked folder, the sandbox, ...) and collects the resulting paths.
+//! 3. `cdc_import_commit` — re-check dates and write to the db in one
+//!    transaction: the passed paths are saved in the db. Or
+//!    `cdc_import_cancel`.
 //!
-//! правила:
-//! - песни: хеш уже есть в бд -> в список не попадает (локальный файл не
-//!   трогаем). Новая песня сохраняется в бд с хешем из пакета (хеши
-//!   становятся общими для устройств). Песня без аудио или не-музыка ->
-//!   пропуск. Песня без тегов не пропускается: поля = "Unknown".
-//! - плейлисты сопоставляются по имени; без имени -> пропуск. Список песен
-//!   переписывается целиком. Если обложки/дат в пакете нет (или файл обложки
-//!   не записан), локальные значения сохраняются.
-//! - даты (без `force`): пакет отклоняется целиком (`Outdated`), если хотя бы
-//!   у одного плейлиста локальный `updated_at` задан и пакетный либо не
-//!   задан, либо меньше. Без локальной даты сравнивать не с чем — принимаем.
+//! rules:
+//! - songs: hash already in the db -> not listed (the local file is left
+//!   alone). A new song is saved in the db with the hash from the packet
+//!   (hashes become shared between devices). A song without audio or not
+//!   music -> skipped. A song without tags is not skipped: fields = "Unknown".
+//! - playlists are matched by name; without a name -> skipped. The song list
+//!   is rewritten entirely. If the packet has no cover / dates (or the cover
+//!   file wasn't written), the local values are kept.
+//! - dates (without `force`): the whole packet is rejected (`Outdated`) if at
+//!   least one playlist has a local `updated_at` and the packet one is either
+//!   unset or smaller. Without a local date there is nothing to compare —
+//!   accept.
 
 use std::{
     collections::HashMap,
@@ -35,70 +38,71 @@ use storage::{Db, db::PlaylistHashRow, traits::indexator::Indexator};
 use super::{FFICdcStatus, raw_slice};
 use crate::GLOBAL_STATE;
 
-/// что за файл нужно записать. `repr(u32)`: не перенумеровывать.
+/// what kind of file has to be written. `repr(u32)`: never renumber.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FFIImportFileKind {
-    /// аудиофайл песни.
+    /// song audio file.
     Song = 1,
-    /// обложка плейлиста.
+    /// playlist cover.
     Cover = 2,
 }
 
-/// один файл, который фронтенд должен записать.
+/// one file the frontend has to write.
 #[repr(C)]
 pub struct FFIImportFile {
     pub kind: FFIImportFileKind,
-    /// предлагаемое имя файла: безопасное на любой ОС (без каталогов и
-    /// запрещённых символов), всегда с расширением. Уникальность в целевом
-    /// каталоге не гарантирована — коллизии решает фронтенд.
+    /// suggested file name: safe on any OS (no directories or forbidden
+    /// characters), always with an extension. Uniqueness in the target
+    /// directory is not guaranteed — the frontend resolves collisions.
     pub name: *const c_char,
     pub data: *const u8,
     pub data_len: usize,
 }
 
-/// список файлов на запись. Принадлежит сессии: валиден до
-/// `cdc_import_commit`/`cdc_import_cancel`, отдельно не освобождается.
+/// list of files to write. Owned by the session: valid until
+/// `cdc_import_commit`/`cdc_import_cancel`, not freed separately.
 #[repr(C)]
 pub struct FFIImportFiles {
     pub ptr: *const FFIImportFile,
     pub len: usize,
 }
 
-/// файл из плана: песня `songs[i]` или обложка `playlists[i]`.
+/// a planned file: song `songs[i]` or cover `playlists[i]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Planned {
     Song(usize),
     Cover(usize),
 }
 
-/// распакованный пакет между `prepare` и `commit`. Для C — непрозрачный
-/// указатель; владеет данными, на которые указывает [`FFIImportFiles`].
+/// unpacked packet between `prepare` and `commit`. For C — an opaque
+/// pointer; owns the data [`FFIImportFiles`] points to.
 pub struct ImportSession {
     force: bool,
-    /// только новые песни (с аудио, хеша нет в бд).
+    /// only new songs (with audio, hash not in the db).
     songs: Vec<Song>,
     playlists: Vec<Playlist>,
     plan: Vec<Planned>,
-    /// владеет строками, на которые указывают `files[i].name`.
+    /// owns the strings `files[i].name` points to.
     _names: Vec<CString>,
     files: Vec<FFIImportFile>,
 }
 
 // ───────────────────────────────── API ─────────────────────────────────────
 
-/// шаг 1: распаковывает пакет `bytes[..len]`, проверяет даты и отдаёт список
-/// файлов на запись (`out_files`) и сессию (`out_session`). Бд не меняется.
-/// `force` — принять, даже если пакет устарел (по умолчанию `false`).
+/// step 1: unpacks the packet `bytes[..len]`, checks dates and returns the
+/// list of files to write (`out_files`) and the session (`out_session`). The
+/// db doesn't change. `force` — accept even if the packet is outdated
+/// (`false` by default).
 ///
-/// возвращает `Ok`, `Outdated` (пакет старше локальных данных), код ошибки
-/// декодирования (1..=99) или ошибки ядра (200..). При ошибке сессии нет
-/// (`*out_session == null`). Пустой список файлов — тоже нормальный случай:
-/// `cdc_import_commit` всё равно нужен (плейлисты).
+/// returns `Ok`, `Outdated` (the packet is older than local data), a decode
+/// error code (1..=99) or a core error (200..). On error there is no session
+/// (`*out_session == null`). An empty file list is a normal case too:
+/// `cdc_import_commit` is still needed (playlists).
 ///
 /// # Safety
-/// `bytes` валиден на `len` байт (null допустим при `len == 0`);
-/// `out_session`/`out_files` — валидные указатели.
+/// `bytes` is valid for `len` bytes (null is allowed when `len == 0`);
+/// `out_session`/`out_files` are valid pointers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cdc_import_prepare(
     bytes: *const u8,
@@ -136,17 +140,19 @@ pub unsafe extern "C" fn cdc_import_prepare(
     }
 }
 
-/// шаг 3: сохраняет импорт в бд. `paths[i]` — путь, по которому записан
-/// файл `files[i]` из `cdc_import_prepare`; null = файл не записан (песня не
-/// попадёт в бд, обложка плейлиста останется прежней). `paths_len` должен
-/// равняться числу файлов, иначе `InvalidArgument`.
+/// step 3: saves the import into the db. `paths[i]` is the path where
+/// `files[i]` from `cdc_import_prepare` was written; null = the file wasn't
+/// written (the song won't get into the db, the playlist cover stays as it
+/// was). `paths_len` must equal the number of files, otherwise
+/// `InvalidArgument`.
 ///
-/// сессия освобождается всегда (и при ошибке). Если вернулся не `Ok`, бд не
-/// изменена, а записанные файлы фронтенд удаляет сам.
+/// the session is always freed (on error too). If the result is not `Ok`, the
+/// db is unchanged and the frontend deletes the written files itself.
 ///
 /// # Safety
-/// `session` получена из `cdc_import_prepare` и ещё не освобождалась (или
-/// null); `paths` валиден на `paths_len` элементов, строки нуль-терминированы.
+/// `session` comes from `cdc_import_prepare` and wasn't freed yet (or is
+/// null); `paths` is valid for `paths_len` elements, strings are
+/// nul-terminated.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cdc_import_commit(
     session: *mut ImportSession,
@@ -176,11 +182,11 @@ pub unsafe extern "C" fn cdc_import_commit(
     }
 }
 
-/// отменяет импорт и освобождает сессию. Null игнорируется. Записанные
-/// файлы фронтенд удаляет сам.
+/// cancels the import and frees the session. Null is ignored. The frontend
+/// deletes the written files itself.
 ///
 /// # Safety
-/// `session` получена из `cdc_import_prepare` и ещё не освобождалась (или
+/// `session` comes from `cdc_import_prepare` and wasn't freed yet (or is
 /// null).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cdc_import_cancel(session: *mut ImportSession) {
@@ -191,12 +197,12 @@ pub unsafe extern "C" fn cdc_import_cancel(session: *mut ImportSession) {
 
 // ─────────────────────────────── logic ───────────────────────────────
 
-/// доступ к бд под блокировкой (подменяется в тестах).
+/// db access under the lock (replaced in tests).
 trait Store {
     fn with<R>(&self, f: impl FnOnce(&Db) -> Result<R, FFICdcStatus>) -> Result<R, FFICdcStatus>;
 }
 
-/// глобальное ядро.
+/// the global core.
 struct Global;
 
 impl Store for Global {
@@ -233,14 +239,14 @@ fn prepare(store: &impl Store, bytes: &[u8], force: bool) -> Result<ImportSessio
         plan.push(Planned::Cover(i));
         names.push(file_name_or(&p.cover_name, "cover", image_ext(&p.cover)));
     }
-    // safe_file_name убирает управляющие символы, так что NUL внутри нет.
+    // safe_file_name removes control characters, so there is no NUL inside.
     let names: Vec<CString> = names
         .into_iter()
         .map(|n| CString::new(n).unwrap_or_default())
         .collect();
 
-    // буферы `Vec` не двигаются при перемещении сессии, поэтому указатели
-    // на них остаются валидными, пока сессия жива и не меняется.
+    // `Vec` buffers don't move when the session moves, so pointers into them
+    // stay valid while the session is alive and unchanged.
     let files = plan
         .iter()
         .zip(&names)
@@ -277,15 +283,15 @@ fn commit(
         return Err(FFICdcStatus::InvalidArgument);
     }
 
-    // метаданные читаются из записанных файлов — до блокировки.
+    // metadata is read from the written files — before taking the lock.
     let mut tracks = Vec::new();
     let mut covers = HashMap::new();
     for (planned, path) in session.plan.iter().zip(paths) {
         let Some(path) = path else { continue };
         match *planned {
             Planned::Song(i) => {
-                // нечитаемый файл (заголовок похож на музыку, а дальше мусор)
-                // в бд не попадает.
+                // an unreadable file (the header looks like music, garbage
+                // follows) doesn't get into the db.
                 if let Ok(track) = TrackVirtual::from_file(path.clone(), false) {
                     tracks.push((track, hex(session.songs[i].hash)));
                 }
@@ -310,10 +316,10 @@ fn commit(
         .collect();
 
     store.with(|db| {
-        // бд могла измениться, пока фронтенд писал файлы.
+        // the db may have changed while the frontend was writing files.
         check_dates(db, &session.playlists, session.force)?;
-        // песня могла появиться за это время — второй вставки с тем же
-        // хешем не будет.
+        // the song may have appeared meanwhile — there will be no second
+        // insert with the same hash.
         let tracks: Vec<_> = tracks
             .into_iter()
             .filter(|(_, hash)| !db.hash_exist(hash.clone()))
@@ -323,7 +329,8 @@ fn commit(
     })
 }
 
-/// `Outdated`, если пакет старше локальных плейлистов (см. правила модуля).
+/// `Outdated` if the packet is older than the local playlists (see the
+/// module rules).
 fn check_dates(db: &Db, playlists: &[Playlist], force: bool) -> Result<(), FFICdcStatus> {
     if force {
         return Ok(());
@@ -345,15 +352,15 @@ fn check_dates(db: &Db, playlists: &[Playlist], force: bool) -> Result<(), FFICd
     Ok(())
 }
 
-/// хеш -> hex-строка в формате бд.
+/// hash -> hex string in the db format.
 fn hex(hash: u128) -> String {
     format!("{hash:032x}")
 }
 
 // ─────────────────────────────── names ───────────────────────────────
 
-/// безопасное имя файла из пакета, иначе `fallback.ext`. Без расширения в
-/// имени добавляется `ext` (определённое по содержимому).
+/// a safe file name from the packet, otherwise `fallback.ext`. A name without
+/// an extension gets `ext` (detected from the content).
 fn file_name_or(name: &str, fallback: &str, ext: &str) -> String {
     let name = safe_file_name(name).unwrap_or_else(|| fallback.to_owned());
     match Path::new(&name).extension() {
@@ -362,9 +369,9 @@ fn file_name_or(name: &str, fallback: &str, ext: &str) -> String {
     }
 }
 
-/// имя из чужого пакета -> имя файла, безопасное на любой ОС: без каталогов
-/// (`../`), запрещённых символов Windows, управляющих символов, ведущих /
-/// хвостовых точек и пробелов, зарезервированных имён (`CON`, `NUL`, ...).
+/// a name from a foreign packet -> a file name safe on any OS: no
+/// directories (`../`), Windows-forbidden characters, control characters,
+/// leading / trailing dots and spaces, reserved names (`CON`, `NUL`, ...).
 fn safe_file_name(name: &str) -> Option<String> {
     let base = Path::new(name).file_name()?.to_str()?;
     let clean: String = base
@@ -389,7 +396,7 @@ fn safe_file_name(name: &str) -> Option<String> {
     }
 }
 
-/// расширение аудио по сигнатуре (те же форматы, что `Track::is_music`).
+/// audio extension by signature (the same formats as `Track::is_music`).
 fn audio_ext(data: &[u8]) -> &'static str {
     match data {
         [b'f', b'L', b'a', b'C', ..] => "flac",
@@ -401,7 +408,7 @@ fn audio_ext(data: &[u8]) -> &'static str {
     }
 }
 
-/// расширение картинки по сигнатуре.
+/// image extension by signature.
 fn image_ext(data: &[u8]) -> &'static str {
     match data {
         [0x89, b'P', b'N', b'G', ..] => "png",
@@ -420,7 +427,7 @@ mod tests {
     use audio_structs::playlist::Playlist as DbPlaylist;
     use codec::Version;
 
-    /// бд и «каталог фронтенда» во временной папке.
+    /// db and a "frontend directory" in a temporary folder.
     struct Local {
         db: Db,
         root: PathBuf,
@@ -445,7 +452,7 @@ mod tests {
             self.db.save_playlist(p).unwrap();
         }
 
-        /// то, что делает фронтенд: пишет все файлы сессии, возвращает пути.
+        /// what the frontend does: writes every session file, returns the paths.
         fn write_all(&self, session: &ImportSession) -> Vec<Option<PathBuf>> {
             session
                 .files
@@ -476,13 +483,13 @@ mod tests {
         }
     }
 
-    /// реальный mp3-семпл из `test_data/`.
+    /// a real mp3 sample from `test_data/`.
     fn mp3() -> Vec<u8> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test_data/2.mp3");
         fs::read(path).unwrap()
     }
 
-    /// минимальный WAV без тегов (44-байтный заголовок + тишина).
+    /// minimal WAV without tags (44-byte header + silence).
     fn tagless_wav() -> Vec<u8> {
         let data_len = 400u32;
         let mut v = Vec::new();
@@ -509,7 +516,7 @@ mod tests {
                 name: "one.mp3".into(),
                 data: mp3(),
             },
-            // без аудио — пропуск.
+            // no audio — skipped.
             Song {
                 hash: 2,
                 name: "two.mp3".into(),
@@ -553,7 +560,7 @@ mod tests {
                 (FFIImportFileKind::Cover, "c.png".into())
             ]
         );
-        // prepare бд не трогает.
+        // prepare doesn't touch the db.
         assert!(!l.db.hash_exist(hex(1)));
 
         let paths = l.write_all(&session);
@@ -568,7 +575,7 @@ mod tests {
         assert_eq!(pls[0].updated_at, Some(5));
         assert_eq!(pls[0].cover_art, Some(l.root.join("c.png")));
 
-        // повторный импорт: песня уже есть — в списке только обложка.
+        // repeated import: the song already exists — only the cover is listed.
         let session = prepare(&l, &bytes, false).unwrap();
         assert_eq!(
             file_names(&session),
@@ -608,7 +615,7 @@ mod tests {
                 Some(FFICdcStatus::Outdated)
             );
         }
-        // равная или более новая дата — ok.
+        // an equal or newer date — ok.
         assert!(prepare(&l, &packet(vec![playlist("mix", Some(10))]), false).is_ok());
     }
 
@@ -616,7 +623,7 @@ mod tests {
     fn outdated_is_rechecked_in_commit() {
         let l = Local::new("recheck");
         let session = prepare(&l, &packet(vec![playlist("mix", Some(5))]), false).unwrap();
-        // пока фронтенд писал файлы, локальный плейлист обновился.
+        // the local playlist got updated while the frontend was writing files.
         l.local_playlist("mix", Some(10));
         let paths = l.write_all(&session);
         assert_eq!(commit(&l, &session, &paths), Err(FFICdcStatus::Outdated));
@@ -649,7 +656,7 @@ mod tests {
         let second = prepare(&l, &bytes, false).unwrap();
         let paths = l.write_all(&first);
         assert_eq!(commit(&l, &first, &paths), Ok(()));
-        // второй commit с той же песней не падает на UNIQUE(hash).
+        // a second commit with the same song doesn't fail on UNIQUE(hash).
         assert_eq!(commit(&l, &second, &[None]), Ok(()));
         assert_eq!(l.db.get_track_hashes(None).unwrap().len(), 1);
     }

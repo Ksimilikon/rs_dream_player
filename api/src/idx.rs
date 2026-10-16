@@ -1,6 +1,6 @@
-//! FFI поверх индекса (sqlite). Префикс `idx_` = работа с бд.
-//! Все возвращаемые указатели/структуры владеют своей памятью и должны быть
-//! освобождены парными `idx_free_*` из [`crate::mem`].
+//! FFI over the index (sqlite). Prefix `idx_` = db operations.
+//! Every returned pointer / struct owns its memory and must be freed with the
+//! paired `idx_free_*` from [`crate::mem`].
 
 use std::error::Error;
 use std::ffi::{CStr, CString, c_char};
@@ -11,13 +11,14 @@ use storage::traits::indexator::Indexator;
 
 use super::GLOBAL_STATE;
 
-/// метаданные трека для C-ABI. Несёт идентификатор песни: `id` (строка бд) и/или
-/// `path` (путь к файлу) — любой из них может служить ключом (см. `idx_get_track`).
+/// track metadata for the C ABI. Carries the song identifier: `id` (db row)
+/// and/or `path` (file path) — either can serve as the key (see
+/// `idx_get_track`).
 #[repr(C)]
 pub struct FFITrackMetadata {
     pub has_id: bool, // Option<i64>
     pub id: i64,
-    pub path: *mut c_char, // maybe null (внешний источник)
+    pub path: *mut c_char, // maybe null (external source)
 
     pub title: *mut c_char,
     pub artists: *mut *mut c_char,
@@ -40,15 +41,15 @@ pub struct FFITrackMetadataParams {
     pub cover_art: *mut c_char, // maybe null
 }
 
-/// список метаданных треков (владеет буфером).
+/// list of track metadata (owns the buffer).
 #[repr(C)]
 pub struct FFITracksList {
     pub ptr: *mut FFITrackMetadata,
     pub len: usize,
 }
 
-/// список C-строк (владеет буфером и строками). Используется, например, для
-/// имён устройств вывода (`engine_get_output_devices`).
+/// list of C strings (owns the buffer and the strings). Used e.g. for output
+/// device names (`engine_get_output_devices`).
 #[repr(C)]
 pub struct FFIStringList {
     pub ptr: *mut *mut c_char,
@@ -59,7 +60,7 @@ pub struct FFIStringList {
 pub struct FFIPlaylist {
     pub name: *mut c_char, // null = anonymus
 
-    pub tracks: *mut i64, // id треков
+    pub tracks: *mut i64, // track ids
     pub tracks_len: usize,
 
     pub cover_art: *mut c_char, // maybe null
@@ -79,17 +80,17 @@ pub struct FFIPlaylistsList {
 
 // ───────────────────────── helpers (crate-private) ─────────────────────────
 
-/// `&str` -> owned C-строка; `null` при внутреннем NUL.
+/// `&str` -> owned C string; `null` on an interior NUL.
 pub(crate) fn to_c(s: &str) -> *mut c_char {
     CString::new(s).map_or(ptr::null_mut(), CString::into_raw)
 }
 
-/// `Option<&str>` -> C-строка или `null`.
+/// `Option<&str>` -> C string or `null`.
 pub(crate) fn opt_to_c(s: Option<&str>) -> *mut c_char {
     s.map_or(ptr::null_mut(), to_c)
 }
 
-/// `Vec<T>` -> (ptr, len) через boxed slice (len == число элементов).
+/// `Vec<T>` -> (ptr, len) via a boxed slice (len == number of elements).
 pub(crate) fn vec_to_raw<T>(v: Vec<T>) -> (*mut T, usize) {
     if v.is_empty() {
         return (ptr::null_mut(), 0);
@@ -99,7 +100,7 @@ pub(crate) fn vec_to_raw<T>(v: Vec<T>) -> (*mut T, usize) {
     (Box::into_raw(boxed) as *mut T, len)
 }
 
-/// список строк -> (`*mut *mut c_char`, len).
+/// list of strings -> (`*mut *mut c_char`, len).
 fn strings_to_raw(v: &[String]) -> (*mut *mut c_char, usize) {
     let raw: Vec<*mut c_char> = v.iter().map(|s| to_c(s)).collect();
     vec_to_raw(raw)
@@ -115,7 +116,7 @@ fn empty_params() -> FFITrackMetadataParams {
     }
 }
 
-/// пустая метадата (трек не найден / без данных), несёт только идентификатор.
+/// empty metadata (track not found / no data), carries only the identifier.
 fn empty_metadata(has_id: bool, id: i64, path: *mut c_char) -> FFITrackMetadata {
     FFITrackMetadata {
         has_id,
@@ -132,8 +133,8 @@ fn empty_metadata(has_id: bool, id: i64, path: *mut c_char) -> FFITrackMetadata 
     }
 }
 
-/// `TrackVirtual` -> `FFITrackMetadata`. Идентификатор (`id`/`path`) берётся из
-/// самого трека, остальное — из метаданных (если они загружены).
+/// `TrackVirtual` -> `FFITrackMetadata`. The identifier (`id`/`path`) comes
+/// from the track itself, the rest from the metadata (if loaded).
 pub(crate) fn track_to_ffi(track: &TrackVirtual) -> FFITrackMetadata {
     let path = opt_to_c(track.get_path().map(|p| p.to_string_lossy()).as_deref());
 
@@ -177,7 +178,7 @@ pub(crate) fn track_to_ffi(track: &TrackVirtual) -> FFITrackMetadata {
 
 // ───────────────────────────────── API ─────────────────────────────────────
 
-/// все плейлисты библиотеки. Освобождать через `idx_free_playlists_list`.
+/// every library playlist. Free with `idx_free_playlists_list`.
 #[unsafe(no_mangle)]
 pub extern "C" fn idx_get_playlists() -> FFIPlaylistsList {
     let guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
@@ -220,13 +221,13 @@ pub extern "C" fn idx_get_playlists() -> FFIPlaylistsList {
     FFIPlaylistsList { ptr, len }
 }
 
-/// весь пул треков библиотеки (метаданные). Освобождать `idx_free_tracks_list`.
+/// the whole library track pool (metadata). Free with `idx_free_tracks_list`.
 #[unsafe(no_mangle)]
 pub extern "C" fn idx_get_tracks() -> FFITracksList {
     tracks_list(|db| db.get_tracks(None, None, None, None).ok())
 }
 
-/// треки плейлиста по его id. Освобождать `idx_free_tracks_list`.
+/// tracks of a playlist by its id. Free with `idx_free_tracks_list`.
 #[unsafe(no_mangle)]
 pub extern "C" fn idx_get_playlist_tracks(id_playlist: i64) -> FFITracksList {
     tracks_list(|db| {
@@ -235,11 +236,11 @@ pub extern "C" fn idx_get_playlist_tracks(id_playlist: i64) -> FFITracksList {
     })
 }
 
-/// метаданные одного трека по идентификатору: `path` (если не null) имеет
-/// приоритет над `id`. Поля результата нулевые, если трек не найден.
+/// metadata of one track by identifier: `path` (if not null) takes priority
+/// over `id`. The result fields are zero if the track isn't found.
 ///
 /// # Safety
-/// `path` — либо null, либо валидный C-указатель на нуль-терминированную строку.
+/// `path` is either null or a valid C pointer to a nul-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_get_track(id_track: i64, path: *const c_char) -> FFITrackMetadata {
     let guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
@@ -247,7 +248,7 @@ pub unsafe extern "C" fn idx_get_track(id_track: i64, path: *const c_char) -> FF
         if !path.is_null()
             && let Ok(p) = crate::ptr_to_path(path)
         {
-            // поиск по пути (точное совпадение уникального столбца).
+            // lookup by path (exact match on a unique column).
             db.get_tracks(None, None, None, None)
                 .ok()?
                 .into_iter()
@@ -266,7 +267,7 @@ pub unsafe extern "C" fn idx_get_track(id_track: i64, path: *const c_char) -> FF
     }
 }
 
-/// общий сбор `FFITracksList` из выборки треков.
+/// common assembly of an `FFITracksList` from a track selection.
 fn tracks_list(select: impl FnOnce(&storage::Db) -> Option<Vec<TrackVirtual>>) -> FFITracksList {
     let guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
     let items: Vec<FFITrackMetadata> = guard
@@ -282,10 +283,10 @@ fn tracks_list(select: impl FnOnce(&storage::Db) -> Option<Vec<TrackVirtual>>) -
 
 // ───────────────────────── writes (db mutations) ───────────────────────────
 
-/// читает `*const c_char` в `Option<String>` (null -> None).
+/// reads a `*const c_char` into `Option<String>` (null -> None).
 ///
 /// # Safety
-/// `ptr` — либо null, либо валидный C-указатель на нуль-терминированную строку.
+/// `ptr` is either null or a valid C pointer to a nul-terminated string.
 pub(crate) unsafe fn c_to_opt_string(ptr: *const c_char) -> Option<String> {
     if ptr.is_null() {
         return None;
@@ -293,7 +294,7 @@ pub(crate) unsafe fn c_to_opt_string(ptr: *const c_char) -> Option<String> {
     unsafe { CStr::from_ptr(ptr) }.to_str().ok().map(str::to_owned)
 }
 
-/// читает массив C-строк в `Vec<String>` (null/0 -> пусто).
+/// reads an array of C strings into `Vec<String>` (null/0 -> empty).
 unsafe fn c_to_strings(ptr: *const *const c_char, len: usize) -> Vec<String> {
     if ptr.is_null() || len == 0 {
         return Vec::new();
@@ -304,17 +305,18 @@ unsafe fn c_to_strings(ptr: *const *const c_char, len: usize) -> Vec<String> {
         .collect()
 }
 
-/// выполняет операцию над бд под блокировкой; `None`, если бд нет или ошибка.
+/// runs an operation on the db under the lock; `None` if there is no db or on
+/// error.
 fn with_db<R>(f: impl FnOnce(&storage::Db) -> Result<R, Box<dyn Error>>) -> Option<R> {
     let guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
     f(guard.get_db()?).ok()
 }
 
-/// индексирует каталог `dir` в библиотеку. `dir` == null -> каталог музыки из
-/// конфигурации. Возвращает `true` при успехе.
+/// indexes directory `dir` into the library. `dir` == null -> the music
+/// directory from the configuration. Returns `true` on success.
 ///
 /// # Safety
-/// `dir` — null или валидный C-указатель на строку.
+/// `dir` is null or a valid C string pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_index_dir(dir: *const c_char) -> bool {
     let guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
@@ -332,11 +334,13 @@ pub unsafe extern "C" fn idx_index_dir(dir: *const c_char) -> bool {
     db.index_dir(&dir).is_ok()
 }
 
-/// правит метадату трека: `title` и/или список артистов. null-поле не трогается
-/// (для артистов: `artists` == null -> не менять; иначе — переписать целиком).
+/// edits track metadata: `title` and/or the artist list. A null field is left
+/// alone (for artists: `artists` == null -> don't change; otherwise rewrite
+/// entirely).
 ///
 /// # Safety
-/// `title` — null или C-строка; `artists` — null или массив из `artists_len` C-строк.
+/// `title` is null or a C string; `artists` is null or an array of
+/// `artists_len` C strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_set_track_meta(
     id: i64,
@@ -350,20 +354,20 @@ pub unsafe extern "C" fn idx_set_track_meta(
     with_db(|db| db.set_track_meta(id, title.as_deref(), artists.as_deref())).is_some()
 }
 
-/// альбом трека (null -> очистить).
+/// track album (null -> clear).
 ///
 /// # Safety
-/// `album` — null или C-строка.
+/// `album` is null or a C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_set_track_album(id: i64, album: *const c_char) -> bool {
     let album = unsafe { c_to_opt_string(album) };
     with_db(|db| db.set_track_album(id, album.as_deref())).is_some()
 }
 
-/// жанры трека (переписать целиком; null/0 -> очистить).
+/// track genres (rewrite entirely; null/0 -> clear).
 ///
 /// # Safety
-/// `genres` — null или массив из `genres_len` C-строк.
+/// `genres` is null or an array of `genres_len` C strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_set_track_genres(
     id: i64,
@@ -374,10 +378,10 @@ pub unsafe extern "C" fn idx_set_track_genres(
     with_db(|db| db.set_track_genres(id, &genres)).is_some()
 }
 
-/// путь к обложке трека (null -> очистить).
+/// track cover path (null -> clear).
 ///
 /// # Safety
-/// `cover_path` — null или C-строка.
+/// `cover_path` is null or a C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_set_track_cover(id: i64, cover_path: *const c_char) -> bool {
     let cover = if cover_path.is_null() {
@@ -391,42 +395,42 @@ pub unsafe extern "C" fn idx_set_track_cover(id: i64, cover_path: *const c_char)
     with_db(|db| db.set_track_cover(id, cover.as_deref())).is_some()
 }
 
-/// цветовая метка трека (null -> очистить).
+/// track color label (null -> clear).
 ///
 /// # Safety
-/// `color` — null или C-строка.
+/// `color` is null or a C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_set_track_color(id: i64, color: *const c_char) -> bool {
     let color = unsafe { c_to_opt_string(color) };
     with_db(|db| db.set_track_color(id, color.as_deref())).is_some()
 }
 
-/// текстовая метка трека (null -> очистить).
+/// track text label (null -> clear).
 ///
 /// # Safety
-/// `label` — null или C-строка.
+/// `label` is null or a C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_set_track_label(id: i64, label: *const c_char) -> bool {
     let label = unsafe { c_to_opt_string(label) };
     with_db(|db| db.set_track_label(id, label.as_deref())).is_some()
 }
 
-/// пометка «файл недействителен».
+/// the "file is invalid" mark.
 #[unsafe(no_mangle)]
 pub extern "C" fn idx_set_track_invalid(id: i64, invalid: bool) -> bool {
     with_db(|db| db.set_track_invalid(id, invalid)).is_some()
 }
 
-/// сохранённая громкость трека.
+/// saved track volume.
 #[unsafe(no_mangle)]
 pub extern "C" fn idx_set_track_volume(id: i64, volume: f32) -> bool {
     with_db(|db| db.set_track_volume_id(id, volume)).is_some()
 }
 
-/// новый путь к файлу трека (после переименования на диске). `path` != null.
+/// new track file path (after a rename on disk). `path` != null.
 ///
 /// # Safety
-/// `path` — валидный C-указатель на строку (не null).
+/// `path` is a valid C string pointer (not null).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_set_track_path(id: i64, path: *const c_char) -> bool {
     let Ok(path) = crate::ptr_to_path(path) else {
@@ -435,25 +439,25 @@ pub unsafe extern "C" fn idx_set_track_path(id: i64, path: *const c_char) -> boo
     with_db(|db| db.set_track_path(id, &path)).is_some()
 }
 
-/// удаляет трек из индекса по id.
+/// removes a track from the index by id.
 #[unsafe(no_mangle)]
 pub extern "C" fn idx_remove_track(id: i64) -> bool {
     with_db(|db| db.remove_track(id)).is_some()
 }
 
-/// удаляет все треки с пометкой «недействителен». Возвращает число удалённых
-/// (`-1` при ошибке/отсутствии бд).
+/// removes every track marked "invalid". Returns the number removed (`-1` on
+/// error / no db).
 #[unsafe(no_mangle)]
 pub extern "C" fn idx_remove_invalid_tracks() -> i64 {
     with_db(|db| db.remove_invalid_tracks()).map_or(-1, |n| n as i64)
 }
 
-/// создаёт/обновляет плейлист `name` из треков с указанными id (в этом порядке).
-/// `cover` — null или путь к обложке.
+/// creates / updates playlist `name` from the tracks with the given ids (in
+/// this order). `cover` is null or a cover path.
 ///
 /// # Safety
-/// `name` — валидная C-строка (не null); `track_ids` — null или массив длины
-/// `track_ids_len`; `cover` — null или C-строка.
+/// `name` is a valid C string (not null); `track_ids` is null or an array of
+/// length `track_ids_len`; `cover` is null or a C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_save_playlist(
     name: *const c_char,
@@ -472,7 +476,7 @@ pub unsafe extern "C" fn idx_save_playlist(
     let cover = unsafe { c_to_opt_string(cover) };
 
     with_db(|db| {
-        // собираем треки плейлиста по id в заданном порядке.
+        // assemble the playlist tracks by id in the given order.
         let mut tracks = Vec::with_capacity(ids.len());
         for &id in ids {
             if let Some(t) = db.get_tracks(None, None, Some(id), None)?.into_iter().next() {
@@ -487,10 +491,10 @@ pub unsafe extern "C" fn idx_save_playlist(
     .is_some()
 }
 
-/// удаляет плейлист по имени.
+/// removes a playlist by name.
 ///
 /// # Safety
-/// `name` — валидная C-строка (не null).
+/// `name` is a valid C string (not null).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_remove_playlist(name: *const c_char) -> bool {
     let Some(name) = (unsafe { c_to_opt_string(name) }) else {

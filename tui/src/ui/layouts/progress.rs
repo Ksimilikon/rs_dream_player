@@ -1,12 +1,12 @@
-//! прогресс-бар воспроизведения: `#` — проигранное, `-` — остаток, в конце
-//! `mm:ss/mm:ss`.
+//! playback progress bar: `#` — played, `-` — remaining, `mm:ss/mm:ss` at the
+//! end.
 
-/// форматирует секунды в `m:ss`.
+/// formats seconds as `m:ss`.
 pub fn fmt_time(secs: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
-/// строит строку прогресс-бара под ширину `width` колонок.
+/// builds the progress bar line for a width of `width` columns.
 pub fn progress_bar(pos: u64, total: u64, width: usize) -> String {
     let pos = if total > 0 { pos.min(total) } else { pos };
     let time = format!(" {}/{}", fmt_time(pos), fmt_time(total));

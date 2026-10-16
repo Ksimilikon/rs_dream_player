@@ -1,8 +1,8 @@
-//! Ядро плеера как динамическая/статическая библиотека: реэкспортирует всю
-//! C-ABI поверхность крейта `api` (символы `init`, `idx_*`, `engine_*`,
-//! `idx_free_*`, ...), чтобы они попали в cdylib/staticlib этого крейта.
+//! The player core as a dynamic / static library: re-exports the whole C ABI
+//! surface of the `api` crate (symbols `init`, `idx_*`, `engine_*`,
+//! `idx_free_*`, ...), so they end up in this crate's cdylib/staticlib.
 //!
-//! Сборка по умолчанию (`cargo build`) даёт только эту библиотеку — без TUI.
-//! С фичей `cli` дополнительно собирается демо-бинарь (`src/main.rs`).
+//! The default build (`cargo build`) produces only this library — no TUI.
+//! The `cli` feature additionally builds the demo binary (`src/main.rs`).
 
 pub use api::*;

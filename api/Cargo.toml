@@ -3,8 +3,8 @@ name = "api"
 version = "0.1.0"
 edition = "2024"
 
-# ядро как динамическая библиотека (C-ABI, символы `idx_*`/`engine_*`),
-# плюс rlib — чтобы крейт можно было линковать из тестов/других крейтов.
+# the core as a dynamic library (C ABI, `idx_*`/`engine_*` symbols), plus an
+# rlib — so the crate can be linked from tests / other crates.
 [lib]
 crate-type = ["cdylib", "rlib"]
 

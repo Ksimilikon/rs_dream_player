@@ -1,5 +1,5 @@
-//! простая форма «метка — значение» для вкладок экспорта/импорта: текстовые
-//! поля, переключатели и выбор из вариантов; селектор строк и правка поля.
+//! a simple "label — value" form for the export / import tabs: text fields,
+//! toggles and choices; a row selector and field editing.
 
 use ratatui::{
     Frame,
@@ -14,18 +14,18 @@ use super::TextField;
 
 const LABEL_W: usize = 12;
 
-/// значение строки формы.
+/// value of a form row.
 pub enum FieldValue {
     Text(TextField),
     Toggle(bool),
-    /// варианты и индекс выбранного.
+    /// options and the index of the selected one.
     Choice(&'static [&'static str], usize),
 }
 
 pub struct FormField {
     pub label: &'static str,
     pub value: FieldValue,
-    /// строка видна, но не меняется (например, обложки без плейлистов).
+    /// the row is visible but can't be changed (e.g. covers without playlists).
     pub disabled: bool,
 }
 
@@ -57,7 +57,7 @@ impl FormField {
 pub struct Form {
     pub fields: Vec<FormField>,
     pub sel: usize,
-    /// идёт правка текстового поля под селектором.
+    /// the text field under the selector is being edited.
     pub editing: bool,
 }
 
@@ -96,8 +96,8 @@ impl Form {
         self.sel = (self.sel + 1).min(self.fields.len().saturating_sub(1));
     }
 
-    /// Enter на строке: текст — начать правку, переключатель —
-    /// переключить, выбор — следующий вариант. `true`, если значение сменилось.
+    /// Enter on a row: text — start editing, toggle — flip it, choice — next
+    /// option. `true` if the value changed.
     pub fn activate(&mut self) -> bool {
         let f = &mut self.fields[self.sel];
         if f.disabled {
@@ -119,7 +119,7 @@ impl Form {
         }
     }
 
-    /// ввод во время правки текстового поля.
+    /// input while editing a text field.
     pub fn edit_key(&mut self, key: KeyEvent) {
         let FieldValue::Text(field) = &mut self.fields[self.sel].value else {
             self.editing = false;
@@ -182,7 +182,7 @@ impl Form {
         if self.editing
             && let FieldValue::Text(t) = &self.fields[self.sel].value
         {
-            // каретка: отступ маркера (2) + ширина метки + позиция в значении.
+            // caret: marker indent (2) + label width + position in the value.
             let col = inner.x + 2 + LABEL_W as u16 + t.caret() as u16;
             frame.set_cursor_position((col, inner.y + self.sel as u16));
         }

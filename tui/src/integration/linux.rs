@@ -1,6 +1,6 @@
-//! Linux-бэкенд: MPRIS через zbus (перенесён из крейта `dbus`). Команды DE
-//! (Next/Prev/Play/…) уходят в `cmd_tx`, метаданные из `meta_rx` публикуются как
-//! свойства с эмитом `PropertiesChanged`.
+//! Linux backend: MPRIS via zbus (moved from the `dbus` crate). DE commands
+//! (Next/Prev/Play/…) go to `cmd_tx`, metadata from `meta_rx` is published as
+//! properties with a `PropertiesChanged` emit.
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -18,14 +18,14 @@ use super::{MediaCommand, MediaMeta};
 const DBUS_NAME: &str = "org.mpris.MediaPlayer2.dream_player";
 const DBUS_PATH: &str = "/org/mpris/MediaPlayer2";
 
-/// как часто опрашиваем обновления метаданных (фоновые dbus-вызовы движок tokio
-/// обрабатывает между опросами, пока ждём таймер).
+/// how often metadata updates are polled (tokio handles background dbus calls
+/// between polls while the timer is pending).
 const POLL: Duration = Duration::from_millis(150);
 
-/// запускает MPRIS-сервер на ОДНОМ потоке: поднимает однопоточный tokio-рантайм,
-/// на нём живут и zbus (feature `tokio`, без async-io), и наш цикл метаданных —
-/// никаких дополнительных вспомогательных потоков. Ошибки (нет шины, имя занято)
-/// завершают поток тихо.
+/// starts the MPRIS server on ONE thread: brings up a single-threaded tokio
+/// runtime that hosts both zbus (feature `tokio`, no async-io) and our
+/// metadata loop — no extra helper threads. Errors (no bus, name taken) end
+/// the thread silently.
 pub fn spawn(cmd_tx: Sender<MediaCommand>, meta_rx: Receiver<MediaMeta>) {
     std::thread::spawn(move || {
         let _ = run(cmd_tx, meta_rx);
@@ -33,7 +33,8 @@ pub fn spawn(cmd_tx: Sender<MediaCommand>, meta_rx: Receiver<MediaMeta>) {
 }
 
 fn run(cmd_tx: Sender<MediaCommand>, meta_rx: Receiver<MediaMeta>) -> Result<(), Box<dyn Error>> {
-    // общий источник правды: пишет этот цикл, читают геттеры интерфейса.
+    // the shared source of truth: written by this loop, read by the interface
+    // getters.
     let data = Arc::new(Mutex::new(MediaMeta::default()));
 
     let player = Player {
@@ -41,7 +42,8 @@ fn run(cmd_tx: Sender<MediaCommand>, meta_rx: Receiver<MediaMeta>) -> Result<(),
         data: data.clone(),
     };
 
-    // current_thread: рантайм не поднимает рабочих потоков — всё на этом потоке.
+    // current_thread: the runtime spawns no worker threads — everything runs on
+    // this thread.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -57,11 +59,11 @@ fn run(cmd_tx: Sender<MediaCommand>, meta_rx: Receiver<MediaMeta>) -> Result<(),
 
         let mut ticker = tokio::time::interval(POLL);
         loop {
-            // уступаем рантайму: пока ждём тик, tokio обрабатывает входящие
-            // dbus-вызовы (медиа-клавиши) на этом же потоке.
+            // yield to the runtime: while we wait for the tick, tokio handles
+            // incoming dbus calls (media keys) on this same thread.
             ticker.tick().await;
 
-            // неблокирующе выгребаем накопившиеся обновления метаданных.
+            // drain pending metadata updates without blocking.
             let mut changed = false;
             loop {
                 match meta_rx.try_recv() {
@@ -70,7 +72,7 @@ fn run(cmd_tx: Sender<MediaCommand>, meta_rx: Receiver<MediaMeta>) -> Result<(),
                         changed = true;
                     }
                     Err(TryRecvError::Empty) => break,
-                    // приложение завершилось и закрыло канал — выходим.
+                    // the application exited and closed the channel — leave.
                     Err(TryRecvError::Disconnected) => return Ok::<(), Box<dyn Error>>(()),
                 }
             }
@@ -176,15 +178,16 @@ impl Player {
     fn metadata(&self) -> HashMap<String, Value<'_>> {
         let data = self.data.lock().unwrap();
         let mut m = HashMap::new();
-        // trackid обязателен и должен быть в формате D-Bus ObjectPath.
+        // trackid is required and must be a D-Bus ObjectPath.
         m.insert(
             "mpris:trackid".to_string(),
             Value::ObjectPath(ObjectPath::try_from("/org/mpris/MediaPlayer2/Track/0").unwrap()),
         );
         m.insert("xesam:title".to_string(), Value::from(data.title.clone()));
         m.insert("xesam:artist".to_string(), Value::from(data.artists.clone()));
-        // обложку отдаём как file://-URL; если её нет — ключ не добавляем (map
-        // пересобирается на каждый metadata_changed, обложка прошлого затирается).
+        // the cover is given as a file:// URL; without one the key isn't added
+        // (the map is rebuilt on every metadata_changed, so the previous cover
+        // is dropped).
         if let Some(path) = &data.art_path {
             m.insert(
                 "mpris:artUrl".to_string(),

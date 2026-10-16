@@ -1,9 +1,9 @@
-//! вкладка SONG: появляется с началом проигрывания плейлиста. Слева — список
-//! треков играющего плейлиста (играющий выделен зелёным), справа — все
-//! метаданные трека под селектором и обложка под ними. Команды: правка
-//! метаданных (E), правка плейлиста (P), перестановка (Shift+J/K или ввод
-//! номера позиции цифрами + Enter — всё временно, без записи в бд),
-//! удаление (x — временно, D — ещё и из плейлиста в бд).
+//! SONG tab: appears when a playlist starts playing. On the left — the tracks
+//! of the playing playlist (the playing one in green), on the right — all
+//! metadata of the selected track with the cover below. Commands: edit
+//! metadata (E), edit the playlist (P), reorder (Shift+J/K or typing a position
+//! number + Enter — all temporary, not written to the db), remove (x —
+//! temporary, D — also from the playlist in the db).
 
 use ratatui::{
     Frame,
@@ -22,7 +22,7 @@ use crate::ui::{
 pub struct SongTab {
     list: ListView,
     images: ImageManager,
-    /// набираемый номер позиции для перемещения трека (цифры, Enter — применить).
+    /// the position number being typed to move a track (digits, Enter — apply).
     move_buf: String,
 }
 
@@ -74,7 +74,7 @@ impl Tab for SongTab {
 
         let (left, right) = two_pane(area, 45);
 
-        // левый список: треки играющего плейлиста, играющий — зелёным.
+        // left list: tracks of the playing playlist, the playing one in green.
         let lines: Vec<ListLine> = playing
             .tracks
             .iter()
@@ -84,7 +84,7 @@ impl Tab for SongTab {
                     .playing(i == playing.current)
             })
             .collect();
-        // заголовок левого списка показывает набираемый номер перемещения.
+        // the left list title shows the move number being typed.
         let left_title = if self.move_buf.is_empty() {
             playing.name.clone()
         } else {
@@ -92,7 +92,7 @@ impl Tab for SongTab {
         };
         self.list.render(frame, left, &left_title, lines, true);
 
-        // правая панель: метаданные сверху, обложка снизу.
+        // right pane: metadata on top, cover below.
         let [meta_area, cover_area] =
             Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(right);
 
@@ -103,13 +103,14 @@ impl Tab for SongTab {
                     .block(Block::default().borders(Borders::ALL).title(" METADATA ")),
                 meta_area,
             );
-            // обложка: отдельный файл из индекса либо встроенная в аудиофайл.
+            // cover: a separate file from the index or the one embedded in the
+            // audio file.
             let cover_block = Block::default().borders(Borders::ALL).title(" COVER ");
             let inner = cover_block.inner(cover_area);
             frame.render_widget(cover_block, cover_area);
-            // ВАЖНО: рендер картинки (ratatui-image) в почти нулевую площадь
-            // паникует (особенно на Windows при ресайзе) — рисуем только если
-            // области хватает.
+            // IMPORTANT: rendering a picture (ratatui-image) into an almost zero
+            // area panics (especially on Windows during a resize) — draw only if
+            // the area is large enough.
             if inner.width >= 2 && inner.height >= 2 {
                 self.images
                     .set_source(track.cover_art.as_deref(), track.path.as_deref());
@@ -125,8 +126,8 @@ impl Tab for SongTab {
     fn on_key(&mut self, key: KeyEvent, model: &Model) -> TabEvent {
         let len = model.playing.as_ref().map(|p| p.tracks.len()).unwrap_or(0);
         let sel = self.list.selected();
-        // набор номера позиции: цифры копим, Enter применяет (перемещение
-        // временное, в бд не пишется).
+        // typing a position number: accumulate digits, Enter applies (the move
+        // is temporary, not written to the db).
         if let KeyCode::Char(c) = key.code
             && c.is_ascii_digit()
         {
@@ -163,7 +164,7 @@ impl Tab for SongTab {
             KeyCode::Enter => TabEvent::SelectPlaying(sel),
             KeyCode::Char('E') => TabEvent::EditMeta(sel),
             KeyCode::Char('P') => TabEvent::EditPlayingPlaylist,
-            // перестановка (временно): Shift+J вниз, Shift+K вверх.
+            // reorder (temporary): Shift+J down, Shift+K up.
             KeyCode::Char('J') if sel + 1 < len => {
                 self.list.select(sel + 1);
                 TabEvent::MovePlaying { from: sel, to: sel + 1 }

@@ -1,5 +1,5 @@
-//! журнал сообщений вкладки (экспорт/импорт): строки с уровнем, новые снизу,
-//! при переполнении видны последние.
+//! a tab's message log (export / import): lines with a level, newest at the
+//! bottom, the latest ones visible on overflow.
 
 use ratatui::{
     Frame,

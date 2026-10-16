@@ -1,6 +1,6 @@
-//! переиспользуемые заготовки интерфейса: унифицированный список, поле ввода с
-//! кареткой, поиск по списку треков, строка подсказок, прогресс-бар, форма
-//! «метка — значение», журнал сообщений и общие схемы расположения вкладок.
+//! reusable interface building blocks: a unified list, an input field with a
+//! caret, track list search, a hints line, a progress bar, a "label — value"
+//! form, a message log and common tab layouts.
 
 mod form;
 mod hints;
@@ -20,9 +20,9 @@ pub use text::TextField;
 
 use ratatui::layout::{Constraint, Layout, Rect};
 
-/// набранный номер позиции (1-based) -> целевой индекс (0-based), зажатый в
-/// `[0, len-1]`. Пусто/нечисло/`len==0` -> `None`. Значение вне списка берёт
-/// крайнее (1 -> начало, >=len -> конец).
+/// typed position number (1-based) -> target index (0-based), clamped to
+/// `[0, len-1]`. Empty / not a number / `len==0` -> `None`. A value outside
+/// the list takes the nearest end (1 -> start, >=len -> end).
 pub fn target_index(buf: &str, len: usize) -> Option<usize> {
     if len == 0 {
         return None;
@@ -31,8 +31,8 @@ pub fn target_index(buf: &str, len: usize) -> Option<usize> {
     Some(n.clamp(1, len) - 1)
 }
 
-/// общая схема «две панели»: левый список и правая область (детали/пул).
-/// `left_pct` — ширина левой панели в процентах.
+/// the common "two panes" layout: a list on the left and an area on the right
+/// (details / pool). `left_pct` — the left pane width in percent.
 pub fn two_pane(area: Rect, left_pct: u16) -> (Rect, Rect) {
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(left_pct), Constraint::Percentage(100 - left_pct)])

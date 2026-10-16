@@ -1,6 +1,6 @@
-//! демонстрационный фронтенд ядра: готовит каталоги, выставляет стартовую
-//! громкость и передаёт управление TUI, который работает с ядром только через
-//! его FFI (крейт `api`).
+//! demo frontend of the core: prepares directories, sets the startup volume
+//! and hands control to the TUI, which works with the core only through its
+//! FFI (the `api` crate).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ mod config;
 #[derive(clap::Parser, Debug)]
 #[command(version, about = "TUI demo frontend for the music player core")]
 struct Args {
-    /// каталог с музыкой для индексации (по умолчанию — системный `~/Music`).
+    /// music directory to index (default — the system `~/Music`).
     #[arg(short, long, value_name = "Dir")]
     path: Option<PathBuf>,
 }
@@ -20,21 +20,22 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    // каталог приложения (конфиг/бд/кэш — в одном месте для демо).
+    // app directory (config / db / cache — in one place for the demo).
     let app_dir = config::config_dir().unwrap_or_else(|| PathBuf::from("."));
     let _ = std::fs::create_dir_all(&app_dir);
 
-    // каталог музыки: явный --path берём как есть; иначе — системный по
-    // умолчанию, при его отсутствии предлагаем создать.
+    // music directory: an explicit --path is taken as is; otherwise the system
+    // default, offering to create it if it is missing.
     let music = match args.path {
         Some(path) => path,
         None => resolve_default_music_dir(),
     };
 
-    // показываем основные пути до запуска интерфейса.
+    // show the main paths before starting the interface.
     print_dirs(&app_dir, &music);
 
-    // мастер-громкость теперь хранит и применяет само ядро (его config.toml).
+    // the master volume is now stored and applied by the core itself (its
+    // config.toml).
     let dirs = tui::Dirs {
         cache: &app_dir,
         config: &app_dir,
@@ -46,7 +47,7 @@ fn main() {
     }
 }
 
-/// выводит основные пути приложения.
+/// prints the main app paths.
 fn print_dirs(app_dir: &Path, music: &Path) {
     println!("config/data/cache dir: {}", app_dir.display());
     println!(
@@ -56,9 +57,9 @@ fn print_dirs(app_dir: &Path, music: &Path) {
     println!("music dir:             {}", music.display());
 }
 
-/// системный каталог музыки по умолчанию. Если его нет на диске — объясняет
-/// варианты и предлагает создать. Путь возвращается в любом случае: при отказе
-/// он просто не существует, и индексация его пропустит.
+/// the default system music directory. If it doesn't exist on disk, explains
+/// the options and offers to create it. The path is returned in any case: if
+/// declined, it simply doesn't exist and indexing skips it.
 fn resolve_default_music_dir() -> PathBuf {
     let Some(dir) = config::music_dir() else {
         return PathBuf::from(".");
@@ -86,8 +87,8 @@ fn resolve_default_music_dir() -> PathBuf {
     dir
 }
 
-/// задаёт вопрос и читает ответ из stdin. По умолчанию (пустой ввод / ошибка) —
-/// «нет»; «да» только при `y`/`Y`.
+/// asks a question and reads the answer from stdin. The default (empty input
+/// / error) is "no"; "yes" only on `y`/`Y`.
 fn prompt_yes_no(question: &str) -> bool {
     print!("{question} ");
     let _ = std::io::stdout().flush();

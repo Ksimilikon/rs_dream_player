@@ -27,17 +27,17 @@ use rusqlite::{Connection, params, params_from_iter, types::Value};
 use crate::schema::{backup_path, deploy, verify_structure};
 use crate::traits::indexator::Indexator;
 
-/// sqlite-бд для хранения музыки и плейлистов. Владеет одним соединением;
-/// все методы берут `&self`.
+/// sqlite db storing music and playlists. Owns a single connection; every
+/// method takes `&self`.
 pub struct Db {
     conn: Connection,
     path: PathBuf,
 }
 impl Db {
-    /// открывает бд по `path`. Если файла нет — создаёт его вместе со всей
-    /// структурой. Если структура существующего файла неверна, текущий файл
-    /// отодвигается в сторону (к его имени добавляется суффикс `_bak`), а на
-    /// его месте разворачивается свежая бд.
+    /// opens the db at `path`. If the file is missing, creates it together
+    /// with the whole structure. If the structure of an existing file is
+    /// invalid, the current file is moved aside (the `_bak` suffix is appended
+    /// to its name) and a fresh db is deployed in its place.
     pub fn init(path: PathBuf) -> Result<Self, Box<dyn Error>> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
@@ -45,7 +45,7 @@ impl Db {
             std::fs::create_dir_all(parent)?;
         }
 
-        // нет файла — разворачиваем структуру с нуля.
+        // no file — deploy the structure from scratch.
         if !path.exists() {
             let conn = Connection::open(&path)?;
             deploy(&conn)?;
@@ -57,8 +57,8 @@ impl Db {
 
         match verify_structure(&conn) {
             Ok(()) => Ok(Self { conn, path }),
-            // неверная структура: переименовываем текущую бд в `*_bak`
-            // и поднимаем свежую на её месте.
+            // invalid structure: rename the current db to `*_bak`
+            // and bring up a fresh one in its place.
             Err(_) => {
                 drop(conn);
                 let bak = backup_path(&path);
@@ -71,13 +71,13 @@ impl Db {
         }
     }
 
-    /// путь к файлу бд.
+    /// path to the db file.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// собирает [`TrackVirtual`] из строки таблицы `tracks`, дотягивая список
-    /// артистов.
+    /// builds a [`TrackVirtual`] from a `tracks` table row, pulling in the
+    /// artist list.
     fn build_track(&self, row: TrackRow) -> Result<TrackVirtual, Box<dyn Error>> {
         let mut stmt = self.conn.prepare(
             "SELECT a.name FROM artists a \
@@ -123,7 +123,7 @@ impl Db {
         Ok(track)
     }
 
-    /// загружает упорядоченные треки плейлиста по его id.
+    /// loads the ordered tracks of a playlist by its id.
     fn load_playlist_tracks(&self, playlist_id: i64) -> Result<Vec<TrackVirtual>, Box<dyn Error>> {
         let sql = format!(
             "SELECT {TRACK_COLUMNS} \
@@ -141,7 +141,7 @@ impl Db {
         Ok(tracks)
     }
 
-    /// собирает полный [`Playlist`] (с треками и обложкой) из строки `playlists`.
+    /// builds a full [`Playlist`] (with tracks and cover) from a `playlists` row.
     fn build_playlist(
         &self,
         id: i64,
@@ -163,8 +163,8 @@ impl Db {
         Ok(playlist)
     }
 
-    /// выборка плейлистов по параметрам: `name` — подстрока без учёта регистра,
-    /// `id` — точное совпадение. Без фильтров возвращает все плейлисты.
+    /// selects playlists by parameters: `name` — case-insensitive substring,
+    /// `id` — exact match. Without filters returns every playlist.
     pub fn get_playlists(
         &self,
         name: Option<String>,
@@ -208,9 +208,9 @@ impl Db {
         Ok(out)
     }
 
-    /// выборка песен из общего пула по параметрам. `name` и `artist` ищутся как
-    /// подстроки без учёта регистра, `id` и `hash` — точное совпадение. Без
-    /// фильтров возвращает всю библиотеку.
+    /// selects songs from the shared pool by parameters. `name` and `artist`
+    /// are case-insensitive substrings, `id` and `hash` — exact match. Without
+    /// filters returns the whole library.
     pub fn get_tracks(
         &self,
         name: Option<String>,
@@ -257,11 +257,11 @@ impl Db {
         rows.into_iter().map(|row| self.build_track(row)).collect()
     }
 
-    /// индексирует музыкальный каталог `dir` рекурсивно: добавляет в бд все
-    /// найденные песни (нечитаемые/немузыкальные файлы пропускаются) и
-    /// возвращает весь пул библиотеки как плейлист.
+    /// recursively indexes the music directory `dir`: adds every song found
+    /// to the db (unreadable / non-music files are skipped) and returns the
+    /// whole library pool as a playlist.
     pub fn index_dir(&self, dir: &Path) -> Result<Playlist, Box<dyn Error>> {
-        // отсутствующий каталог не ошибка — просто нечего индексировать.
+        // a missing directory is not an error — just nothing to index.
         if dir.is_dir() {
             self.index_dir_rec(dir)?;
         }
@@ -280,8 +280,9 @@ impl Db {
         Ok(())
     }
 
-    /// обновляет сохранённую громкость одного трека (идентификация по `path`,
-    /// который уникален). Трек без пути (не из библиотеки) тихо пропускается.
+    /// updates the saved volume of one track (identified by `path`, which is
+    /// unique). A track without a path (not from the library) is silently
+    /// skipped.
     pub fn set_track_volume(
         &self,
         track: &TrackVirtual,
@@ -297,7 +298,7 @@ impl Db {
         Ok(())
     }
 
-    /// обновляет сохранённую громкость трека по его id.
+    /// updates the saved track volume by its id.
     pub fn set_track_volume_id(&self, id: i64, volume: f32) -> Result<(), Box<dyn Error>> {
         self.conn.execute(
             "UPDATE tracks SET volume = ?2 WHERE id = ?1",
@@ -306,23 +307,23 @@ impl Db {
         Ok(())
     }
 
-    /// удаляет плейлист по имени. Привязки треков (`playlist_tracks`) уходят
-    /// каскадом через FK; сами треки остаются в библиотеке.
+    /// removes a playlist by name. Track bindings (`playlist_tracks`) go away
+    /// by FK cascade; the tracks themselves stay in the library.
     pub fn remove_playlist(&self, name: &str) -> Result<(), Box<dyn Error>> {
         self.conn
             .execute("DELETE FROM playlists WHERE name = ?1", [name])?;
         Ok(())
     }
 
-    /// плейлист из всего пула песен библиотеки (все треки таблицы `tracks`).
+    /// playlist of the whole library song pool (every row of `tracks`).
     pub fn get_pool(&self) -> Result<Playlist, Box<dyn Error>> {
         let tracks = self.get_tracks(None, None, None, None)?;
         Ok(Playlist::from_tracks(tracks))
     }
 
-    /// обновляет метаданные трека по его id: `title` и/или список артистов.
-    /// `None`-поля не трогаются. Артисты переписываются целиком (как в
-    /// [`upsert_track`]). Хеш и путь трека не меняются.
+    /// updates track metadata by its id: `title` and/or the artist list.
+    /// `None` fields are left as is. Artists are rewritten entirely (as in
+    /// [`upsert_track`]). The track hash and path don't change.
     pub fn set_track_meta(
         &self,
         id: i64,
@@ -354,7 +355,7 @@ impl Db {
         Ok(())
     }
 
-    /// задаёт (или очищает `None`) путь к обложке трека по его id.
+    /// sets (or clears with `None`) the track cover path by its id.
     pub fn set_track_cover(&self, id: i64, cover: Option<&Path>) -> Result<(), Box<dyn Error>> {
         let cover = cover.map(|p| p.to_string_lossy().into_owned());
         self.conn.execute(
@@ -364,8 +365,8 @@ impl Db {
         Ok(())
     }
 
-    /// меняет путь к файлу трека по его id (после переименования на диске).
-    /// Хеш остаётся прежним, поэтому ссылки плейлистов не ломаются.
+    /// changes the track file path by its id (after a rename on disk).
+    /// The hash stays the same, so playlist references don't break.
     pub fn set_track_path(&self, id: i64, new_path: &Path) -> Result<(), Box<dyn Error>> {
         self.conn.execute(
             "UPDATE tracks SET path = ?2 WHERE id = ?1",
@@ -374,12 +375,13 @@ impl Db {
         Ok(())
     }
 
-    /// удаляет трек из индекса по его id. Каскадом чистятся `track_artists` и
-    /// `track_genres` (через FK), а привязки во всех плейлистах (`playlist_tracks`
-    /// по `song_hash`) удаляются вручную — так удаление всегда каскадит в плейлисты.
+    /// removes a track from the index by its id. `track_artists` and
+    /// `track_genres` are cleaned by FK cascade, and bindings in every playlist
+    /// (`playlist_tracks` by `song_hash`) are removed manually — so a removal
+    /// always cascades into playlists.
     pub fn remove_track(&self, id: i64) -> Result<(), Box<dyn Error>> {
         let tx = self.conn.unchecked_transaction()?;
-        // сперва убираем привязки в плейлистах по хешу трека.
+        // first drop the playlist bindings by the track hash.
         tx.execute(
             "DELETE FROM playlist_tracks \
              WHERE song_hash IN (SELECT hash FROM tracks WHERE id = ?1)",
@@ -390,7 +392,7 @@ impl Db {
         Ok(())
     }
 
-    /// задаёт (или очищает `None`) альбом трека по его id.
+    /// sets (or clears with `None`) the track album by its id.
     pub fn set_track_album(&self, id: i64, album: Option<&str>) -> Result<(), Box<dyn Error>> {
         let album_id = upsert_album(&self.conn, album)?;
         self.conn.execute(
@@ -400,7 +402,7 @@ impl Db {
         Ok(())
     }
 
-    /// переписывает жанры трека (M:N).
+    /// rewrites the track genres (M:N).
     pub fn set_track_genres(&self, id: i64, genres: &[String]) -> Result<(), Box<dyn Error>> {
         let tx = self.conn.unchecked_transaction()?;
         write_track_genres(&tx, id, genres)?;
@@ -408,7 +410,7 @@ impl Db {
         Ok(())
     }
 
-    /// задаёт (или очищает `None`) цветовую метку трека.
+    /// sets (or clears with `None`) the track color label.
     pub fn set_track_color(&self, id: i64, color: Option<&str>) -> Result<(), Box<dyn Error>> {
         self.conn.execute(
             "UPDATE tracks SET color = ?2 WHERE id = ?1",
@@ -417,7 +419,7 @@ impl Db {
         Ok(())
     }
 
-    /// задаёт (или очищает `None`) текстовую метку трека.
+    /// sets (or clears with `None`) the track text label.
     pub fn set_track_label(&self, id: i64, label: Option<&str>) -> Result<(), Box<dyn Error>> {
         self.conn.execute(
             "UPDATE tracks SET user_label = ?2 WHERE id = ?1",
@@ -426,7 +428,7 @@ impl Db {
         Ok(())
     }
 
-    /// помечает трек как недействительный (файл не читается) или снимает метку.
+    /// marks a track as invalid (the file can't be read) or clears the mark.
     pub fn set_track_invalid(&self, id: i64, invalid: bool) -> Result<(), Box<dyn Error>> {
         self.conn.execute(
             "UPDATE tracks SET invalid = ?2 WHERE id = ?1",
@@ -435,13 +437,13 @@ impl Db {
         Ok(())
     }
 
-    /// присваивает треку `id` новый путь. Если такой путь уже занят другой
-    /// записью (например, приложение уже проиндексировало переименованный файл),
-    /// та запись удаляется (каскадом из плейлистов), а путь достаётся исходному
-    /// треку. Заодно снимается метка `invalid`.
+    /// assigns a new path to track `id`. If the path is already taken by
+    /// another row (e.g. the app has already indexed the renamed file), that
+    /// row is removed (cascading from playlists) and the path goes to the
+    /// original track. The `invalid` mark is cleared as well.
     pub fn reassign_track_path(&self, id: i64, new_path: &Path) -> Result<(), Box<dyn Error>> {
         let path_s = new_path.to_string_lossy().into_owned();
-        // если новым путём уже владеет другая запись — удаляем её.
+        // if another row already owns the new path — remove it.
         let dup: Option<i64> = self
             .conn
             .query_row("SELECT id FROM tracks WHERE path = ?1", [&path_s], |r| {
@@ -460,8 +462,8 @@ impl Db {
         Ok(())
     }
 
-    /// удаляет из индекса все треки, помеченные как недействительные
-    /// (каскадом из плейлистов). Возвращает количество удалённых.
+    /// removes from the index every track marked as invalid (cascading from
+    /// playlists). Returns the number removed.
     pub fn remove_invalid_tracks(&self) -> Result<usize, Box<dyn Error>> {
         let ids: Vec<i64> = {
             let mut stmt = self
@@ -476,7 +478,7 @@ impl Db {
         Ok(ids.len())
     }
 
-    /// пары (id, path) всех треков библиотеки — для проверки наличия файлов.
+    /// (id, path) pairs of every library track — to check that files exist.
     pub fn get_track_paths(&self) -> Result<Vec<(i64, PathBuf)>, Box<dyn Error>> {
         let mut stmt = self.conn.prepare("SELECT id, path FROM tracks")?;
         let rows = stmt
@@ -487,8 +489,9 @@ impl Db {
         Ok(rows)
     }
 
-    /// тройки (id, hash, path) треков. `ids` == `None` -> вся библиотека
-    /// (по возрастанию id); иначе — в порядке `ids`, ненайденные id пропускаются.
+    /// (id, hash, path) triples of tracks. `ids` == `None` -> the whole
+    /// library (by ascending id); otherwise — in `ids` order, ids not found are
+    /// skipped.
     pub fn get_track_hashes(
         &self,
         ids: Option<&[i64]>,
@@ -520,8 +523,8 @@ impl Db {
         Ok(out)
     }
 
-    /// тройки (id, hash, path) треков по их хешам, в порядке `hashes`;
-    /// ненайденные хеши пропускаются.
+    /// (id, hash, path) triples of tracks by their hashes, in `hashes` order;
+    /// hashes not found are skipped.
     pub fn get_track_hashes_by_hash(
         &self,
         hashes: &[String],
@@ -547,10 +550,10 @@ impl Db {
         Ok(out)
     }
 
-    /// плейлисты с хешами их песен в порядке плейлиста. `names` == `None` ->
-    /// все (по возрастанию id); иначе — в порядке `names`, ненайденные имена
-    /// пропускаются. Имя — идентификатор плейлиста (уникально и одинаково на
-    /// всех устройствах, в отличие от локального id).
+    /// playlists with their song hashes in playlist order. `names` == `None`
+    /// -> all of them (by ascending id); otherwise — in `names` order, names
+    /// not found are skipped. The name is the playlist identifier (unique and
+    /// the same on every device, unlike the local id).
     pub fn get_playlist_hashes(
         &self,
         names: Option<&[String]>,
@@ -595,12 +598,12 @@ impl Db {
         Ok(metas)
     }
 
-    /// сохраняет импорт пакета одной транзакцией (всё или ничего):
-    /// - `tracks` — новые треки (файл уже лежит по `get_path()`) с хешами из
-    ///   пакета;
-    /// - `playlists` — плейлисты по имени (`id` игнорируется): создаются или
-    ///   переписываются целиком списком `hashes`. `None` в обложке/датах не
-    ///   затирает уже сохранённое значение.
+    /// saves a packet import in one transaction (all or nothing):
+    /// - `tracks` — new tracks (the file already lies at `get_path()`) with
+    ///   hashes from the packet;
+    /// - `playlists` — playlists by name (`id` is ignored): created or
+    ///   rewritten entirely with the `hashes` list. `None` cover / dates don't
+    ///   overwrite an already saved value.
     pub fn save_import(
         &self,
         tracks: &[(TrackVirtual, String)],
@@ -645,7 +648,7 @@ impl Db {
         Ok(())
     }
 
-    /// пары (id, path) треков конкретного плейлиста по его имени.
+    /// (id, path) pairs of the tracks of a specific playlist by its name.
     pub fn get_playlist_track_paths(&self, name: &str) -> Result<Vec<(i64, PathBuf)>, Box<dyn Error>> {
         let mut stmt = self.conn.prepare(
             "SELECT t.id, t.path FROM playlist_tracks pt \
@@ -668,7 +671,7 @@ impl Indexator for Db {
         Ok(())
     }
 
-    /// `key` — хеш песни.
+    /// `key` is the song hash.
     fn get_track(&self, key: String) -> Result<TrackVirtual, Box<dyn Error>> {
         let sql = format!("SELECT {TRACK_COLUMNS} FROM tracks t WHERE t.hash = ?1");
         let row = self.conn.query_row(&sql, [&key], TrackRow::from_row)?;
@@ -706,7 +709,7 @@ impl Indexator for Db {
                 r.get(0)
             })?;
 
-        // переписываем упорядоченную привязку треков к плейлисту.
+        // rewrite the ordered track bindings of the playlist.
         tx.execute(
             "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
             [playlist_id],
@@ -724,7 +727,7 @@ impl Indexator for Db {
         Ok(())
     }
 
-    /// `name` — имя плейлиста; загружает его вместе с упорядоченными треками.
+    /// `name` is the playlist name; loads it together with its ordered tracks.
     fn get_playlist(&self, name: String) -> Result<Playlist, Box<dyn Error>> {
         let (id, cover, created, updated): (i64, Option<String>, Option<i64>, Option<i64>) =
             self.conn.query_row(
@@ -741,11 +744,11 @@ impl Indexator for Db {
         )
     }
 
-    /// случайный хеш, генерируемый один раз при добавлении песни. Он не зависит
-    /// от содержимого файла, поэтому редактирование метаданных трека не меняет
-    /// хеш и не ломает ссылки плейлистов.
-    /// TODO: для переноса между устройствами позже можно добавить контентный
-    /// отпечаток (например, по аудио-сэмплам) отдельным полем.
+    /// a random hash generated once when a song is added. It doesn't depend on
+    /// the file content, so editing track metadata doesn't change the hash
+    /// and doesn't break playlist references.
+    /// TODO: for moving between devices a content fingerprint (e.g. over audio
+    /// samples) can be added later as a separate field.
     fn hash(_track: &TrackVirtual) -> String {
         random_hash()
     }
@@ -757,24 +760,24 @@ impl Indexator for Db {
     }
 }
 
-/// (id, hash, path) трека — см. [`Db::get_track_hashes`].
+/// (id, hash, path) of a track — see [`Db::get_track_hashes`].
 pub type TrackHashRow = (i64, String, PathBuf);
 
-/// плейлист с хешами песен — см. [`Db::get_playlist_hashes`].
+/// playlist with song hashes — see [`Db::get_playlist_hashes`].
 pub struct PlaylistHashRow {
-    /// локальный id в бд этого устройства (в пакет не попадает; при
-    /// `save_import` игнорируется — плейлист ищется по имени).
+    /// local id in this device's db (never goes into a packet; ignored by
+    /// `save_import` — the playlist is looked up by name).
     pub id: i64,
     pub name: String,
     pub cover_art: Option<PathBuf>,
     pub created_at: Option<u64>,
     pub updated_at: Option<u64>,
-    /// хеши песен в порядке плейлиста.
+    /// song hashes in playlist order.
     pub hashes: Vec<String>,
 }
 
-/// сырые столбцы `tracks`, общие для всех запросов, возвращающих треки.
-/// Порядок совпадает с [`TRACK_COLUMNS`].
+/// raw `tracks` columns shared by every query that returns tracks.
+/// The order matches [`TRACK_COLUMNS`].
 struct TrackRow {
     id: i64,
     title: String,
@@ -788,8 +791,8 @@ struct TrackRow {
     invalid: bool,
 }
 
-/// список столбцов трека (с алиасом `t`) для SELECT'ов, возвращающих [`TrackRow`].
-/// Альбом дотягивается коррелированным подзапросом по `album_id`.
+/// track column list (with the `t` alias) for SELECTs returning [`TrackRow`].
+/// The album is pulled in by a correlated subquery on `album_id`.
 const TRACK_COLUMNS: &str = "t.id, t.title, t.duration, t.cover_art, t.path, t.volume, \
      (SELECT name FROM albums WHERE id = t.album_id), t.color, t.user_label, t.invalid";
 
@@ -810,13 +813,13 @@ impl TrackRow {
     }
 }
 
-/// вставляет/обновляет одну строку трека (и его артистов) на данном соединении
-/// или транзакции, возвращая хранимый хеш. Уже известный трек (та же `path`)
-/// сохраняет свой исходный хеш, чтобы ссылки плейлистов оставались валидными
-/// даже после правки его метаданных.
+/// inserts / updates one track row (and its artists) on the given connection
+/// or transaction, returning the stored hash. An already known track (same
+/// `path`) keeps its original hash, so playlist references stay valid even
+/// after its metadata is edited.
 ///
-/// `hash` задаёт хеш нового трека (импорт пакета, хеш едет с другого
-/// устройства); `None` -> случайный.
+/// `hash` sets the hash of a new track (packet import, the hash comes from
+/// another device); `None` -> random.
 fn upsert_track(
     conn: &Connection,
     track: &TrackVirtual,
@@ -838,14 +841,14 @@ fn upsert_track(
         None => (0, None),
     };
     let source = source_label(track);
-    // альбом из тегов (1:N) → album_id.
+    // album from the tags (1:N) → album_id.
     let album_id = upsert_album(conn, meta.album.as_deref())?;
 
-    // на новый трек попадёт этот случайный хеш; при конфликте по `path`
-    // существующий хеш не трогаем. color/user_label/invalid/volume —
-    // пользовательское состояние, при повторном скане (ON CONFLICT) их НЕ
-    // перезаписываем (иначе ре-индекс при каждом старте сбрасывал бы громкость
-    // к дефолту 1.0 из свеже-прочитанного файла).
+    // a new track gets this random hash; on a `path` conflict the existing
+    // hash is left alone. color/user_label/invalid/volume are user state and
+    // are NOT overwritten on a rescan (ON CONFLICT) (otherwise a re-index on
+    // every start would reset the volume to the 1.0 default of the freshly
+    // read file).
     let new_hash = hash.map_or_else(random_hash, str::to_owned);
     conn.execute(
         "INSERT INTO tracks \
@@ -876,7 +879,7 @@ fn upsert_track(
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
 
-    // полностью переписываем список артистов трека.
+    // rewrite the track artist list entirely.
     conn.execute("DELETE FROM track_artists WHERE track_id = ?1", [id])?;
     for name in &meta.artist {
         conn.execute(
@@ -893,13 +896,13 @@ fn upsert_track(
         )?;
     }
 
-    // полностью переписываем список жанров трека (M:N через track_genres).
+    // rewrite the track genre list entirely (M:N via track_genres).
     write_track_genres(conn, id, &meta.genres)?;
 
     Ok(hash)
 }
 
-/// upsert названия альбома, возвращает его id (или `None`, если альбом пуст).
+/// upserts an album name, returns its id (or `None` if the album is empty).
 fn upsert_album(conn: &Connection, album: Option<&str>) -> Result<Option<i64>, Box<dyn Error>> {
     let Some(name) = album.filter(|a| !a.is_empty()) else {
         return Ok(None);
@@ -914,7 +917,7 @@ fn upsert_album(conn: &Connection, album: Option<&str>) -> Result<Option<i64>, B
     Ok(Some(id))
 }
 
-/// переписывает жанры трека: чистит `track_genres` для него и вставляет заново.
+/// rewrites the track genres: clears `track_genres` for it and inserts anew.
 fn write_track_genres(
     conn: &Connection,
     track_id: i64,
@@ -938,9 +941,9 @@ fn write_track_genres(
     Ok(())
 }
 
-/// метаданные для записи: сперва то, что трек уже держит, затем повторное
-/// чтение файла, и наконец заголовок из имени файла — чтобы трек без тегов всё
-/// равно можно было сохранить.
+/// metadata to write: first what the track already holds, then a re-read of
+/// the file, and finally a title from the file name — so a track without tags
+/// can still be saved.
 fn resolve_metadata(track: &TrackVirtual, path: &Path) -> Arc<TrackMetadata> {
     if let Ok(meta) = track.get_metadata() {
         return meta;
@@ -962,7 +965,7 @@ fn resolve_metadata(track: &TrackVirtual, path: &Path) -> Arc<TrackMetadata> {
     })
 }
 
-/// метка типа источника трека для столбца `source_type`.
+/// source type label of a track for the `source_type` column.
 fn source_label(track: &TrackVirtual) -> &'static str {
     if track.index_id().is_some() {
         "index"
@@ -973,7 +976,7 @@ fn source_label(track: &TrackVirtual) -> &'static str {
     }
 }
 
-/// 128-битный случайный хеш в hex.
+/// 128-bit random hash in hex.
 fn random_hash() -> String {
     format!("{:016x}{:016x}", fastrand::u64(..), fastrand::u64(..))
 }
@@ -993,8 +996,8 @@ mod tests {
     use super::*;
     use crate::schema::DB_FILE_NAME;
 
-    /// создаёт реальный файл (чтобы у трека была существующая `path`) и трек с
-    /// явными метаданными — без декодирования аудио.
+    /// creates a real file (so the track has an existing `path`) and a track
+    /// with explicit metadata — without decoding audio.
     fn fixture_track(dir: &Path, file: &str, title: &str, artist: &str) -> TrackVirtual {
         let path = dir.join(file);
         fs::write(&path, format!("dummy-{file}")).unwrap();
@@ -1045,11 +1048,11 @@ mod tests {
     fn backs_up_invalid_structure() {
         let dir = tempdir().unwrap();
         let path = dir.path().join(DB_FILE_NAME);
-        // не sqlite-файл -> неверная структура.
+        // not an sqlite file -> invalid structure.
         fs::write(&path, b"this is definitely not a sqlite file").unwrap();
 
         let db = Db::init(path.clone()).unwrap();
-        // старый файл отодвинут в *_bak, новая бд развёрнута и пуста.
+        // the old file is moved to *_bak, a new db is deployed and empty.
         assert!(path.with_file_name(format!("{DB_FILE_NAME}_bak")).exists());
         assert!(db.hash_exist("whatever".into()) == false);
     }
@@ -1062,7 +1065,7 @@ mod tests {
         let track = fixture_track(dir.path(), "a.mp3", "Hello", "World");
         db.save_track(track).unwrap();
 
-        // достаём хеш напрямую из бд и грузим трек по нему.
+        // take the hash straight from the db and load the track by it.
         let hash: String = db
             .conn
             .query_row("SELECT hash FROM tracks LIMIT 1", [], |r| r.get(0))
@@ -1087,7 +1090,7 @@ mod tests {
             .query_row("SELECT hash FROM tracks LIMIT 1", [], |r| r.get(0))
             .unwrap();
 
-        // та же path, изменённое название — хеш должен остаться прежним.
+        // same path, changed title — the hash must stay the same.
         let edited = fixture_track(dir.path(), "a.mp3", "Hello (edited)", "World");
         db.save_track(edited).unwrap();
         let count: i64 = db
@@ -1114,23 +1117,23 @@ mod tests {
         db.save_track(fixture_track(dir.path(), "3.mp3", "Hello Again", "Other"))
             .unwrap();
 
-        // весь пул.
+        // the whole pool.
         assert_eq!(db.get_tracks(None, None, None, None).unwrap().len(), 3);
-        // по названию (подстрока).
+        // by title (substring).
         assert_eq!(
             db.get_tracks(Some("hello".into()), None, None, None)
                 .unwrap()
                 .len(),
             2
         );
-        // по артисту.
+        // by artist.
         assert_eq!(
             db.get_tracks(None, Some("world".into()), None, None)
                 .unwrap()
                 .len(),
             2
         );
-        // комбинация name + artist.
+        // name + artist combined.
         assert_eq!(
             db.get_tracks(Some("hello".into()), Some("other".into()), None, None)
                 .unwrap()
@@ -1155,24 +1158,24 @@ mod tests {
         p2.set_name("jazz".into());
         db.save_playlist(p2).unwrap();
 
-        // получить все.
+        // get all.
         let all = db.get_playlists(None, None).unwrap();
         assert_eq!(all.len(), 2);
-        // упорядочены по имени: jazz, rock.
+        // ordered by name: jazz, rock.
         assert_eq!(all[0].get_name().as_deref(), Some("jazz"));
         assert_eq!(all[1].get_name().as_deref(), Some("rock"));
 
-        // выборка по параметру + обложка едет с плейлистом.
+        // selection by parameter + the cover comes with the playlist.
         let found = db.get_playlists(Some("rock".into()), None).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(
             found[0].get_cover_art(),
             Some(dir.path().join("rock.png").as_path())
         );
-        // таймштампы тоже едут с плейлистом.
+        // timestamps come with the playlist too.
         assert_eq!(found[0].get_created_at(), Some(1_000));
         assert_eq!(found[0].get_updated_at(), Some(2_000));
-        // у jazz обложки и таймштампов нет.
+        // jazz has no cover and no timestamps.
         let jazz = &db.get_playlists(Some("jazz".into()), None).unwrap()[0];
         assert!(jazz.get_cover_art().is_none());
         assert!(jazz.get_created_at().is_none());
@@ -1197,19 +1200,19 @@ mod tests {
         empty.set_name("empty".into());
         db.save_playlist(empty).unwrap();
 
-        // вся библиотека: по возрастанию id.
+        // the whole library: by ascending id.
         let all = db.get_track_hashes(None).unwrap();
         assert_eq!(all.len(), 2);
         assert!(all[0].0 < all[1].0);
         assert!(all.iter().all(|(_, h, _)| h.len() == 32));
 
-        // по id: порядок запроса, ненайденные пропускаются.
+        // by id: request order, ids not found are skipped.
         let picked = db
             .get_track_hashes(Some(&[all[1].0, 9_999, all[0].0]))
             .unwrap();
         assert_eq!(picked, vec![all[1].clone(), all[0].clone()]);
 
-        // плейлист ссылается на те же хеши в своём порядке.
+        // the playlist references the same hashes in its own order.
         let pls = db.get_playlist_hashes(None).unwrap();
         assert_eq!(pls.len(), 2);
         assert_eq!(pls[0].name, "mix");
@@ -1217,7 +1220,7 @@ mod tests {
         assert_eq!((pls[0].created_at, pls[0].updated_at), (Some(100), Some(200)));
         assert!(pls[1].hashes.is_empty() && pls[1].created_at.is_none());
 
-        // по имени: порядок запроса, ненайденные пропускаются.
+        // by name: request order, names not found are skipped.
         let picked = db
             .get_playlist_hashes(Some(&["empty".into(), "nope".into(), "mix".into()]))
             .unwrap();
@@ -1234,7 +1237,7 @@ mod tests {
         };
         assert_eq!(pls[0].hashes, vec![by_path("1.mp3"), by_path("2.mp3")]);
 
-        // по хешам: порядок запроса, ненайденные пропускаются.
+        // by hashes: request order, hashes not found are skipped.
         let by_hash = db
             .get_track_hashes_by_hash(&[by_path("2.mp3"), "nope".into(), by_path("1.mp3")])
             .unwrap();
@@ -1264,9 +1267,9 @@ mod tests {
         };
         db.save_import(&[(track, hash.clone())], &[pl]).unwrap();
 
-        // трек сохранён с хешем из пакета.
+        // the track is saved with the hash from the packet.
         assert!(db.hash_exist(hash.clone()));
-        // плейлист переписан, но None не затёр обложку и created_at.
+        // the playlist is rewritten, but None didn't wipe the cover and created_at.
         let pls = db.get_playlist_hashes(None).unwrap();
         assert_eq!(pls.len(), 1);
         assert_eq!(pls[0].hashes.len(), 2);
@@ -1297,7 +1300,7 @@ mod tests {
         assert_eq!(titles, vec!["First".to_string(), "Second".to_string()]);
     }
 
-    /// id одного трека библиотеки (в тестах трек всегда один).
+    /// id of the single library track (in tests there is always one track).
     fn only_track_id(db: &Db) -> i64 {
         db.conn
             .query_row("SELECT id FROM tracks LIMIT 1", [], |r| r.get(0))
@@ -1320,7 +1323,7 @@ mod tests {
         assert_eq!(meta.title, "New");
         assert_eq!(meta.artist, vec!["X".to_string(), "Y".to_string()]);
 
-        // передача None не трогает поле: меняем только артистов, заголовок остаётся.
+        // passing None leaves the field alone: only artists change, the title stays.
         db.set_track_meta(id, None, Some(&["Z".into()])).unwrap();
         let track = &db.get_tracks(None, None, Some(id), None).unwrap()[0];
         assert_eq!(track.get_metadata().unwrap().title, "New");
@@ -1409,9 +1412,9 @@ mod tests {
         db.save_track(fixture_track(dir.path(), "3.mp3", "Three", "C"))
             .unwrap();
 
-        // весь пул — три трека.
+        // the whole pool — three tracks.
         assert_eq!(db.get_track_paths().unwrap().len(), 3);
-        // плейлист — только два, в порядке позиций.
+        // the playlist — only two, in position order.
         let pl = db.get_playlist_track_paths("mix").unwrap();
         assert_eq!(pl.len(), 2);
         assert!(pl[0].1.ends_with("1.mp3"));
@@ -1435,7 +1438,7 @@ mod tests {
         assert_eq!(meta.album.as_deref(), Some("Nevermind"));
         assert_eq!(meta.genres, vec!["Grunge".to_string(), "Rock".to_string()]);
 
-        // очистка альбома и жанров.
+        // clearing the album and genres.
         db.set_track_album(id, None).unwrap();
         db.set_track_genres(id, &[]).unwrap();
         let track = &db.get_tracks(None, None, Some(id), None).unwrap()[0];
@@ -1473,9 +1476,9 @@ mod tests {
         db.set_track_invalid(id, true).unwrap();
         db.set_track_volume_id(id, 0.3).unwrap();
 
-        // повторный upsert того же пути (как при re-scan) не должен затирать
-        // пользовательские color/invalid/volume (у свеже-прочитанного трека
-        // громкость дефолтная 1.0 — она НЕ должна перезаписать сохранённую).
+        // a repeated upsert of the same path (as on a re-scan) must not wipe
+        // the user color/invalid/volume (a freshly read track has the default
+        // volume 1.0 — it must NOT overwrite the saved one).
         db.save_track(fixture_track(dir.path(), "a.mp3", "T2", "A"))
             .unwrap();
         let track = &db.get_tracks(None, None, Some(id), None).unwrap()[0];
@@ -1504,7 +1507,7 @@ mod tests {
             .unwrap();
         db.remove_track(id).unwrap();
 
-        // трек ушёл и из индекса, и из плейлиста.
+        // the track is gone from both the index and the playlist.
         assert_eq!(db.get_tracks(None, None, None, None).unwrap().len(), 1);
         assert_eq!(db.get_playlist_track_paths("mix").unwrap().len(), 1);
         let links: i64 = db
@@ -1518,7 +1521,7 @@ mod tests {
     fn reassign_path_dedups_and_clears_invalid() {
         let dir = tempdir().unwrap();
         let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
-        // исходный трек (пометим invalid) и дубликат по будущему пути.
+        // the original track (we'll mark it invalid) and a duplicate at the future path.
         db.save_track(fixture_track(dir.path(), "old.mp3", "Song", "A"))
             .unwrap();
         db.save_track(fixture_track(dir.path(), "new.mp3", "Song Dup", "A"))
@@ -1534,7 +1537,7 @@ mod tests {
         let new_path = dir.path().join("new.mp3");
         db.reassign_track_path(old_id, &new_path).unwrap();
 
-        // дубликат удалён, у старой записи теперь новый путь и снят invalid.
+        // the duplicate is removed, the old row now has the new path and no invalid mark.
         let all = db.get_tracks(None, None, None, None).unwrap();
         assert_eq!(all.len(), 1);
         let track = &db.get_tracks(None, None, Some(old_id), None).unwrap()[0];

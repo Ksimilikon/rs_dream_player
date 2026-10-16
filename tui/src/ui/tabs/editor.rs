@@ -1,9 +1,10 @@
-//! вкладка NEW_PLAYLIST / MOD_<name>: создание и правка плейлиста. Сверху поле
-//! имени, слева собираемый плейлист (упорядочен), справа пул песен с чекбоксами.
-//! Настройки пула: сортировка по полю (S), направление (R), скрывать добавленные
-//! (T, по умолчанию вкл). Подтверждение — W, отмена — Esc. Поиск (`/`) — по
-//! списку под фокусом: в пуле Enter добавляет найденный (поиск остаётся), в
-//! собираемом списке Enter снимает поиск и ставит селектор на найденный трек.
+//! NEW_PLAYLIST / MOD_<name> tab: creating and editing a playlist. The name
+//! field on top, the playlist being assembled on the left (ordered), the song
+//! pool with checkboxes on the right. Pool settings: sort field (S), direction
+//! (R), hide added (T, on by default). Confirm — W, cancel — Esc. Search (`/`)
+//! works on the focused list: in the pool Enter adds the found track (the
+//! search stays), in the assembled list Enter clears the search and puts the
+//! selector on the found track.
 
 use ratatui::{
     Frame,
@@ -40,23 +41,23 @@ pub struct PlaylistEditor {
     sort_key: SortKey,
     sort_dir: SortDir,
     hide_added: bool,
-    /// набираемый номер позиции для перемещения трека в собираемом списке.
+    /// the position number being typed to move a track in the assembled list.
     move_buf: String,
-    /// поиск по собираемому списку и по пулу (у каждой панели свой).
+    /// search over the assembled list and over the pool (each pane has its own).
     left_search: Search,
     right_search: Search,
-    /// позиции селекторов до начала поиска (вернуть при отмене).
+    /// selector positions before the search started (restored on cancel).
     pre_left: usize,
     pre_right: usize,
 }
 
 impl PlaylistEditor {
-    /// новый плейлист (пустые имя и список).
+    /// a new playlist (empty name and list).
     pub fn create(pool: Vec<TrackMeta>) -> Self {
         Self::build("NEW_PLAYLIST".to_string(), TextField::new(""), Vec::new(), pool)
     }
 
-    /// правка существующего плейлиста (имя и треки предзаполнены).
+    /// editing an existing playlist (name and tracks prefilled).
     pub fn edit(name: String, tracks: Vec<TrackMeta>, pool: Vec<TrackMeta>) -> Self {
         Self::build(format!("MOD_{name}"), TextField::new(&name), tracks, pool)
     }
@@ -82,19 +83,19 @@ impl PlaylistEditor {
         }
     }
 
-    /// индексы собираемого списка к показу (с учётом поиска).
+    /// indices of the assembled list to show (honouring the search).
     fn left_view(&self) -> Vec<usize> {
         self.left_search.filter(&self.assembled)
     }
 
-    /// поиск, запрос которого сейчас вводится (фокус при этом не меняется).
+    /// the search whose query is being typed now (focus doesn't change meanwhile).
     fn typing_search(&self) -> Option<&Search> {
         [&self.left_search, &self.right_search]
             .into_iter()
             .find(|s| s.typing())
     }
 
-    /// клавиша во время ввода поискового запроса в панели под фокусом.
+    /// a key while typing a search query in the focused pane.
     fn handle_search_input(&mut self, key: KeyEvent) {
         let (search, list, pre) = match self.focus {
             Focus::Right => (&mut self.right_search, &mut self.right, self.pre_right),
@@ -113,7 +114,7 @@ impl PlaylistEditor {
         id.is_some_and(|id| self.assembled.iter().any(|t| t.id == Some(id)))
     }
 
-    /// индексы пула к показу (фильтр «скрыть добавленные» + сортировка).
+    /// pool indices to show ("hide added" filter + sorting).
     fn pool_view(&self) -> Vec<usize> {
         let found = self.right_search.matcher();
         let mut idx: Vec<usize> = (0..self.pool.len())
@@ -149,7 +150,7 @@ impl PlaylistEditor {
         }
     }
 
-    /// id собранных треков (для сохранения).
+    /// ids of the assembled tracks (for saving).
     fn ids(&self) -> Vec<i64> {
         self.assembled.iter().filter_map(|t| t.id).collect()
     }
@@ -180,7 +181,7 @@ impl Tab for PlaylistEditor {
         let [name_area, panes] =
             Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas(area);
 
-        // поле имени.
+        // the name field.
         let name_focused = self.focus == Focus::Name;
         let name_border = if name_focused {
             Style::default().fg(Color::Cyan)
@@ -206,7 +207,7 @@ impl Tab for PlaylistEditor {
             (l, r)
         };
 
-        // слева — собираемый плейлист.
+        // left — the playlist being assembled.
         let left_lines: Vec<ListLine> = self
             .left_view()
             .into_iter()
@@ -223,7 +224,7 @@ impl Tab for PlaylistEditor {
         self.left
             .render(frame, left_area, &left_title, left_lines, self.focus == Focus::Left);
 
-        // справа — пул с чекбоксами и строкой настроек в заголовке.
+        // right — the pool with checkboxes and a settings line in the title.
         let view = self.pool_view();
         let right_lines: Vec<ListLine> = view
             .iter()
@@ -253,7 +254,7 @@ impl Tab for PlaylistEditor {
             self.handle_search_input(key);
             return TabEvent::None;
         }
-        // `/` — поиск в панели под фокусом (уже введённый запрос — на правку).
+        // `/` — search in the focused pane (an existing query opens for editing).
         if key.code == KeyCode::Char('/') && self.focus != Focus::Name {
             self.move_buf.clear();
             if self.focus == Focus::Left {
@@ -269,8 +270,8 @@ impl Tab for PlaylistEditor {
             }
             return TabEvent::None;
         }
-        // Esc при действующем поиске в панели под фокусом снимает поиск
-        // (а не закрывает редактор).
+        // Esc with an active search in the focused pane clears the search
+        // (instead of closing the editor).
         if key.code == KeyCode::Esc {
             if self.focus == Focus::Left && self.left_search.active() {
                 self.left_search.clear();
@@ -283,8 +284,8 @@ impl Tab for PlaylistEditor {
                 return TabEvent::None;
             }
         }
-        // отфильтрованный собираемый список: Enter — снять поиск и встать на
-        // найденный трек; перемещение по номеру недоступно.
+        // filtered assembled list: Enter — clear the search and land on the
+        // found track; moving by number is unavailable.
         if self.focus == Focus::Left && self.left_search.active() {
             if key.code == KeyCode::Enter {
                 let target = self.left_view().get(self.left.selected()).copied();
@@ -296,8 +297,8 @@ impl Tab for PlaylistEditor {
                 return TabEvent::None;
             }
         }
-        // набор номера позиции (только в собираемом списке): копим цифры,
-        // Enter — переместить выбранный трек на эту позицию.
+        // typing a position number (assembled list only): accumulate digits,
+        // Enter — move the selected track to that position.
         if let KeyCode::Char(c) = key.code
             && c.is_ascii_digit()
         {
@@ -316,7 +317,7 @@ impl Tab for PlaylistEditor {
             }
             return TabEvent::None;
         }
-        // любая другая клавиша сбрасывает набранный номер.
+        // any other key resets the typed number.
         self.move_buf.clear();
         match key.code {
             KeyCode::Esc => TabEvent::Close,
@@ -397,7 +398,7 @@ impl Tab for PlaylistEditor {
         ]
     }
 
-    /// весь ввод забираем только во время правки имени или ввода поиска.
+    /// all input is captured only while editing the name or typing a search.
     fn wants_input(&self) -> bool {
         self.editing_name || self.typing_search().is_some()
     }
@@ -407,7 +408,7 @@ impl Tab for PlaylistEditor {
     }
 }
 
-/// значение поля трека для сортировки пула.
+/// value of a track field used to sort the pool.
 fn sort_field(t: &TrackMeta, key: SortKey) -> String {
     match key {
         SortKey::Title => t.title.clone(),

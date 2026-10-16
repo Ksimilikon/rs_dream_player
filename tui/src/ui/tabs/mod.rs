@@ -1,5 +1,5 @@
-//! конкретные вкладки с интерфейсом и логикой. Постоянные: PLAYLISTS, SONG.
-//! Транзиентные (по команде): NEW_PLAYLIST, MOD_<name>, MOD_SONG_<...>, HELP,
+//! concrete tabs with interface and logic. Permanent: PLAYLISTS, SONG.
+//! Transient (by command): NEW_PLAYLIST, MOD_<name>, MOD_SONG_<...>, HELP,
 //! SETTINGS, EXPORT, IMPORT.
 
 mod editor;

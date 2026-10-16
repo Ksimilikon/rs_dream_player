@@ -200,7 +200,7 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    /// путь к реальному mp3-семплу в репозитории (для тестов записи тегов).
+    /// path to a real mp3 sample in the repository (for tag writing tests).
     fn fixture() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test_data/2.mp3")
     }
@@ -232,7 +232,7 @@ mod tests {
         assert_eq!(meta.genres, vec!["Rock".to_string(), "Pop".to_string()]);
     }
 
-    /// валидный 1×1 PNG (красный пиксель) — для проверки записи/чтения обложки.
+    /// a valid 1×1 PNG (a red pixel) — to check cover writing / reading.
     const PNG_1X1: &[u8] = &[
         137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2,
         0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 0, 0,
@@ -250,10 +250,10 @@ mod tests {
         let path = dir.path().join("copy.mp3");
         fs::copy(&src, &path).unwrap();
 
-        // без обложки read_cover возвращает None.
+        // without a cover read_cover returns None.
         assert!(TrackMetadata::read_cover(&path).is_none());
 
-        // после встраивания — читаем те же байты обратно.
+        // after embedding — read the same bytes back.
         TrackMetadata::write_cover(&path, PNG_1X1).unwrap();
         let got = TrackMetadata::read_cover(&path).expect("cover should be present");
         assert_eq!(got, PNG_1X1);
@@ -269,7 +269,7 @@ mod tests {
         let path = dir.path().join("copy.mp3");
         fs::copy(&src, &path).unwrap();
 
-        // не png/jpg/gif — должно вернуть ошибку до записи в файл.
+        // not png/jpg/gif — must return an error before writing to the file.
         let err = TrackMetadata::write_cover(&path, b"not an image at all");
         assert!(err.is_err());
     }

@@ -1,5 +1,5 @@
-//! вкладка HELP (`:help`): справка по управлению. Закрывается по Shift+X
-//! (обрабатывается приложением как транзиентная вкладка). j/k — прокрутка.
+//! HELP tab (`:help`): controls reference. Closed with Shift+X (handled by
+//! the app as a transient tab). j/k — scroll.
 
 use ratatui::{
     Frame,
@@ -106,7 +106,7 @@ impl Tab for HelpTab {
         )));
         for (key, desc) in HELP {
             if key.is_empty() && !desc.is_empty() {
-                // заголовок секции.
+                // section header.
                 lines.push(Line::from(Span::styled(
                     (*desc).to_string(),
                     Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),

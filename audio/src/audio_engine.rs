@@ -36,7 +36,7 @@ impl AudioEngine {
         F: FnOnce() + Send + 'static,
     {
         let decoder = Decoder::new(Cursor::new(data))?;
-        // запоминаем длительность до перемещения декодера в очередь.
+        // remember the duration before the decoder moves into the queue.
         self.duration = decoder.total_duration().unwrap_or_default();
 
         self.player.stop();
@@ -57,8 +57,8 @@ impl AudioEngine {
     pub fn new() -> Result<Self, Box<dyn Error>> {
         let device = DeviceSinkBuilder::open_default_sink()?;
         let player = RodioPlayer::connect_new(device.mixer());
-        // best-effort: имя устройства по умолчанию (open_default_sink может
-        // уйти на резервное устройство, тогда имя будет приблизительным).
+        // best-effort: the default device name (open_default_sink may fall
+        // back to another device, then the name is approximate).
         let device_name = rodio::cpal::default_host()
             .default_output_device()
             .and_then(|d| d.description().ok())
@@ -78,7 +78,7 @@ impl AudioEngine {
         self.duration
     }
 
-    /// имена доступных устройств вывода (на хосте по умолчанию).
+    /// names of the available output devices (on the default host).
     pub fn output_devices() -> Vec<String> {
         match rodio::cpal::default_host().output_devices() {
             Ok(devices) => devices
@@ -88,14 +88,14 @@ impl AudioEngine {
         }
     }
 
-    /// имя активного устройства вывода, если известно.
+    /// name of the active output device, if known.
     pub fn get_output_device(&self) -> Option<&str> {
         self.device_name.as_deref()
     }
 
-    /// переключает вывод на устройство с именем `name` (из [`Self::output_devices`]).
-    /// Текущий загруженный трек сбрасывается — воспроизведение нужно запустить
-    /// заново; громкость (master/track) сохраняется.
+    /// switches output to the device named `name` (from
+    /// [`Self::output_devices`]). The currently loaded track is dropped —
+    /// playback has to be started again; the volume (master/track) is kept.
     pub fn set_output_device(&mut self, name: &str) -> Result<(), Box<dyn Error>> {
         let device = rodio::cpal::default_host()
             .output_devices()?
@@ -113,7 +113,7 @@ impl AudioEngine {
         self._device = sink;
         self.player = player;
         self.device_name = Some(name.to_string());
-        // трек сброшен вместе со старым плеером.
+        // the track is dropped together with the old player.
         self.duration = Duration::ZERO;
         Ok(())
     }

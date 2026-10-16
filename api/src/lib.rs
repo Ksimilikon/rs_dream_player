@@ -13,8 +13,8 @@ pub mod player;
 
 static GLOBAL_STATE: OnceLock<Mutex<Core>> = OnceLock::new();
 
-/// превращает C-строку в путь. На Unix байты интерпретируются как есть
-/// (пути — произвольные байты), на Windows/прочих — как UTF-8.
+/// turns a C string into a path. On Unix the bytes are taken as is (paths are
+/// arbitrary bytes), on Windows / others — as UTF-8.
 pub(crate) fn ptr_to_path(ptr: *const c_char) -> Result<PathBuf, Box<dyn Error>> {
     if ptr.is_null() {
         return Err("FFI::null pointer for string".into());
@@ -29,7 +29,7 @@ pub(crate) fn ptr_to_path(ptr: *const c_char) -> Result<PathBuf, Box<dyn Error>>
     }
     #[cfg(not(unix))]
     {
-        // Windows и прочие: фронтенд передаёт путь в UTF-8.
+        // Windows and others: the frontend passes the path in UTF-8.
         Ok(PathBuf::from(c_str.to_str()?))
     }
 }

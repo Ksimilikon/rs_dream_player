@@ -1,6 +1,6 @@
-//! безопасная обёртка над индексом ядра (`idx_*`). Все вызовы маршалят строки в
-//! C, читают возвращённые FFI-структуры в владеющие [`super::types`] и тут же
-//! освобождают исходные буферы парными `idx_free_*`.
+//! safe wrapper over the core index (`idx_*`). Every call marshals strings to
+//! C, reads the returned FFI structs into owning [`super::types`] and frees
+//! the source buffers right away with the paired `idx_free_*`.
 
 use std::ffi::CString;
 use std::ptr;
@@ -10,12 +10,12 @@ use api::mem;
 
 use super::types::{PlaylistInfo, TrackMeta};
 
-/// `&str` -> owned `CString` (для передачи в FFI). Теряет данные после NUL.
+/// `&str` -> owned `CString` (to pass to FFI). Drops data after a NUL.
 fn cstr(s: &str) -> CString {
     CString::new(s).unwrap_or_default()
 }
 
-/// превращает `Option<&str>` в указатель (null для None); хранит `CString` живым.
+/// turns `Option<&str>` into a pointer (null for None); keeps the `CString` alive.
 fn opt_cstr(s: Option<&str>) -> Option<CString> {
     s.map(cstr)
 }
@@ -26,7 +26,7 @@ fn as_ptr(c: &Option<CString>) -> *const std::os::raw::c_char {
 
 // ───────────────────────────── reads ─────────────────────────────
 
-/// все плейлисты библиотеки.
+/// every library playlist.
 pub fn get_playlists() -> Vec<PlaylistInfo> {
     let list = idx::idx_get_playlists();
     let out = if list.ptr.is_null() {
@@ -41,17 +41,17 @@ pub fn get_playlists() -> Vec<PlaylistInfo> {
     out
 }
 
-/// весь пул треков библиотеки.
+/// the whole library track pool.
 pub fn get_tracks() -> Vec<TrackMeta> {
     collect_tracks(idx::idx_get_tracks())
 }
 
-/// треки плейлиста по его id (в порядке плейлиста).
+/// tracks of a playlist by its id (in playlist order).
 pub fn get_playlist_tracks(id: i64) -> Vec<TrackMeta> {
     collect_tracks(idx::idx_get_playlist_tracks(id))
 }
 
-/// метадата одного трека по id или пути (путь приоритетнее, если задан).
+/// metadata of one track by id or path (the path wins if given).
 pub fn get_track(id: i64, path: Option<&str>) -> Option<TrackMeta> {
     let path_c = opt_cstr(path);
     let meta = unsafe { idx::idx_get_track(id, as_ptr(&path_c)) };
@@ -61,7 +61,7 @@ pub fn get_track(id: i64, path: Option<&str>) -> Option<TrackMeta> {
     out
 }
 
-/// общий сбор `FFITracksList` -> владеющий Vec с освобождением буфера.
+/// common `FFITracksList` -> owning Vec conversion, freeing the buffer.
 fn collect_tracks(list: idx::FFITracksList) -> Vec<TrackMeta> {
     let out = if list.ptr.is_null() {
         Vec::new()
@@ -77,16 +77,16 @@ fn collect_tracks(list: idx::FFITracksList) -> Vec<TrackMeta> {
 
 // ───────────────────────────── writes ─────────────────────────────
 
-/// индексирует каталог (None -> каталог музыки из конфигурации).
+/// indexes a directory (None -> the music directory from the configuration).
 pub fn index_dir(dir: Option<&str>) -> bool {
     let c = opt_cstr(dir);
     unsafe { idx::idx_index_dir(as_ptr(&c)) }
 }
 
-/// правит заголовок и/или список артистов (None — поле не трогаем).
+/// edits the title and/or the artist list (None — leave the field alone).
 pub fn set_track_meta(id: i64, title: Option<&str>, artists: Option<&[String]>) -> bool {
     let title_c = opt_cstr(title);
-    // массив артистов держим живым вместе с указателями на него.
+    // keep the artist array alive together with the pointers into it.
     let artist_cs: Option<Vec<CString>> =
         artists.map(|a| a.iter().map(|s| cstr(s)).collect());
     let artist_ptrs: Option<Vec<*const std::os::raw::c_char>> =
@@ -98,32 +98,32 @@ pub fn set_track_meta(id: i64, title: Option<&str>, artists: Option<&[String]>) 
     unsafe { idx::idx_set_track_meta(id, as_ptr(&title_c), aptr, alen) }
 }
 
-/// альбом (None -> очистить).
+/// album (None -> clear).
 pub fn set_track_album(id: i64, album: Option<&str>) -> bool {
     let c = opt_cstr(album);
     unsafe { idx::idx_set_track_album(id, as_ptr(&c)) }
 }
 
-/// жанры (переписать целиком; пусто -> очистить).
+/// genres (rewrite entirely; empty -> clear).
 pub fn set_track_genres(id: i64, genres: &[String]) -> bool {
     let cs: Vec<CString> = genres.iter().map(|s| cstr(s)).collect();
     let ptrs: Vec<*const std::os::raw::c_char> = cs.iter().map(|c| c.as_ptr()).collect();
     unsafe { idx::idx_set_track_genres(id, ptrs.as_ptr(), ptrs.len()) }
 }
 
-/// путь к обложке (None -> очистить).
+/// cover path (None -> clear).
 pub fn set_track_cover(id: i64, cover_path: Option<&str>) -> bool {
     let c = opt_cstr(cover_path);
     unsafe { idx::idx_set_track_cover(id, as_ptr(&c)) }
 }
 
-/// цветовая метка (None -> очистить).
+/// color label (None -> clear).
 pub fn set_track_color(id: i64, color: Option<&str>) -> bool {
     let c = opt_cstr(color);
     unsafe { idx::idx_set_track_color(id, as_ptr(&c)) }
 }
 
-/// текстовая метка (None -> очистить).
+/// text label (None -> clear).
 pub fn set_track_label(id: i64, label: Option<&str>) -> bool {
     let c = opt_cstr(label);
     unsafe { idx::idx_set_track_label(id, as_ptr(&c)) }
@@ -137,7 +137,7 @@ pub fn set_track_volume(id: i64, volume: f32) -> bool {
     idx::idx_set_track_volume(id, volume)
 }
 
-/// новый путь к файлу трека.
+/// new track file path.
 pub fn set_track_path(id: i64, path: &str) -> bool {
     let c = cstr(path);
     unsafe { idx::idx_set_track_path(id, c.as_ptr()) }
@@ -147,7 +147,7 @@ pub fn remove_track(id: i64) -> bool {
     idx::idx_remove_track(id)
 }
 
-/// удаляет все недействительные треки; возвращает число удалённых (None — ошибка).
+/// removes every invalid track; returns the number removed (None — error).
 pub fn remove_invalid_tracks() -> Option<usize> {
     match idx::idx_remove_invalid_tracks() {
         n if n >= 0 => Some(n as usize),
@@ -155,7 +155,7 @@ pub fn remove_invalid_tracks() -> Option<usize> {
     }
 }
 
-/// создаёт/обновляет плейлист `name` из треков `ids` (в этом порядке).
+/// creates / updates playlist `name` from tracks `ids` (in this order).
 pub fn save_playlist(name: &str, ids: &[i64], cover: Option<&str>) -> bool {
     let name_c = cstr(name);
     let cover_c = opt_cstr(cover);
@@ -167,7 +167,7 @@ pub fn save_playlist(name: &str, ids: &[i64], cover: Option<&str>) -> bool {
     unsafe { idx::idx_save_playlist(name_c.as_ptr(), iptr, ilen, as_ptr(&cover_c)) }
 }
 
-/// удаляет плейлист по имени.
+/// removes a playlist by name.
 pub fn remove_playlist(name: &str) -> bool {
     let c = cstr(name);
     unsafe { idx::idx_remove_playlist(c.as_ptr()) }

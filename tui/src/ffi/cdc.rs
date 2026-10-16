@@ -1,6 +1,6 @@
-//! безопасная обёртка над пакетами ядра (`cdc_*`): упаковка (экспорт) и
-//! двухшаговый импорт. Буферы ядра копируются в владеющие `Vec` и сразу
-//! освобождаются парными `cdc_free_*`; сессия импорта закрывается в `Drop`.
+//! safe wrapper over the core packets (`cdc_*`): packing (export) and the
+//! two-step import. Core buffers are copied into owning `Vec`s and freed right
+//! away with the paired `cdc_free_*`; the import session is closed in `Drop`.
 
 use std::ffi::{CStr, CString};
 use std::path::Path;
@@ -9,10 +9,10 @@ use std::ptr;
 use api::cdc::{self, FFICdcStatus, FFIImportFileKind, FFIImportFiles, ImportSession};
 use api::mem;
 
-/// версия формата пакета, которую пишет фронтенд (`codec::Version::V0_1`).
+/// packet format version the frontend writes (`codec::Version::V0_1`).
 const PACKET_VERSION: u32 = 1;
 
-/// что класть в пакет.
+/// what to put into the packet.
 #[derive(Debug, Clone, Copy)]
 pub struct Flags {
     pub audio: bool,
@@ -20,17 +20,17 @@ pub struct Flags {
     pub covers: bool,
 }
 
-/// что экспортировать.
+/// what to export.
 pub enum Export<'a> {
-    /// вся бд: все треки и плейлисты.
+    /// the whole db: every track and playlist.
     Library,
-    /// плейлисты по имени вместе с их песнями.
+    /// playlists by name together with their songs.
     Playlists(&'a [String]),
-    /// треки по id (без плейлистов).
+    /// tracks by id (without playlists).
     Tracks(&'a [i64]),
 }
 
-/// человекочитаемое описание статуса ядра.
+/// human-readable description of a core status.
 pub fn describe(st: FFICdcStatus) -> &'static str {
     use FFICdcStatus as S;
     match st {
@@ -57,7 +57,7 @@ pub fn describe(st: FFICdcStatus) -> &'static str {
     }
 }
 
-/// упаковывает выбранное в пакет.
+/// packs the selection into a packet.
 pub fn pack(what: Export<'_>, flags: Flags) -> Result<Vec<u8>, FFICdcStatus> {
     let (mut p, mut l) = (ptr::null_mut(), 0usize);
     let st = unsafe {
@@ -110,22 +110,22 @@ pub fn pack(what: Export<'_>, flags: Flags) -> Result<Vec<u8>, FFICdcStatus> {
     Ok(bytes)
 }
 
-/// один файл, который нужно записать для импорта.
+/// one file that has to be written for the import.
 pub struct ImportFile<'a> {
     pub cover: bool,
     pub name: String,
     pub data: &'a [u8],
 }
 
-/// подготовленный импорт (шаг 1). Файлы читаются из памяти сессии; сессия
-/// закрывается [`PreparedImport::commit`] или в `Drop` (= отмена).
+/// a prepared import (step 1). Files are read from the session memory; the
+/// session is closed by [`PreparedImport::commit`] or in `Drop` (= cancel).
 pub struct PreparedImport {
     session: *mut ImportSession,
     files: FFIImportFiles,
 }
 
 impl PreparedImport {
-    /// шаг 1: распаковка и проверка дат (бд не меняется).
+    /// step 1: unpack and check dates (the db doesn't change).
     pub fn prepare(bytes: &[u8], force: bool) -> Result<Self, FFICdcStatus> {
         let mut session = ptr::null_mut();
         let mut files = FFIImportFiles {
@@ -141,7 +141,7 @@ impl PreparedImport {
         }
     }
 
-    /// файлы на запись (в порядке, в котором ждёт `commit`).
+    /// files to write (in the order `commit` expects).
     pub fn files(&self) -> Vec<ImportFile<'_>> {
         if self.files.ptr.is_null() {
             return Vec::new();
@@ -161,8 +161,8 @@ impl PreparedImport {
             .collect()
     }
 
-    /// шаг 3: сохраняет импорт. `paths[i]` — куда записан `files()[i]`
-    /// (`None` — не записан). Сессия закрывается в любом случае.
+    /// step 3: saves the import. `paths[i]` is where `files()[i]` was written
+    /// (`None` — not written). The session is closed in any case.
     pub fn commit(mut self, paths: &[Option<&Path>]) -> Result<(), FFICdcStatus> {
         let cs: Vec<Option<CString>> = paths
             .iter()
@@ -183,7 +183,7 @@ impl PreparedImport {
 
 impl Drop for PreparedImport {
     fn drop(&mut self) {
-        // null после commit — тогда это no-op.
+        // null after commit — then this is a no-op.
         unsafe { cdc::cdc_import_cancel(self.session) };
     }
 }

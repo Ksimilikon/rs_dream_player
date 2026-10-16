@@ -1,13 +1,13 @@
-//! владеющие Rust-зеркала FFI-структур ядра. Конвертация из `api::idx::FFI*`
-//! живёт здесь же; строки копируются, а исходные FFI-буферы освобождаются
-//! вызывающим кодом (`db.rs`) парными `idx_free_*`.
+//! owning Rust mirrors of the core FFI structs. Conversion from
+//! `api::idx::FFI*` lives here too; strings are copied, and the source FFI
+//! buffers are freed by the caller (`db.rs`) with the paired `idx_free_*`.
 
 use std::ffi::{CStr, c_char};
 
-/// метаданные трека (владеющая копия `FFITrackMetadata`).
+/// track metadata (an owning copy of `FFITrackMetadata`).
 #[derive(Debug, Clone, Default)]
 pub struct TrackMeta {
-    /// id записи в индексе (`None` — трек не из бд).
+    /// id of the index row (`None` — the track is not from the db).
     pub id: Option<i64>,
     pub path: Option<String>,
     pub title: String,
@@ -21,7 +21,7 @@ pub struct TrackMeta {
     pub cover_art: Option<String>,
 }
 
-/// плейлист (владеющая копия `FFIPlaylist`): имя, порядок id треков, обложка.
+/// playlist (an owning copy of `FFIPlaylist`): name, track id order, cover.
 #[derive(Debug, Clone, Default)]
 pub struct PlaylistInfo {
     pub name: Option<String>,
@@ -31,10 +31,10 @@ pub struct PlaylistInfo {
     pub updated_at: Option<u64>,
 }
 
-/// `*const c_char` -> `Option<String>` (null -> None). Копирует данные.
+/// `*const c_char` -> `Option<String>` (null -> None). Copies the data.
 ///
 /// # Safety
-/// `ptr` — null или валидный указатель на нуль-терминированную C-строку.
+/// `ptr` is null or a valid pointer to a nul-terminated C string.
 pub(super) unsafe fn opt_string(ptr: *const c_char) -> Option<String> {
     if ptr.is_null() {
         return None;
@@ -42,12 +42,12 @@ pub(super) unsafe fn opt_string(ptr: *const c_char) -> Option<String> {
     Some(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned())
 }
 
-/// `*const c_char` -> `String` ("" при null).
+/// `*const c_char` -> `String` ("" on null).
 unsafe fn string(ptr: *const c_char) -> String {
     unsafe { opt_string(ptr) }.unwrap_or_default()
 }
 
-/// массив C-строк -> `Vec<String>`.
+/// array of C strings -> `Vec<String>`.
 unsafe fn strings(ptr: *const *const c_char, len: usize) -> Vec<String> {
     if ptr.is_null() || len == 0 {
         return Vec::new();
@@ -59,7 +59,7 @@ unsafe fn strings(ptr: *const *const c_char, len: usize) -> Vec<String> {
 }
 
 impl TrackMeta {
-    /// копирует данные из FFI-структуры (ничего не освобождает).
+    /// copies data from the FFI struct (frees nothing).
     pub(super) unsafe fn from_ffi(m: &api::idx::FFITrackMetadata) -> Self {
         let (duration_s, sample_rate, bitrate, listen_count, cover_art) = if m.has_params {
             (
@@ -87,7 +87,7 @@ impl TrackMeta {
         }
     }
 
-    /// артисты одной строкой через запятую.
+    /// artists as one comma-separated string.
     pub fn artists_line(&self) -> String {
         self.artists.join(", ")
     }

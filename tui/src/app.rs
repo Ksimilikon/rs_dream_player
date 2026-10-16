@@ -1,6 +1,6 @@
-//! приложение TUI: состояние, цикл событий, оркестрация воспроизведения поверх
-//! FFI ядра (следующий/предыдущий/автоплей), управление вкладками, командная
-//! строка и общий каркас кадра (бар вкладок + контент + нижняя панель).
+//! TUI application: state, event loop, playback orchestration over the core
+//! FFI (next / previous / autoplay), tab management, the command line and the
+//! common frame skeleton (tab bar + content + bottom panel).
 
 use std::time::Duration;
 
@@ -28,7 +28,7 @@ const VOL_STEP: f32 = 0.05;
 const MASTER_VOL_MAX: f32 = 1.0;
 const SONG_VOL_MAX: f32 = 2.0;
 
-/// глобальные подсказки (общие для всех вкладок) — максимально кратко.
+/// global hints (shared by every tab) — as short as possible.
 const GLOBAL_HINTS: &[Hint] = &[
     ("H/L", "tab"),
     ("spc", "play"),
@@ -47,7 +47,7 @@ enum Status {
     Error,
 }
 
-/// отложенная удаляющая операция, ждущая подтверждения (y/N).
+/// a pending destructive operation awaiting confirmation (y/N).
 enum Pending {
     DeletePlaylist(usize),
     RemovePlayingDb(usize),
@@ -57,16 +57,16 @@ pub struct App {
     model: Model,
     screens: Vec<Box<dyn Tab>>,
     current: usize,
-    /// активная командная строка (`:`).
+    /// active command line (`:`).
     command: Option<TextField>,
     status: Option<(String, Status)>,
-    /// отложенное удаление: красный запрос подтверждения внизу (y/N).
+    /// pending removal: red confirmation prompt at the bottom (y/N).
     confirm: Option<(String, Pending)>,
     force_clear: bool,
     quit: bool,
-    /// системная медиа-интеграция (MPRIS/SMTC) — команды и метаданные.
+    /// system media integration (MPRIS/SMTC) — commands and metadata.
     media: Media,
-    /// каталог музыки (куда по умолчанию пишет импорт).
+    /// music directory (where import writes by default).
     music_dir: std::path::PathBuf,
 }
 
@@ -93,8 +93,9 @@ impl App {
         app
     }
 
-    /// перечитывает библиотеку из индекса: пул «ALL SONGS» + плейлисты из бд.
-    /// Треки плейлистов собираются из пула по id (один запрос пула).
+    /// re-reads the library from the index: the "ALL SONGS" pool + playlists
+    /// from the db. Playlist tracks are assembled from the pool by id (a single
+    /// pool query).
     fn reload_library(&mut self) {
         let pool = ffi::db::get_tracks();
         let by_id: std::collections::HashMap<i64, TrackMeta> = pool
@@ -127,11 +128,11 @@ impl App {
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         self.startup_resync(terminal)?;
         while !self.quit {
-            // автоплей: ядро сообщило о конце трека -> следующий.
+            // autoplay: the core reported the end of a track -> next.
             if ffi::engine::take_track_ended() {
                 self.next_track();
             }
-            // команды системных медиа-клавиш (MPRIS/SMTC).
+            // system media key commands (MPRIS/SMTC).
             while let Some(cmd) = self.media.poll() {
                 self.handle_media(cmd);
             }
@@ -147,8 +148,8 @@ impl App {
                 }
             }
             if self.force_clear {
-                // очистку не делаем фатальной: промежуточный ресайз может дать
-                // временную ошибку, из-за которой не стоит падать/выходить.
+                // clearing is not fatal: an intermediate resize may give a
+                // transient error that isn't worth crashing / exiting over.
                 let _ = terminal.clear();
                 self.force_clear = false;
             }
@@ -156,14 +157,14 @@ impl App {
         Ok(())
     }
 
-    /// авто-фикс артефактов старта (как ручной ресайз): пересчёт буферов под
-    /// фактический размер бэкенда и полная очистка.
+    /// auto-fix of startup artifacts (like a manual resize): recompute the
+    /// buffers for the actual backend size and clear fully.
     fn startup_resync(&self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         std::thread::sleep(Duration::from_millis(30));
-        // трюк 1×1 + autoresize — обходной путь для части Unix-терминалов
-        // (kitty/tty/zellij). На Windows он лишний и может рассинхронизировать
-        // буфер бэкенда с окном консоли, роняя следующий ресайз, — поэтому
-        // ограничен Unix.
+        // the 1×1 + autoresize trick is a workaround for some Unix terminals
+        // (kitty/tty/zellij). On Windows it is unnecessary and can desync the
+        // backend buffer from the console window, breaking the next resize —
+        // so it is limited to Unix.
         #[cfg(unix)]
         if let Ok(size) = terminal.size()
             && size.width > 0
@@ -177,7 +178,7 @@ impl App {
 
     // ───────────────────────── playback ─────────────────────────
 
-    /// запускает плейлист `index` из библиотеки с трека `start`.
+    /// starts library playlist `index` from track `start`.
     fn load_playlist(&mut self, index: usize, start: usize) {
         let Some(pl) = self.model.playlists.get(index) else {
             return;
@@ -196,13 +197,13 @@ impl App {
         self.play_current();
     }
 
-    /// вкладка SONG существует только во время проигрывания: создаём её (с
-    /// детекцией graphics-протокола) и переключаемся на неё.
+    /// the SONG tab exists only during playback: create it (with
+    /// graphics-protocol detection) and switch to it.
     fn ensure_song_tab(&mut self) {
         let idx = match self.screens.iter().position(|t| t.title() == "SONG") {
             Some(i) => i,
             None => {
-                // SONG сразу после PLAYLISTS (индекс 1).
+                // SONG right after PLAYLISTS (index 1).
                 let pos = 1.min(self.screens.len());
                 self.screens
                     .insert(pos, Box::new(SongTab::new(ImageManager::detect())));
@@ -212,8 +213,8 @@ impl App {
         self.current = idx;
     }
 
-    /// играет трек под `playing.current` через FFI (по id или пути) и публикует
-    /// его метаданные в системный транспорт.
+    /// plays the track at `playing.current` via FFI (by id or path) and
+    /// publishes its metadata to the system transport.
     fn play_current(&mut self) {
         let Some(playing) = &self.model.playing else {
             return;
@@ -237,9 +238,9 @@ impl App {
         self.model.pos = 0;
     }
 
-    /// переключает устройство вывода с авто-возобновлением: движок сбрасывает
-    /// трек при смене устройства, поэтому запоминаем позицию/паузу и
-    /// восстанавливаем текущий трек на новом устройстве.
+    /// switches the output device with auto-resume: the engine drops the
+    /// track on a device change, so remember position / pause and restore the
+    /// current track on the new device.
     fn switch_device(&mut self, name: String) {
         let pos = ffi::engine::position();
         let paused = ffi::engine::is_paused();
@@ -261,7 +262,7 @@ impl App {
         self.set_status(format!("output device: {name}"), Status::Info);
     }
 
-    /// применяет команду системных медиа-клавиш.
+    /// applies a system media key command.
     fn handle_media(&mut self, cmd: MediaCommand) {
         match cmd {
             MediaCommand::Next => self.next_track(),
@@ -315,7 +316,7 @@ impl App {
     fn add_song(&mut self, delta: f32) {
         let v = (ffi::engine::track_volume() + delta).clamp(0.0, SONG_VOL_MAX);
         ffi::engine::set_track_volume(v);
-        // сохранить персональную громкость трека в бд.
+        // save the per-track volume to the db.
         if let Some(p) = &self.model.playing
             && let Some(t) = p.tracks.get(p.current)
             && let Some(id) = t.id
@@ -326,7 +327,7 @@ impl App {
 
     // ───────────────────────── tabs ─────────────────────────
 
-    /// добавляет (или переключает на уже открытую) транзиентную вкладку.
+    /// adds (or switches to an already open) transient tab.
     fn push_transient(&mut self, tab: Box<dyn Tab>) {
         let title = tab.title();
         if let Some(i) = self.screens.iter().position(|t| t.title() == title) {
@@ -337,9 +338,9 @@ impl App {
         }
     }
 
-    /// закрывает текущую вкладку (Shift+X / отмена / подтверждение). PLAYLISTS
-    /// не закрывается. Закрытие SONG останавливает проигрывание и закрывает
-    /// плейлист — выделение играющего на PLAYLISTS пропадает само (playing=None).
+    /// closes the current tab (Shift+X / cancel / confirm). PLAYLISTS can't
+    /// be closed. Closing SONG stops playback and closes the playlist — the
+    /// playing highlight on PLAYLISTS disappears by itself (playing=None).
     fn close_current(&mut self) {
         if !self.screens[self.current].closable() {
             return;
@@ -359,7 +360,7 @@ impl App {
     // ───────────────────────── events ─────────────────────────
 
     fn handle_key(&mut self, key: KeyEvent) {
-        // Ctrl+L / Ctrl+C — всегда.
+        // Ctrl+L / Ctrl+C — always.
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('l') => {
@@ -373,18 +374,18 @@ impl App {
                 _ => {}
             }
         }
-        // командная строка перехватывает ввод.
+        // the command line captures input.
         if self.command.is_some() {
             self.handle_command_key(key);
             return;
         }
-        // ждём подтверждения удаления: y/Y — выполнить, иначе — отмена.
+        // awaiting removal confirmation: y/Y — execute, anything else — cancel.
         if self.confirm.is_some() {
             self.handle_confirm_key(key);
             return;
         }
-        // вкладка активно вводит текст (поле редактора) — отдаём ей весь ввод,
-        // чтобы буквы/пробел не срабатывали как глобальные команды.
+        // the tab is actively typing text (an editor field) — give it all
+        // input, so letters / space don't fire as global commands.
         if self.screens[self.current].wants_input() {
             let ev = self.screens[self.current].on_key(key, &self.model);
             self.handle_tab_event(ev);
@@ -433,7 +434,7 @@ impl App {
             }
             TabEvent::EditPlaylist(index) => self.open_playlist_editor(index),
             TabEvent::EditPlayingPlaylist => {
-                // правка играющего плейлиста: ищем его в библиотеке по имени.
+                // editing the playing playlist: find it in the library by name.
                 if let Some(name) = self.model.playing.as_ref().map(|p| p.name.clone())
                     && let Some(idx) = self.model.playlists.iter().position(|p| p.name == name)
                 {
@@ -441,7 +442,7 @@ impl App {
                 }
             }
             TabEvent::DeletePlaylist(index) => {
-                // пул не удаляется — подтверждение не спрашиваем.
+                // the pool can't be deleted — don't ask for confirmation.
                 match self.model.playlists.get(index) {
                     Some(pl) if !pl.pool => {
                         let msg = format!("delete playlist '{}'? (y/N)", pl.name);
@@ -452,8 +453,8 @@ impl App {
             }
             TabEvent::EditMeta(index) => self.open_meta_editor(index),
             TabEvent::MovePlaying { from, to } => self.move_playing(from, to),
-            // временное удаление из очереди — без подтверждения (обратимо);
-            // удаление из плейлиста в бд — с подтверждением.
+            // temporary removal from the queue — no confirmation (reversible);
+            // removal from the playlist in the db — with confirmation.
             TabEvent::RemovePlaying { index, from_db: false } => self.remove_playing(index, false),
             TabEvent::RemovePlaying { index, from_db: true } => {
                 self.confirm = Some((
@@ -490,7 +491,7 @@ impl App {
         }
     }
 
-    /// открывает редактор правки плейлиста `index` (кроме пула).
+    /// opens the playlist editor for `index` (except the pool).
     fn open_playlist_editor(&mut self, index: usize) {
         let pool = self.model.pool().to_vec();
         let Some(pl) = self.model.playlists.get(index) else {
@@ -504,7 +505,7 @@ impl App {
         self.push_transient(Box::new(editor));
     }
 
-    /// открывает редактор метаданных трека `index` играющего списка.
+    /// opens the metadata editor for track `index` of the playing list.
     fn open_meta_editor(&mut self, index: usize) {
         let Some(track) = self
             .model
@@ -522,8 +523,8 @@ impl App {
         self.push_transient(Box::new(editor));
     }
 
-    /// применяет правки метаданных через FFI (поле `None` — не трогаем;
-    /// album/genres пустые — очищаем).
+    /// applies metadata edits via FFI (a `None` field is left alone; empty
+    /// album / genres are cleared).
     fn apply_meta(&self, e: MetaEdit) {
         ffi::db::set_track_meta(e.id, e.title.as_deref(), e.artists.as_deref());
         if let Some(a) = &e.album {
@@ -545,8 +546,8 @@ impl App {
         }
     }
 
-    /// перестановка трека в играющем списке (временно): сохраняет играющий трек
-    /// под `current`, воспроизведение не прерывает.
+    /// moves a track within the playing list (temporarily): keeps the playing
+    /// track under `current`, doesn't interrupt playback.
     fn move_playing(&mut self, from: usize, to: usize) {
         if let Some(p) = &mut self.model.playing {
             let len = p.tracks.len();
@@ -564,8 +565,8 @@ impl App {
         }
     }
 
-    /// убирает трек из играющего списка; `from_db` — ещё и из плейлиста в бд
-    /// (только для реального плейлиста, не пула).
+    /// removes a track from the playing list; `from_db` — also from the
+    /// playlist in the db (only for a real playlist, not the pool).
     fn remove_playing(&mut self, index: usize, from_db: bool) {
         let (name, ids) = {
             let Some(p) = self.model.playing.as_mut() else {
@@ -601,8 +602,8 @@ impl App {
         }
     }
 
-    /// пересобирает треки играющего плейлиста из обновлённой библиотеки
-    /// (по имени), сохраняя индекс по возможности.
+    /// rebuilds the playing playlist tracks from the updated library (by
+    /// name), keeping the index where possible.
     fn refresh_playing(&mut self) {
         let Some(name) = self.model.playing.as_ref().map(|p| p.name.clone()) else {
             return;
@@ -637,7 +638,7 @@ impl App {
         }
     }
 
-    /// обрабатывает ответ на запрос подтверждения удаления.
+    /// handles the answer to a removal confirmation prompt.
     fn handle_confirm_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -652,7 +653,7 @@ impl App {
         }
     }
 
-    /// выполняет подтверждённую удаляющую операцию.
+    /// executes a confirmed destructive operation.
     fn exec_pending(&mut self, pending: Pending) {
         match pending {
             Pending::DeletePlaylist(index) => self.delete_playlist(index),
@@ -684,7 +685,7 @@ impl App {
         }
     }
 
-    /// выполняет команду (без ведущего `:`).
+    /// executes a command (without the leading `:`).
     fn exec_command(&mut self, cmd: &str) {
         let cmd = cmd.trim();
         let (head, arg) = match cmd.split_once(char::is_whitespace) {
@@ -742,8 +743,8 @@ impl App {
     // ───────────────────────── render ─────────────────────────
 
     fn draw(&mut self, frame: &mut Frame) {
-        // слишком маленькая область (сворачивание/промежуточный ресайз) — ничего
-        // не рисуем, чтобы не делить площадь в ноль и не писать мимо буфера.
+        // too small an area (minimize / intermediate resize) — draw nothing,
+        // so we don't divide the area by zero or write past the buffer.
         let area = frame.area();
         if area.width < 4 || area.height < 6 {
             return;
@@ -783,7 +784,7 @@ impl App {
         .areas(area);
         frame.render_widget(Paragraph::new("-".repeat(sep.width as usize)), sep);
 
-        // текущий трек + громкости.
+        // current track + volumes.
         let now = self
             .model
             .playing
@@ -800,7 +801,7 @@ impl App {
             status,
         );
 
-        // прогресс-бар (зелёный).
+        // progress bar (green).
         let total = ffi::engine::duration();
         let bar = progress_bar(self.model.pos, total, progress.width as usize);
         frame.render_widget(
@@ -808,7 +809,7 @@ impl App {
             progress,
         );
 
-        // низ: запрос подтверждения (красный) / командная строка / статус / подсказки.
+        // bottom: confirmation prompt (red) / command line / status / hints.
         if let Some((msg, _)) = &self.confirm {
             frame.render_widget(
                 Paragraph::new(msg.clone()).style(Style::new().fg(Color::Red)),
@@ -816,7 +817,7 @@ impl App {
             );
             return;
         }
-        // строка ввода вкладки (поиск `/`) — с курсором в позиции каретки.
+        // the tab's input line (search `/`) — with the cursor at the caret.
         if self.command.is_none()
             && let Some((text, caret)) = self.screens[self.current].prompt()
         {
@@ -827,7 +828,7 @@ impl App {
         match (&self.command, &self.status) {
             (Some(buf), _) => {
                 frame.render_widget(Paragraph::new(format!(":{}", buf.text())), hints);
-                // курсор в позиции каретки (с учётом ведущего `:`).
+                // cursor at the caret position (accounting for the leading `:`).
                 frame.set_cursor_position((hints.x + 1 + buf.caret() as u16, hints.y));
             }
             (None, Some((msg, kind))) => {
@@ -847,12 +848,12 @@ impl App {
     }
 }
 
-/// "80" -> 0.8, ограничено сверху `max`.
+/// "80" -> 0.8, capped at `max`.
 fn parse_percent(s: &str, max: f32) -> Option<f32> {
     s.trim().parse::<f32>().ok().map(|n| (n / 100.0).clamp(0.0, max))
 }
 
-/// устойчивая идентичность трека для поиска после перестановки.
+/// stable track identity for lookup after a move.
 fn ident(t: &TrackMeta) -> (Option<i64>, Option<String>, String) {
     (t.id, t.path.clone(), t.title.clone())
 }

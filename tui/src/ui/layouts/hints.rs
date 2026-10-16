@@ -1,4 +1,4 @@
-//! строка подсказок по командам (клавиша — зелёным, описание — обычным).
+//! command hints line (the key in green, the description plain).
 
 use ratatui::{
     style::{Modifier, Style},
@@ -7,11 +7,12 @@ use ratatui::{
 
 use crate::ui::PLAYING_GREEN;
 
-/// подсказка: (клавиша, действие).
+/// a hint: (key, action).
 pub type Hint = (&'static str, &'static str);
 
-/// собирает строку подсказок только из клавиш (без описаний — максимально
-/// кратко, чтобы не уходило за экран). Полные пояснения — в `:help`.
+/// builds the hints line from keys only (no descriptions — as short as
+/// possible, so it doesn't overflow the screen). Full explanations are in
+/// `:help`.
 pub fn hints_line(hints: &[Hint]) -> Line<'static> {
     let mut spans: Vec<Span> = Vec::new();
     for (i, (key, _desc)) in hints.iter().enumerate() {

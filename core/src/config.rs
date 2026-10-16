@@ -17,8 +17,8 @@ impl Default for Config {
     }
 }
 impl Config {
-    /// загружает конфиг из `path`. Если файла нет — возвращает значения по
-    /// умолчанию (файл не создаётся), чтобы первый запуск не падал.
+    /// loads the config from `path`. If there is no file, returns the defaults
+    /// (the file isn't created), so the first launch doesn't fail.
     pub fn load(path: &Path) -> Result<Self, Box<dyn Error>> {
         if !path.exists() {
             return Ok(Self::default());

@@ -1,8 +1,8 @@
-//! Windows-бэкенд: системный медиа-транспорт (SMTC) через souvlaki (перенесён из
-//! крейта `dbus`). Создаём собственное скрытое окно нашего процесса как опору для
-//! SMTC и качаем насос оконных сообщений на том же потоке — без этого система не
-//! доставляет нажатия медиа-клавиш. Параллельно неблокирующе вычитываем
-//! метаданные из `meta_rx`.
+//! Windows backend: the system media transport (SMTC) via souvlaki (moved from
+//! the `dbus` crate). We create our own hidden window in our process as an
+//! anchor for SMTC and pump the window message loop on the same thread —
+//! without it the system doesn't deliver media key presses. Meanwhile metadata
+//! is read from `meta_rx` without blocking.
 
 use std::error::Error;
 use std::ffi::c_void;
@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, PlatformConfig};
 
-// абсолютные пути к внешнему крейту: наш модуль тоже называется `windows`.
+// absolute paths to the external crate: our module is also called `windows`.
 use ::windows::Media::{
     MediaPlaybackType, SystemMediaTransportControls, SystemMediaTransportControlsDisplayUpdater,
 };
@@ -29,7 +29,8 @@ use super::{MediaCommand, MediaMeta};
 const DISPLAY_NAME: &str = "dream_player";
 const TICK: Duration = Duration::from_millis(50);
 
-/// запускает SMTC-интеграцию на отдельном потоке. Ошибки завершают поток тихо.
+/// starts the SMTC integration on a separate thread. Errors end the thread
+/// silently.
 pub fn spawn(cmd_tx: Sender<MediaCommand>, meta_rx: Receiver<MediaMeta>) {
     std::thread::spawn(move || {
         let _ = run(cmd_tx, meta_rx);
@@ -37,7 +38,7 @@ pub fn spawn(cmd_tx: Sender<MediaCommand>, meta_rx: Receiver<MediaMeta>) {
 }
 
 fn run(cmd_tx: Sender<MediaCommand>, meta_rx: Receiver<MediaMeta>) -> Result<(), Box<dyn Error>> {
-    // собственное скрытое окно нашего процесса — на нём и держится SMTC.
+    // our process's own hidden window — SMTC is anchored to it.
     let window = DummyWindow::new()?;
 
     let config = PlatformConfig {
@@ -49,7 +50,7 @@ fn run(cmd_tx: Sender<MediaCommand>, meta_rx: Receiver<MediaMeta>) -> Result<(),
     let mut controls =
         MediaControls::new(config).map_err(|e| boxed(format!("souvlaki init: {e:?}")))?;
 
-    // системные кнопки -> внутренние команды.
+    // system buttons -> internal commands.
     controls
         .attach(move |event: MediaControlEvent| {
             if let Some(cmd) = map_event(event) {
@@ -58,15 +59,15 @@ fn run(cmd_tx: Sender<MediaCommand>, meta_rx: Receiver<MediaMeta>) -> Result<(),
         })
         .map_err(|e| boxed(format!("souvlaki attach: {e:?}")))?;
 
-    // свой доступ к тому же DisplayUpdater — чтобы уметь чистить обложку
-    // (souvlaki при cover_url=None старый thumbnail не убирает).
+    // our own access to the same DisplayUpdater — to be able to clear the cover
+    // (souvlaki doesn't remove the old thumbnail when cover_url=None).
     let updater = display_updater(window.handle)?;
 
     let _ = controls.set_playback(MediaPlayback::Playing { progress: None });
 
-    // главный цикл: нельзя блокироваться на recv — иначе не качаются оконные
-    // сообщения и SMTC не доставляет нажатия. Качаем сообщения, затем
-    // неблокирующе выгребаем метаданные, затем короткий сон.
+    // main loop: it must not block on recv — otherwise window messages aren't
+    // pumped and SMTC doesn't deliver presses. Pump messages, then drain
+    // metadata without blocking, then a short sleep.
     loop {
         pump_messages();
 
@@ -127,8 +128,8 @@ fn map_event(event: MediaControlEvent) -> Option<MediaCommand> {
     }
 }
 
-/// скрытое окно-«пустышка» нашего процесса: опора для SMTC и приёмник его
-/// сообщений. Уничтожается на Drop.
+/// a hidden "dummy" window of our process: the SMTC anchor and the receiver
+/// of its messages. Destroyed on Drop.
 struct DummyWindow {
     handle: HWND,
 }
@@ -194,8 +195,8 @@ impl Drop for DummyWindow {
     }
 }
 
-/// прокачивает накопившиеся оконные сообщения потока — без этого SMTC не
-/// вызывает `attach`-колбэк при нажатии системных клавиш.
+/// pumps the thread's pending window messages — without it SMTC doesn't call
+/// the `attach` callback when system keys are pressed.
 fn pump_messages() {
     unsafe {
         let mut msg: MSG = std::mem::zeroed();

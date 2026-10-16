@@ -4,32 +4,34 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# ядро плеера — работаем ТОЛЬКО через его FFI-поверхность (`init`/`idx_*`/
-# `engine_*`), демонстрируя крейт `api` как динамическую библиотеку.
+# the player core — we work ONLY through its FFI surface (`init`/`idx_*`/
+# `engine_*`), demonstrating the `api` crate as a dynamic library.
 api = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
-# извлечение встроенной обложки из тегов аудиофайла живёт в audio_structs
-# (TrackMetadata::read_cover) — переиспользуем его, а не дублируем lofty здесь.
+# extracting the embedded cover from audio file tags lives in audio_structs
+# (TrackMetadata::read_cover) — reuse it instead of duplicating lofty here.
 audio_structs = { workspace = true }
 ratatui = { version = "0.30.2", features = ["crossterm"] }
-# без default-features: отключаем `chafa-dyn` (тянет системную libchafa через
-# pkg-config). Нужен только crossterm-бэкенд; изображения декодируем сами (image).
+# without default-features: disables `chafa-dyn` (pulls the system libchafa
+# via pkg-config). Only the crossterm backend is needed; images are decoded by
+# us (image).
 ratatui-image = { version = "11.0.6", default-features = false, features = [
     "crossterm",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# MPRIS-интеграция (перенесена из удалённого крейта `dbus`): системный медиа-
-# транспорт на Linux через zbus. Работает на одном однопоточном tokio-рантайме
-# нашего MPRIS-потока (feature `tokio`, без `async-io`) — чтобы не плодить
-# вспомогательные потоки (глобальный реактор async-io, пул blocking, отдельный
-# executor zbus). Итог: весь async живёт на одном дополнительном потоке.
+# MPRIS integration (moved from the removed `dbus` crate): the system media
+# transport on Linux via zbus. Runs on a single single-threaded tokio runtime
+# of our MPRIS thread (feature `tokio`, no `async-io`) — to avoid spawning
+# helper threads (the global async-io reactor, the blocking pool, a separate
+# zbus executor). Result: all async lives on one extra thread.
 zbus = { version = "5.16.0", default-features = false, features = ["tokio"] }
 tokio = { version = "1", features = ["rt", "net", "time"] }
 
-# Windows: системный медиа-транспорт (SMTC) через souvlaki + собственное скрытое
-# окно-опору (windows-crate). Раньше жило в крейте `dbus` под фичей `with_tui`;
-# теперь tui сам является фронтендом, поэтому бэкенд всегда собирается под Windows.
+# Windows: the system media transport (SMTC) via souvlaki + our own hidden
+# anchor window (windows-crate). It used to live in the `dbus` crate under the
+# `with_tui` feature; now tui itself is the frontend, so the backend is always
+# built on Windows.
 [target.'cfg(target_os = "windows")'.dependencies]
 souvlaki = "0.8.3"
 windows = { version = "0.58", features = [

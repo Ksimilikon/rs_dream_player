@@ -5,10 +5,10 @@ edition = "2024"
 
 [dependencies]
 audio_structs = { workspace = true }
-# 0.39.x тянет libsqlite3-sys 0.37.0 — ДО того, как 0.38.1 начал использовать
-# нестабильный `cfg_select!` в build.rs (ломает сборку на стабильном Rust старее
-# того, где `cfg_select` стабилизирован). Используемый нами API rusqlite в этих
-# версиях идентичен. См. также обсуждение сборки под Windows.
+# 0.39.x pulls libsqlite3-sys 0.37.0 — BEFORE 0.38.1 started using the
+# unstable `cfg_select!` in build.rs (it breaks the build on stable Rust older
+# than the one where `cfg_select` is stabilized). The rusqlite API we use is
+# identical in these versions. See also the discussion of the Windows build.
 rusqlite = { version = "0.39", features = ["bundled"] }
 fastrand = "2.4.1"
 

@@ -1,8 +1,9 @@
-//! однострочное поле ввода с кареткой: перемещение по символам и по словам,
-//! удаление влево/вправо. Используется и в командной строке (`:`), и в
-//! редакторах (название плейлиста, поля метаданных).
+//! a single-line input field with a caret: moving by characters and by
+//! words, deleting left / right. Used both in the command line (`:`) and in
+//! the editors (playlist name, metadata fields).
 
-/// текстовое поле: содержимое в символах + позиция каретки (индекс символа).
+/// text field: the content in characters + the caret position (a character
+/// index).
 #[derive(Default, Clone)]
 pub struct TextField {
     chars: Vec<char>,
@@ -24,7 +25,7 @@ impl TextField {
         self.chars.is_empty()
     }
 
-    /// позиция каретки в символах (для отрисовки курсора).
+    /// caret position in characters (for drawing the cursor).
     pub fn caret(&self) -> usize {
         self.caret
     }
@@ -39,7 +40,7 @@ impl TextField {
         self.caret += 1;
     }
 
-    /// удалить символ слева от каретки (Backspace).
+    /// delete the character left of the caret (Backspace).
     pub fn backspace(&mut self) {
         if self.caret > 0 {
             self.caret -= 1;
@@ -47,7 +48,7 @@ impl TextField {
         }
     }
 
-    /// удалить символ под кареткой (Delete).
+    /// delete the character under the caret (Delete).
     pub fn delete(&mut self) {
         if self.caret < self.chars.len() {
             self.chars.remove(self.caret);
@@ -70,7 +71,7 @@ impl TextField {
         self.caret = self.chars.len();
     }
 
-    /// к началу предыдущего слова (пропустить пробелы, затем слово).
+    /// to the start of the previous word (skip spaces, then the word).
     pub fn word_left(&mut self) {
         let mut i = self.caret;
         while i > 0 && self.chars[i - 1].is_whitespace() {
@@ -82,7 +83,7 @@ impl TextField {
         self.caret = i;
     }
 
-    /// к началу следующего слова (пропустить слово, затем пробелы).
+    /// to the start of the next word (skip the word, then spaces).
     pub fn word_right(&mut self) {
         let n = self.chars.len();
         let mut i = self.caret;

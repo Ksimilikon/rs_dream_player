@@ -56,9 +56,9 @@ where
     fn total_duration(&self) -> Option<std::time::Duration> {
         self.inner.total_duration()
     }
-    /// делегируем перемотку внутреннему источнику. Без этого используется
-    /// дефолт трейта `Source`, который возвращает `NotSupported`, и `:seek`
-    /// молча не работает (позиция откатывается назад).
+    /// delegate seeking to the inner source. Without this the `Source` trait
+    /// default is used, which returns `NotSupported`, and `:seek` silently
+    /// doesn't work (the position jumps back).
     fn try_seek(
         &mut self,
         pos: std::time::Duration,

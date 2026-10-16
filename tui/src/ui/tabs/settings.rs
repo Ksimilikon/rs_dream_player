@@ -1,7 +1,7 @@
-//! вкладка SETTINGS (`:settings`): настройки приложения. Пока единственный пункт
-//! — устройство вывода звука (список, текущее зелёным, Enter переключает).
-//! Открывается командой (как HELP), закрывается Shift+X. Задел на будущее:
-//! сюда же добавятся громкость/прочие настройки отдельными секциями.
+//! SETTINGS tab (`:settings`): app settings. For now the only item is the
+//! audio output device (a list, the current one in green, Enter switches).
+//! Opened by a command (like HELP), closed with Shift+X. Groundwork for the
+//! future: volume / other settings will be added here as separate sections.
 
 use ratatui::{
     Frame,
@@ -77,7 +77,7 @@ impl Tab for SettingsTab {
                 TabEvent::None
             }
             KeyCode::Char('r') => {
-                // перечитать список устройств (plug/unplug).
+                // re-read the device list (plug / unplug).
                 self.devices = ffi::engine::output_devices();
                 TabEvent::None
             }

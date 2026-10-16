@@ -1,10 +1,11 @@
-//! системная медиа-интеграция (перенесена из удалённого крейта `dbus`): MPRIS на
-//! Linux, SMTC на Windows, заглушка на остальных. Работает поверх FFI движка —
-//! команды системных клавиш приходят в приложение, метаданные текущего трека
-//! уходят в систему.
+//! system media integration (moved from the removed `dbus` crate): MPRIS on
+//! Linux, SMTC on Windows, a stub elsewhere. Works on top of the engine FFI —
+//! system key commands come into the app, current track metadata goes out to
+//! the system.
 //!
-//! фасад [`Media`] владеет двумя каналами: `cmd_rx` — команды от ОС (Next/…),
-//! `meta_tx` — метаданные в ОС. Бэкенд крутится на своём потоке.
+//! the [`Media`] facade owns two channels: `cmd_rx` — commands from the OS
+//! (Next/…), `meta_tx` — metadata to the OS. The backend runs on its own
+//! thread.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -16,7 +17,7 @@ mod windows;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 mod fallback;
 
-/// команда от системных медиа-клавиш.
+/// a command from the system media keys.
 pub enum MediaCommand {
     Next,
     Prev,
@@ -26,24 +27,25 @@ pub enum MediaCommand {
     Stop,
 }
 
-/// метаданные текущего трека для системного транспорта.
+/// current track metadata for the system transport.
 #[derive(Default, Clone)]
 pub struct MediaMeta {
     pub title: String,
     pub artists: Vec<String>,
-    /// путь к файлу обложки на диске (отдаётся как `file://`-URL).
+    /// path to the cover file on disk (given as a `file://` URL).
     pub art_path: Option<PathBuf>,
 }
 
-/// фасад медиа-интеграции на стороне приложения.
+/// the app-side media integration facade.
 pub struct Media {
     cmd_rx: Receiver<MediaCommand>,
     meta_tx: Sender<MediaMeta>,
 }
 
 impl Media {
-    /// запускает бэкенд на отдельном потоке. Если интеграция недоступна (нет
-    /// шины/ошибка) — поток тихо завершится, фасад останется рабочим «вхолостую».
+    /// starts the backend on a separate thread. If the integration is
+    /// unavailable (no bus / error), the thread exits quietly and the facade
+    /// keeps working "idle".
     pub fn start() -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<MediaCommand>();
         let (meta_tx, meta_rx) = mpsc::channel::<MediaMeta>();
@@ -58,12 +60,12 @@ impl Media {
         Self { cmd_rx, meta_tx }
     }
 
-    /// неблокирующе забирает очередную команду от ОС (если есть).
+    /// takes the next command from the OS without blocking (if any).
     pub fn poll(&self) -> Option<MediaCommand> {
         self.cmd_rx.try_recv().ok()
     }
 
-    /// публикует метаданные текущего трека в системный транспорт.
+    /// publishes current track metadata to the system transport.
     pub fn set_metadata(&self, meta: MediaMeta) {
         let _ = self.meta_tx.send(meta);
     }

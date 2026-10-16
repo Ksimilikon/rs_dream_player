@@ -7,32 +7,32 @@ use std::{
 use directories::{ProjectDirs, UserDirs};
 use serde::{Deserialize, Serialize};
 
-/// каталог конфигов/настроек приложения. На ПК (Linux) = `~/.config/dream_player`;
-/// сюда же кладутся пользовательские настройки.
+/// the app config / settings directory. On a PC (Linux) =
+/// `~/.config/dream_player`; user settings go here as well.
 pub fn config_dir() -> Option<PathBuf> {
     ProjectDirs::from("", "", "dream_player").map(|d| d.config_dir().to_path_buf())
 }
 
-/// каталог пользовательских настроек. Пока совпадает с [`config_dir`]
-/// (всё лежит в одном месте), но вынесен отдельно — позже настройки и конфиг
-/// могут разъехаться по разным каталогам.
+/// the user settings directory. For now it matches [`config_dir`]
+/// (everything lives in one place), but it is kept separate — later settings
+/// and config may move to different directories.
 pub fn settings_dir() -> Option<PathBuf> {
     config_dir()
 }
 
-/// путь к файлу конфига (`~/.config/dream_player/config.toml`).
+/// path to the config file (`~/.config/dream_player/config.toml`).
 pub fn config_file() -> Option<PathBuf> {
     config_dir().map(|d| d.join("config.toml"))
 }
 
-/// путь к файлу БД. На Linux всё лежит в каталоге конфига:
+/// path to the DB file. On Linux everything lives in the config directory:
 /// `~/.config/dream_player/music_db.sqlite`.
 pub fn db_file() -> Option<PathBuf> {
     config_dir().map(|d| d.join(storage::DB_FILE_NAME))
 }
 
-/// системный каталог музыки пользователя. Сначала пробуем `XDG_MUSIC_DIR`,
-/// а если он не настроен — откатываемся на `~/Music`, чтобы дефолт был всегда.
+/// the user's system music directory. First try `XDG_MUSIC_DIR`, and if it
+/// isn't configured, fall back to `~/Music`, so there is always a default.
 pub fn music_dir() -> Option<PathBuf> {
     let dirs = UserDirs::new()?;
     Some(
@@ -42,18 +42,18 @@ pub fn music_dir() -> Option<PathBuf> {
     )
 }
 
-/// пользовательский конфиг приложения, хранящийся в toml-файле.
+/// the user app config, stored in a toml file.
 ///
-/// Предполагается работа через `Mutex<Config>`. Поля пока заглушечные —
-/// настоящие будут добавлены позже; благодаря `#[serde(default)]` отсутствие
-/// поля в файле подставляет значение по умолчанию.
+/// meant to be used through `Mutex<Config>`. The fields are placeholders for
+/// now — real ones will be added later; thanks to `#[serde(default)]` a field
+/// missing from the file gets its default value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// общая (мастер-) громкость плеера, 0.0..=1.0.
+    /// the overall (master) player volume, 0.0..=1.0.
     pub master_volume: f32,
-    /// каталог хранилища: где лежат бд и обложки. `None` — каталог конфига
-    /// по умолчанию (см. [`db_file`]).
+    /// storage directory: where the db and covers live. `None` — the default
+    /// config directory (see [`db_file`]).
     pub storage_path: Option<PathBuf>,
 }
 
@@ -67,8 +67,8 @@ impl Default for Config {
 }
 
 impl Config {
-    /// путь к файлу бд с учётом `storage_path` (если задан), иначе — каталог
-    /// конфига по умолчанию.
+    /// db file path honouring `storage_path` (if set), otherwise the default
+    /// config directory.
     pub fn resolve_db_path(&self) -> Option<PathBuf> {
         match &self.storage_path {
             Some(dir) => Some(dir.join(storage::DB_FILE_NAME)),
@@ -78,9 +78,9 @@ impl Config {
 }
 
 impl Config {
-    /// загружает конфиг из `path`. Если файла нет — возвращает значения по
-    /// умолчанию и НЕ создаёт файл. Отсутствующие в файле поля заполняются
-    /// значениями по умолчанию.
+    /// loads the config from `path`. If there is no file, returns the defaults
+    /// and does NOT create the file. Fields missing from the file get default
+    /// values.
     pub fn load(path: &Path) -> Result<Self, Box<dyn Error>> {
         if !path.exists() {
             return Ok(Self::default());
@@ -90,8 +90,8 @@ impl Config {
         Ok(cfg)
     }
 
-    /// сохраняет конфиг в `path`, создавая файл (и недостающие родительские
-    /// каталоги). Файл конфига появляется только при этом вызове.
+    /// saves the config to `path`, creating the file (and missing parent
+    /// directories). The config file appears only on this call.
     pub fn save(&self, path: &Path) -> Result<(), Box<dyn Error>> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
@@ -115,7 +115,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.master_volume, 1.0);
-        // загрузка не должна создавать файл.
+        // loading must not create the file.
         assert!(!path.exists());
     }
 
@@ -123,7 +123,7 @@ mod tests {
     fn missing_field_falls_back_to_default() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        // в файле нет полей — они должны стать дефолтными.
+        // the file has no fields — they must become defaults.
         fs::write(&path, "\n").unwrap();
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.master_volume, 1.0);

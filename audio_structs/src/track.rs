@@ -106,10 +106,10 @@ impl Track {
             return false;
         }
 
-        // MP3: начинается с "ID3" или специфического кадра (0xFF 0xFB)
+        // MP3: starts with "ID3" or a specific frame (0xFF 0xFB)
         let is_mp3 = &bytes[0..3] == b"ID3" || (bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0);
 
-        // WAV: "RIFF" в начале и "WAVE" на 8-й позиции
+        // WAV: "RIFF" at the start and "WAVE" at offset 8
         let is_wav = bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE";
 
         // FLAC: "fLaC"
@@ -121,7 +121,7 @@ impl Track {
         // MIDI: "MThd"
         let is_midi = &bytes[0..4] == b"MThd";
 
-        // M4A/AAC: "ftypM4A" или "ftypmp42" на 4-й позиции
+        // M4A/AAC: "ftypM4A" or "ftypmp42" at offset 4
         let is_m4a = bytes.len() > 11 && &bytes[4..11] == b"ftypM4A";
 
         is_mp3 || is_wav || is_flac || is_ogg || is_midi || is_m4a

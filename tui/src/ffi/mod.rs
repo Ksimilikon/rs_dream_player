@@ -1,7 +1,6 @@
-//! распределённый слой работы с ядром через его FFI (`api`). Разделён по
-//! назначению: [`engine`] — воспроизведение, [`db`] — индекс и плейлисты,
-//! [`cdc`] — пакеты (экспорт/импорт); [`types`] — владеющие Rust-зеркала
-//! FFI-структур.
+//! the layer working with the core through its FFI (`api`). Split by purpose:
+//! [`engine`] — playback, [`db`] — index and playlists, [`cdc`] — packets
+//! (export / import); [`types`] — owning Rust mirrors of the FFI structs.
 
 pub mod cdc;
 pub mod db;

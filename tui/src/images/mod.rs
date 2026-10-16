@@ -1,14 +1,16 @@
-//! показ обложек прямо в терминале через graphics-протоколы (sixel/kitty/iterm2)
-//! с детекцией поддержки. Модуль оформлен директорией, чтобы дробить код по мере
-//! роста (детекция протокола, извлечение изображений, и т.п.).
+//! cover display right in the terminal via graphics protocols
+//! (sixel/kitty/iterm2) with support detection. The module is a directory so
+//! the code can be split as it grows (protocol detection, image extraction,
+//! etc.).
 //!
-//! Если терминал не поддерживает graphics-протокол, [`ImageManager::supported`]
-//! возвращает `false`, и вкладка SONG не резервирует место под изображение.
+//! If the terminal doesn't support a graphics protocol,
+//! [`ImageManager::supported`] returns `false`, and the SONG tab doesn't
+//! reserve space for an image.
 //!
-//! По протоколам: sixel — статичная растровая графика (один кадр), нативной
-//! анимации GIF нет; показать «гифку» можно только покадрово перерисовывая
-//! область самому. Kitty/iTerm2 умеют больше, но пока цель — sixel-совместимый
-//! статичный показ.
+//! About the protocols: sixel is static raster graphics (a single frame), with
+//! no native GIF animation; a "gif" can only be shown by redrawing the area
+//! frame by frame yourself. Kitty/iTerm2 can do more, but for now the goal is
+//! a sixel-compatible static display.
 
 mod protocol;
 mod source;
@@ -16,21 +18,21 @@ mod source;
 use ratatui::{Frame, layout::Rect};
 use ratatui_image::{StatefulImage, picker::Picker, protocol::StatefulProtocol};
 
-/// менеджер показа обложек: держит детектированный протокол терминала и текущее
-/// подготовленное изображение. Пересобирает изображение только при смене
-/// источника (чтобы не декодировать каждый кадр).
+/// cover display manager: holds the detected terminal protocol and the
+/// currently prepared image. Rebuilds the image only when the source changes
+/// (so it isn't decoded every frame).
 pub struct ImageManager {
-    /// `Some` — терминал поддерживает graphics-протокол; `None` — показ выключен.
+    /// `Some` — the terminal supports a graphics protocol; `None` — display is off.
     picker: Option<Picker>,
-    /// ключ текущего источника (путь к обложке) — чтобы не грузить повторно.
+    /// key of the current source (cover path) — to avoid reloading.
     current_key: Option<String>,
-    /// подготовленный к отрисовке протокол текущей обложки.
+    /// the current cover's protocol, prepared for drawing.
     protocol: Option<StatefulProtocol>,
 }
 
 impl ImageManager {
-    /// детектирует протокол терминала запросом к stdio. Должен вызываться уже
-    /// после инициализации терминала (в raw-режиме).
+    /// detects the terminal protocol by querying stdio. Must be called after
+    /// the terminal is initialized (in raw mode).
     pub fn detect() -> Self {
         Self {
             picker: protocol::detect_graphics_picker(),
@@ -39,21 +41,21 @@ impl ImageManager {
         }
     }
 
-    /// поддерживает ли терминал показ изображений (есть настоящий graphics-протокол).
+    /// whether the terminal can show images (a real graphics protocol exists).
     pub fn supported(&self) -> bool {
         self.picker.is_some()
     }
 
-    /// задаёт источник обложки текущего трека: `cover` — путь к отдельному файлу
-    /// обложки из индекса (приоритет), `audio` — путь к самому аудиофайлу (из его
-    /// тегов достаём встроенную обложку, если файла-обложки нет). Пересобирает
-    /// протокол только при смене источника; ошибки чтения/декодирования дают
-    /// пустой показ.
+    /// sets the cover source of the current track: `cover` — path to a
+    /// separate cover file from the index (takes priority), `audio` — path to
+    /// the audio file itself (the embedded cover is taken from its tags if there
+    /// is no cover file). Rebuilds the protocol only when the source changes;
+    /// read / decode errors give an empty display.
     pub fn set_source(&mut self, cover: Option<&str>, audio: Option<&str>) {
         if self.picker.is_none() {
             return;
         }
-        // ключ кэша учитывает оба источника, чтобы обновляться при смене трека.
+        // the cache key covers both sources, so it refreshes on a track change.
         let key = format!("{}|{}", cover.unwrap_or(""), audio.unwrap_or(""));
         if self.current_key.as_deref() == Some(key.as_str()) {
             return;
@@ -62,13 +64,13 @@ impl ImageManager {
         self.protocol = self.load(cover, audio);
     }
 
-    /// есть ли готовое к показу изображение (протокол собран).
+    /// whether an image is ready to show (the protocol is built).
     pub fn has_image(&self) -> bool {
         self.protocol.is_some()
     }
 
-    /// готовит изображение: сперва отдельный файл обложки, затем встроенная
-    /// обложка из тегов аудиофайла.
+    /// prepares the image: first the separate cover file, then the cover
+    /// embedded in the audio file tags.
     fn load(&self, cover: Option<&str>, audio: Option<&str>) -> Option<StatefulProtocol> {
         let picker = self.picker.as_ref()?;
         let img = cover
@@ -77,7 +79,7 @@ impl ImageManager {
         Some(picker.new_resize_protocol(img))
     }
 
-    /// рисует текущую обложку в `area` (если протокол и изображение есть).
+    /// draws the current cover into `area` (if the protocol and image exist).
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         if let Some(protocol) = self.protocol.as_mut() {
             frame.render_stateful_widget(

@@ -10,12 +10,12 @@ use audio_structs::track_virtual::TrackVirtual;
 use super::GLOBAL_STATE;
 use crate::idx::{FFIStringList, to_c, vec_to_raw};
 
-/// колбэк конца трека, передаётся фронтом. `None` (null-указатель) — без
-/// уведомления. Вызывается из внутреннего аудио-потока ровно один раз, когда
-/// трек доиграл до конца (не при `stop`/смене устройства).
+/// end-of-track callback passed by the frontend. `None` (null pointer) — no
+/// notification. Called from the internal audio thread exactly once, when the
+/// track has played to the end (not on `stop` / device change).
 pub type OnTrackEnd = Option<extern "C" fn()>;
 
-/// загружает трек в движок и запускает воспроизведение. `true` при успехе.
+/// loads a track into the engine and starts playback. `true` on success.
 fn play_track(engine: &mut AudioEngine, mut track: TrackVirtual, on_end: OnTrackEnd) -> bool {
     if track.load_track().is_err() {
         return false;
@@ -24,12 +24,13 @@ fn play_track(engine: &mut AudioEngine, mut track: TrackVirtual, on_end: OnTrack
         return false;
     };
     let volume = track.volume;
-    // extern "C" fn не реализует FnOnce напрямую — оборачиваем в замыкание.
+    // an extern "C" fn doesn't implement FnOnce directly — wrap it in a closure.
     let cb = on_end.map(|f| move || f());
     engine.load(bytes, volume, cb).is_ok()
 }
 
-/// играть трек из индекса по его id. `on_end` — необязательный колбэк конца трека.
+/// plays a track from the index by its id. `on_end` is an optional
+/// end-of-track callback.
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_add_track_id(id_track: i64, on_end: OnTrackEnd) -> bool {
     let mut guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
@@ -45,12 +46,12 @@ pub extern "C" fn engine_add_track_id(id_track: i64, on_end: OnTrackEnd) -> bool
     }
 }
 
-/// играть трек по пути к файлу. Если файл уже в индексе — берём запись оттуда
-/// (с сохранённой громкостью), иначе играем файл напрямую. `on_end` —
-/// необязательный колбэк конца трека.
+/// plays a track by file path. If the file is already in the index, its row
+/// is used (with the saved volume), otherwise the file is played directly.
+/// `on_end` is an optional end-of-track callback.
 ///
 /// # Safety
-/// `path` — валидный C-указатель на нуль-терминированную строку (не null).
+/// `path` is a valid C pointer to a nul-terminated string (not null).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn engine_add_track_path(path: *const c_char, on_end: OnTrackEnd) -> bool {
     let Ok(path) = crate::ptr_to_path(path) else {
@@ -58,7 +59,7 @@ pub unsafe extern "C" fn engine_add_track_path(path: *const c_char, on_end: OnTr
     };
     let mut guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
 
-    // приоритет — запись из индекса по этому пути (несёт громкость/метадату).
+    // priority — the index row for this path (carries volume / metadata).
     let indexed = guard.get_db().and_then(|db| {
         db.get_tracks(None, None, None, None)
             .ok()?
@@ -90,13 +91,13 @@ pub extern "C" fn engine_pause() {
     let mut guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
     guard.get_engine_mut().pause();
 }
-/// остановить воспроизведение и очистить очередь.
+/// stops playback and clears the queue.
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_stop() {
     let mut guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
     guard.get_engine_mut().stop();
 }
-/// скорость воспроизведения (1.0 = нормальная).
+/// playback speed (1.0 = normal).
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_set_speed(speed: f32) {
     let mut guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
@@ -112,20 +113,20 @@ pub extern "C" fn engine_get_seek() -> u64 {
     let guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
     guard.get_engine().get_pos().as_secs()
 }
-/// полная длительность текущего трека в секундах (`0` — неизвестно/ничего не
-/// загружено; некоторые форматы её не сообщают).
+/// full duration of the current track in seconds (`0` — unknown / nothing
+/// loaded; some formats don't report it).
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_get_duration() -> u64 {
     let guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
     guard.get_engine().get_duration().as_secs()
 }
-/// `true`, если воспроизведение на паузе.
+/// `true` if playback is paused.
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_is_pause() -> bool {
     let guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
     guard.get_engine().is_pause()
 }
-/// `true`, если очередь пуста (трек доиграл или ничего не загружено).
+/// `true` if the queue is empty (the track finished or nothing is loaded).
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_is_empty() -> bool {
     let guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
@@ -136,8 +137,8 @@ pub extern "C" fn engine_set_volume_track(volume: f32) {
     let mut guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
     guard.get_engine_mut().set_volume_track(volume);
 }
-/// мастер-громкость: применяется к движку И сохраняется в конфиг ядра на диск
-/// (переживает перезапуск).
+/// master volume: applied to the engine AND saved to the core config on disk
+/// (survives a restart).
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_set_volume_master(volume: f32) {
     let mut guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
@@ -154,7 +155,8 @@ pub extern "C" fn engine_get_volume_master() -> f32 {
     guard.get_engine().get_volume_master()
 }
 
-/// имена доступных устройств вывода. Освобождать `engine_free_output_devices`.
+/// names of the available output devices. Free with
+/// `engine_free_output_devices`.
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_get_output_devices() -> FFIStringList {
     let raw: Vec<*mut c_char> = AudioEngine::output_devices()
@@ -165,7 +167,7 @@ pub extern "C" fn engine_get_output_devices() -> FFIStringList {
     FFIStringList { ptr, len }
 }
 
-/// имя текущего устройства вывода (null, если неизвестно). Освобождать
+/// name of the current output device (null if unknown). Free with
 /// `idx_free_string`.
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_get_output_device() -> *mut c_char {
@@ -176,10 +178,10 @@ pub extern "C" fn engine_get_output_device() -> *mut c_char {
         .map_or(ptr::null_mut(), to_c)
 }
 
-/// переключает вывод на устройство с именем `name`. Возвращает `true` при успехе.
+/// switches output to the device named `name`. Returns `true` on success.
 ///
 /// # Safety
-/// `name` — либо null, либо валидный C-указатель на нуль-терминированную строку.
+/// `name` is either null or a valid C pointer to a nul-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn engine_set_output_device(name: *const c_char) -> bool {
     if name.is_null() {

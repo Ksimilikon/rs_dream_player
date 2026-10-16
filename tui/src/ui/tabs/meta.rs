@@ -1,7 +1,7 @@
-//! вкладка MOD_SONG_<...>: правка метаданных трека под селектором. Менять можно
-//! только теги (название, исполнители, альбом, жанры, обложка, цвет, метка);
-//! технические поля (битрейт и т.п.) показаны, но не редактируются.
-//! Подтверждение — W, отмена — Esc.
+//! MOD_SONG_<...> tab: editing the metadata of the selected track. Only tags
+//! can be changed (title, artists, album, genres, cover, color, label);
+//! technical fields (bitrate, etc.) are shown but not editable.
+//! Confirm — W, cancel — Esc.
 
 use ratatui::{
     Frame,
@@ -67,8 +67,8 @@ impl SongEditor {
         }
     }
 
-    /// собирает набор правок (пустое поле title/artists/cover/color/label — «не
-    /// менять»; album/genres применяются всегда, пустое очищает).
+    /// builds the edit set (an empty title/artists/cover/color/label field —
+    /// "don't change"; album/genres are always applied, empty clears them).
     fn to_edit(&self) -> MetaEdit {
         let get = |i: usize| self.fields[i].value.text();
         let split = |s: String| {
@@ -153,7 +153,7 @@ impl Tab for SongEditor {
         frame.render_widget(Paragraph::new(lines), inner);
 
         if self.editing {
-            // каретка: отступ маркера (2) + ширина метки + позиция в значении.
+            // caret: marker indent (2) + label width + position in the value.
             let col = inner.x + 2 + LABEL_W as u16 + self.fields[self.sel].value.caret() as u16;
             frame.set_cursor_position((col, inner.y + self.sel as u16));
         }
@@ -187,7 +187,7 @@ impl Tab for SongEditor {
         vec![("jk", "fld"), ("Ent", "edit"), ("W", "save"), ("Esc", "cxl")]
     }
 
-    /// весь ввод забираем только во время правки поля.
+    /// all input is captured only while a field is being edited.
     fn wants_input(&self) -> bool {
         self.editing
     }

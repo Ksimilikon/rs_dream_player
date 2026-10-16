@@ -1,6 +1,6 @@
-//! слой интерфейса: [`layouts`] — переиспользуемые заготовки, [`tabs`] —
-//! конкретные вкладки с логикой. Здесь же общая view-модель, которую вкладки
-//! читают, и трейт [`Tab`].
+//! interface layer: [`layouts`] — reusable building blocks, [`tabs`] —
+//! concrete tabs with logic. Also the shared view model the tabs read, and the
+//! [`Tab`] trait.
 
 pub mod layouts;
 pub mod tabs;
@@ -10,42 +10,42 @@ use ratatui::{Frame, crossterm::event::KeyEvent, layout::Rect, style::Color};
 use crate::ffi::TrackMeta;
 use layouts::Hint;
 
-/// цвет проигрываемого трека/акцентов.
+/// color of the playing track / accents.
 pub const PLAYING_GREEN: Color = Color::Green;
-/// цвет заголовка справки (shift+x закрывает).
+/// color of the help header (shift+x closes).
 pub const HELP_RED: Color = Color::Red;
 
-/// плейлист в представлении интерфейса (имя + треки + признаки).
+/// a playlist as the interface sees it (name + tracks + flags).
 pub struct PlaylistView {
     pub name: String,
     pub tracks: Vec<TrackMeta>,
-    /// общий пул «ALL SONGS» (первый в списке, неудаляемый).
+    /// the shared "ALL SONGS" pool (first in the list, can't be deleted).
     pub pool: bool,
-    /// id плейлиста в бд (для операций); `None` у пула.
+    /// playlist id in the db (for operations); `None` for the pool.
     pub id: Option<i64>,
 }
 
-/// состояние проигрываемого плейлиста.
+/// state of the playing playlist.
 pub struct Playing {
     pub name: String,
     pub tracks: Vec<TrackMeta>,
-    /// индекс играющего трека в `tracks`.
+    /// index of the playing track in `tracks`.
     pub current: usize,
 }
 
-/// view-модель, доступная вкладкам (read-only при отрисовке/обработке клавиш).
+/// view model available to tabs (read-only while drawing / handling keys).
 pub struct Model {
-    /// библиотека: `[0]` — пул «ALL SONGS», далее плейлисты из бд.
+    /// library: `[0]` — the "ALL SONGS" pool, then playlists from the db.
     pub playlists: Vec<PlaylistView>,
-    /// активный проигрываемый плейлист (если есть).
+    /// the active playing playlist (if any).
     pub playing: Option<Playing>,
     pub master_vol: f32,
-    /// позиция воспроизведения в секундах (для прогресс-бара).
+    /// playback position in seconds (for the progress bar).
     pub pos: u64,
 }
 
 impl Model {
-    /// пул «ALL SONGS».
+    /// the "ALL SONGS" pool.
     pub fn pool(&self) -> &[TrackMeta] {
         self.playlists
             .iter()
@@ -55,42 +55,43 @@ impl Model {
     }
 }
 
-/// действие, которое вкладка просит выполнить у приложения.
+/// an action a tab asks the application to perform.
 pub enum TabEvent {
     None,
-    /// закрыть текущую (транзиентную) вкладку (отмена редактора).
+    /// close the current (transient) tab (editor cancel).
     Close,
-    /// проиграть плейлист `index` из библиотеки, начиная с трека `start`.
+    /// play library playlist `index` starting from track `start`.
     PlayPlaylist { index: usize, start: usize },
-    /// выбрать играющий трек по индексу (вкладка SONG).
+    /// select the playing track by index (SONG tab).
     SelectPlaying(usize),
-    /// открыть вкладку создания плейлиста.
+    /// open the playlist creation tab.
     NewPlaylist,
-    /// открыть вкладку правки плейлиста `index` из библиотеки.
+    /// open the editing tab for library playlist `index`.
     EditPlaylist(usize),
-    /// открыть правку играющего плейлиста (вкладка SONG).
+    /// open editing of the playing playlist (SONG tab).
     EditPlayingPlaylist,
-    /// удалить плейлист `index` из библиотеки.
+    /// delete library playlist `index`.
     DeletePlaylist(usize),
-    /// открыть редактор метаданных трека `index` в играющем списке.
+    /// open the metadata editor for track `index` in the playing list.
     EditMeta(usize),
-    /// переставить трек в играющем списке (временно, без записи в бд).
+    /// move a track within the playing list (temporarily, not written to the db).
     MovePlaying { from: usize, to: usize },
-    /// убрать трек `index` из играющего списка; `from_db` — ещё и из плейлиста в бд.
+    /// remove track `index` from the playing list; `from_db` — also from the
+    /// playlist in the db.
     RemovePlaying { index: usize, from_db: bool },
-    /// сохранить плейлист: имя + id треков (новый или правка).
+    /// save a playlist: name + track ids (new or edited).
     SavePlaylist { name: String, ids: Vec<i64> },
-    /// применить правку метаданных трека.
+    /// apply a track metadata edit.
     SaveMeta(MetaEdit),
-    /// переключить устройство вывода по имени.
+    /// switch the output device by name.
     SetOutputDevice(String),
-    /// библиотека изменилась извне (импорт) — перечитать.
+    /// the library changed from outside (import) — re-read it.
     LibraryChanged,
-    /// разовое сообщение в статус-строку.
+    /// a one-off message for the status line.
     Status(String),
 }
 
-/// набор правок метаданных трека (пустое поле `None` — не менять).
+/// a set of track metadata edits (an empty `None` field — don't change).
 #[derive(Default)]
 pub struct MetaEdit {
     pub id: i64,
@@ -103,31 +104,31 @@ pub struct MetaEdit {
     pub label: Option<String>,
 }
 
-/// вкладка интерфейса.
+/// an interface tab.
 pub trait Tab {
-    /// заголовок для бара вкладок.
+    /// title for the tab bar.
     fn title(&self) -> String;
-    /// отрисовка в выделенную область.
+    /// draw into the given area.
     fn render(&mut self, frame: &mut Frame, area: Rect, model: &Model);
-    /// обработка клавиши (кроме глобальных) -> запрошенное действие.
+    /// handle a key (except global ones) -> the requested action.
     fn on_key(&mut self, key: KeyEvent, model: &Model) -> TabEvent;
-    /// подсказки по командам вкладки (для нижней строки).
+    /// command hints of the tab (for the bottom line).
     fn hints(&self) -> Vec<Hint>;
-    /// можно ли закрыть вкладку по Shift+X. Закрываемы все, кроме PLAYLISTS.
+    /// whether the tab can be closed with Shift+X. All can, except PLAYLISTS.
     fn closable(&self) -> bool {
         true
     }
-    /// вкладка прямо сейчас вводит текст в поле: на это время приложение отдаёт
-    /// ей весь ввод (чтобы буквы не срабатывали как глобальные команды). Вне
-    /// активного ввода вкладка ведёт себя как все (H/L, глобальные команды).
+    /// the tab is typing text into a field right now: meanwhile the app gives
+    /// it all input (so letters don't fire as global commands). Outside active
+    /// input the tab behaves like any other (H/L, global commands).
     fn wants_input(&self) -> bool {
         false
     }
-    /// строка ввода вкладки для нижней панели (поиск `/`): текст и позиция
-    /// курсора в символах. `None` — вкладка ничего не вводит.
+    /// the tab's input line for the bottom panel (search `/`): text and the
+    /// cursor position in characters. `None` — the tab isn't typing anything.
     fn prompt(&self) -> Option<(String, usize)> {
         None
     }
-    /// список треков сменился — сбросить курсоры.
+    /// the track list changed — reset cursors.
     fn on_tracks_changed(&mut self) {}
 }

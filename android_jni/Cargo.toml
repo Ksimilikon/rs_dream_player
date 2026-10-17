@@ -9,3 +9,5 @@ edition = "2024"
 [target.'cfg(target_os = "android")'.dependencies]
 api = { workspace = true }
 jni = "0.22.4"
+# the audio backend (cpal) takes the JavaVM / Context from here.
+ndk-context = "0.1.1"

@@ -30,6 +30,12 @@ pub struct FFITrackMetadata {
 
     pub has_params: bool, // Option
     pub params: FFITrackMetadataParams,
+
+    // db-only user state (not file tags); defaults for a track outside the db.
+    pub volume: f32, // saved per-track volume (1.0 — default)
+    pub invalid: bool,
+    pub color: *mut c_char,      // maybe null
+    pub user_label: *mut c_char, // maybe null
 }
 
 #[repr(C)]
@@ -130,6 +136,10 @@ fn empty_metadata(has_id: bool, id: i64, path: *mut c_char) -> FFITrackMetadata 
         genres_len: 0,
         has_params: false,
         params: empty_params(),
+        volume: 1.0,
+        invalid: false,
+        color: ptr::null_mut(),
+        user_label: ptr::null_mut(),
     }
 }
 
@@ -140,7 +150,13 @@ pub(crate) fn track_to_ffi(track: &TrackVirtual) -> FFITrackMetadata {
 
     let Ok(meta) = track.get_metadata() else {
         let (has_id, id) = track.index_id().map_or((false, 0), |i| (true, i));
-        return empty_metadata(has_id, id, path);
+        return FFITrackMetadata {
+            volume: track.volume,
+            invalid: track.invalid,
+            color: opt_to_c(track.color.as_deref()),
+            user_label: opt_to_c(track.user_label.as_deref()),
+            ..empty_metadata(has_id, id, path)
+        };
     };
 
     let (has_id, id) = meta.id.map_or((false, 0), |i| (true, i));
@@ -173,6 +189,10 @@ pub(crate) fn track_to_ffi(track: &TrackVirtual) -> FFITrackMetadata {
         genres_len,
         has_params,
         params,
+        volume: track.volume,
+        invalid: track.invalid,
+        color: opt_to_c(track.color.as_deref()),
+        user_label: opt_to_c(track.user_label.as_deref()),
     }
 }
 

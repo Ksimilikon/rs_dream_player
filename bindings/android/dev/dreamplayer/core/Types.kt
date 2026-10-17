@@ -26,6 +26,14 @@ data class TrackMeta(
     val bitrate: Int,
     val listenCount: Long,
     val coverArt: String?,
+    /** saved per-track volume (1.0 — default). */
+    val volume: Float,
+    /** the file is known-bad, playback is skipped. */
+    val invalid: Boolean,
+    /** color mark: red/pink/orange/green/blue/cyan/purple (null — none). */
+    val color: String?,
+    /** free-form user label. */
+    val label: String?,
 )
 
 /** playlist (`FFIPlaylist`). The name is its identifier. */

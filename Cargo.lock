@@ -51,6 +51,7 @@ version = "0.1.0"
 dependencies = [
  "api",
  "jni 0.22.4",
+ "ndk-context",
 ]
 
 [[package]]

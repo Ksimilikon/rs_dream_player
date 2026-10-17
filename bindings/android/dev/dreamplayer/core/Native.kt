@@ -19,8 +19,12 @@ object Native {
 
     // ── init ──
 
-    /** initializes the core. Call once before anything else. */
+    /**
+     * initializes the core. Call once before anything else. [context] — any
+     * context (its application context is kept): the audio backend needs it.
+     */
     @JvmStatic external fun init(
+        context: android.content.Context,
         cacheDir: String,
         configDir: String,
         dataDir: String,

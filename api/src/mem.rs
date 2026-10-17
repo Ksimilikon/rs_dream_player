@@ -39,6 +39,8 @@ unsafe fn free_metadata_fields(meta: &FFITrackMetadata) {
         idx_free_string(meta.title);
         idx_free_string(meta.album);
         idx_free_string(meta.params.cover_art);
+        idx_free_string(meta.color);
+        idx_free_string(meta.user_label);
         free_string_array(meta.artists, meta.artists_len);
         free_string_array(meta.genres, meta.genres_len);
     }

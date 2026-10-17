@@ -49,17 +49,41 @@ extern "C" fn on_track_end() {
 
 // ───────────────────────────────── init ─────────────────────────────────
 
+/// hands the JavaVM and the application context to `ndk_context` (once per
+/// process): the audio backend (cpal / AAudio) reads them from there and
+/// panics without them. A JNI library has no ndk-glue to do it.
+fn init_android_context(env: &mut jni::Env, context: &JObject) -> Result<()> {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if context.is_null() || DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Ok(());
+    }
+    let app = env
+        .call_method(context, jni_str!("getApplicationContext"), jni_sig!("()Landroid/content/Context;"), &[])?
+        .l()?;
+    let app = match app.is_null() {
+        true => env.new_global_ref(context)?,
+        false => env.new_global_ref(&app)?,
+    };
+    let vm = env.get_java_vm()?;
+    // the global ref is leaked on purpose: the context must outlive the core.
+    unsafe { ndk_context::initialize_android_context(vm.get_raw().cast(), app.into_raw().cast()) };
+    Ok(())
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_dreamplayer_core_Native_init<'c>(
     mut env: EnvUnowned<'c>,
     _class: JClass<'c>,
+    context: JObject<'c>,
     cache_dir: JString<'c>,
     config_dir: JString<'c>,
     data_dir: JString<'c>,
     music_dir: JString<'c>,
     need_db: bool,
 ) {
+    crate::util::install_panic_logger();
     run(&mut env, |env| {
+        init_android_context(env, &context)?;
         let dir = |s: &JString| -> Result<_> {
             Ok(cstring(&opt_string(env, s)?.unwrap_or_default()))
         };

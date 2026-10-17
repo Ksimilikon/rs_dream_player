@@ -41,11 +41,14 @@ fn track_meta<'l>(env: &mut Env<'l>, m: &idx::FFITrackMetadata) -> Result<JObjec
     let album = new_string(env, unsafe { c_string(m.album) }.as_deref())?;
     let genres = string_list(env, &unsafe { c_strings(m.genres, m.genres_len) })?;
     let cover = new_string(env, p.and_then(|p| unsafe { c_string(p.cover_art) }).as_deref())?;
+    let color = new_string(env, unsafe { c_string(m.color) }.as_deref())?;
+    let label = new_string(env, unsafe { c_string(m.user_label) }.as_deref())?;
     env.new_object(
         jni_str!("dev/dreamplayer/core/TrackMeta"),
         jni_sig!(
             "(Ljava/lang/Long;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;\
-             Ljava/lang/String;Ljava/util/List;JIIJLjava/lang/String;)V"
+             Ljava/lang/String;Ljava/util/List;JIIJLjava/lang/String;\
+             FZLjava/lang/String;Ljava/lang/String;)V"
         ),
         &[
             JValue::Object(&id),
@@ -59,6 +62,10 @@ fn track_meta<'l>(env: &mut Env<'l>, m: &idx::FFITrackMetadata) -> Result<JObjec
             JValue::Int(p.map_or(0, |p| p.bitrate as i32)),
             JValue::Long(p.map_or(0, |p| p.listen_count)),
             JValue::Object(&cover),
+            JValue::Float(m.volume),
+            JValue::Bool(m.invalid),
+            JValue::Object(&color),
+            JValue::Object(&label),
         ],
     )
 }

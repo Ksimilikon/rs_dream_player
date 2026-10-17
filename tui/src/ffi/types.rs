@@ -19,6 +19,10 @@ pub struct TrackMeta {
     pub bitrate: u32,
     pub listen_count: i64,
     pub cover_art: Option<String>,
+    pub volume: f32,
+    pub invalid: bool,
+    pub color: Option<String>,
+    pub label: Option<String>,
 }
 
 /// playlist (an owning copy of `FFIPlaylist`): name, track id order, cover.
@@ -84,6 +88,10 @@ impl TrackMeta {
             bitrate,
             listen_count,
             cover_art,
+            volume: m.volume,
+            invalid: m.invalid,
+            color: unsafe { opt_string(m.color) },
+            label: unsafe { opt_string(m.user_label) },
         }
     }
 

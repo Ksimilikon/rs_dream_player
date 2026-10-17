@@ -118,3 +118,25 @@ pub(crate) fn run<'c, T: Default + 'c>(
     env.with_env(f)
         .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
+
+unsafe extern "C" {
+    /// liblog (always present on Android, already linked by the audio backend).
+    fn __android_log_write(prio: i32, tag: *const c_char, text: *const c_char) -> i32;
+}
+
+/// installs (once) a panic hook that writes the panic message and location
+/// to logcat (tag `dream_player`). stderr goes nowhere on Android, so without
+/// it a panic in the core (which aborts across `extern "C"`) leaves no trace.
+pub(crate) fn install_panic_logger() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            const ANDROID_LOG_FATAL: i32 = 7;
+            let tag = cstring("dream_player");
+            let text = cstring(&format!("panic: {info}"));
+            unsafe { __android_log_write(ANDROID_LOG_FATAL, tag.as_ptr(), text.as_ptr()) };
+            prev(info);
+        }));
+    });
+}

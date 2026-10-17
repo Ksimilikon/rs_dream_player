@@ -11,7 +11,7 @@ members = [
   "storage",
   "tui",
   "notify_hub",
-  "core", "codec",
+  "core", "codec", "android_jni",
 ]
 resolver = "2"
 
@@ -23,6 +23,7 @@ storage = { path = "storage" }
 tui = { path = "tui" }
 core = { path = "core" }
 codec = { path = "codec" }
+android_jni = { path = "android_jni" }
 
 [lib]
 crate-type = ["cdylib", "staticlib"]
@@ -52,6 +53,11 @@ storage = { workspace = true, optional = true }
 #   cargo build                 -> core only (lib), no TUI
 #   cargo build --features cli  -> plus the binary with the TUI
 cli = ["dep:tui", "dep:clap", "dep:directories", "dep:serde", "dep:toml", "dep:storage"]
+
+# JNI bindings for Android (`dev.dreamplayer.core.Native`), linked into the
+# same .so as the core; not built for any other target.
+[target.'cfg(target_os = "android")'.dependencies]
+android_jni = { workspace = true }
 
 [dev-dependencies]
 storage = { workspace = true }

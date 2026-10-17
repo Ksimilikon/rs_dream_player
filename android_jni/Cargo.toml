@@ -1,0 +1,11 @@
+[package]
+name = "android_jni"
+version = "0.1.0"
+edition = "2024"
+
+# JNI bindings of the core for Android. The crate is empty on every other
+# target (`#![cfg(target_os = "android")]` in lib.rs), and its dependencies are
+# pulled only for Android, so desktop builds never compile or download them.
+[target.'cfg(target_os = "android")'.dependencies]
+api = { workspace = true }
+jni = "0.22.4"

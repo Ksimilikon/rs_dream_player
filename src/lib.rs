@@ -4,5 +4,11 @@
 //!
 //! The default build (`cargo build`) produces only this library — no TUI.
 //! The `cli` feature additionally builds the demo binary (`src/main.rs`).
+//!
+//! On Android the JNI bindings (`android_jni`, class
+//! `dev.dreamplayer.core.Native`) are linked into the same library.
 
 pub use api::*;
+
+#[cfg(target_os = "android")]
+pub use android_jni;

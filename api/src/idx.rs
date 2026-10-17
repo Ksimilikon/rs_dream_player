@@ -597,6 +597,57 @@ pub extern "C" fn idx_set_track_invalid(id: i64, invalid: bool) -> FFIIdxStatus 
     })
 }
 
+/// the "file is invalid" mark of several tracks in one transaction; unknown
+/// ids are skipped.
+///
+/// # Safety
+/// `ids` is null or an array of length `len`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn idx_set_tracks_invalid(
+    ids: *const i64,
+    len: usize,
+    invalid: bool,
+) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        let Some(ids) = (unsafe { crate::cdc::raw_slice(ids, len) }) else {
+            return FFIIdxStatus::NullPointer;
+        };
+        write(|db| db.set_tracks_invalid(ids, invalid))
+    })
+}
+
+/// adds the song files `paths` to the library in one transaction (the
+/// frontend finds them itself, see `idx_index_dir` for the core's own walk).
+/// Files that aren't music or can't be read are skipped; the number written
+/// goes to `out`.
+///
+/// # Safety
+/// `paths` is null or an array of `len` valid C strings (none null); `out` is
+/// a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn idx_add_tracks(
+    paths: *const *const c_char,
+    len: usize,
+    out: *mut u64,
+) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        unsafe {
+            with_out(out, 0, || {
+                let raw = crate::cdc::raw_slice(paths, len).ok_or(FFIIdxStatus::NullPointer)?;
+                let paths = raw
+                    .iter()
+                    .map(|&p| crate::ptr_to_path(p))
+                    .collect::<Result<Vec<_>, _>>()?;
+                with_db(|db| {
+                    db.add_tracks(&paths)
+                        .map(|n| n as u64)
+                        .map_err(|_| FFIIdxStatus::WriteFailed)
+                })
+            })
+        }
+    })
+}
+
 /// saved track volume.
 #[unsafe(no_mangle)]
 pub extern "C" fn idx_set_track_volume(id: i64, volume: f32) -> FFIIdxStatus {

@@ -263,9 +263,44 @@ impl Db {
     pub fn index_dir(&self, dir: &Path) -> Result<Playlist, Box<dyn Error>> {
         // a missing directory is not an error — just nothing to index.
         if dir.is_dir() {
+            // one commit for the whole walk, not one per statement.
+            let tx = self.conn.unchecked_transaction()?;
             self.index_dir_rec(dir)?;
+            tx.commit()?;
         }
         self.get_pool()
+    }
+
+    /// adds the song files `paths` to the db (tags are read as in
+    /// [`Self::index_dir`]) in one transaction. Files that aren't music or
+    /// can't be read are skipped; a path already in the db is updated.
+    /// Returns the number of files written.
+    pub fn add_tracks(&self, paths: &[PathBuf]) -> Result<usize, Box<dyn Error>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut added = 0;
+        for path in paths {
+            if let Ok(track) = TrackVirtual::from_file(path.clone(), false) {
+                upsert_track(&tx, &track, None)?;
+                added += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(added)
+    }
+
+    /// sets the "file is invalid" mark of tracks `ids` in one transaction.
+    /// Returns the number of tracks changed (unknown ids are skipped).
+    pub fn set_tracks_invalid(&self, ids: &[i64], invalid: bool) -> Result<usize, Box<dyn Error>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut changed = 0;
+        {
+            let mut stmt = tx.prepare("UPDATE tracks SET invalid = ?2 WHERE id = ?1")?;
+            for &id in ids {
+                changed += stmt.execute(params![id, invalid as i64])?;
+            }
+        }
+        tx.commit()?;
+        Ok(changed)
     }
 
     fn index_dir_rec(&self, dir: &Path) -> Result<(), Box<dyn Error>> {
@@ -1016,6 +1051,27 @@ mod tests {
             }),
         };
         TrackVirtual::new(0, path, metadata)
+    }
+
+    #[test]
+    fn add_tracks_skips_non_music_and_marks_invalid_in_batch() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        let song = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test_data/2.mp3");
+        let junk = dir.path().join("notes.mp3");
+        fs::write(&junk, "not audio").unwrap();
+
+        let added = db.add_tracks(&[song.clone(), junk, dir.path().join("missing.mp3")]).unwrap();
+        assert_eq!(added, 1, "only the real song is written");
+        // the same path again is an update, not a second row.
+        assert_eq!(db.add_tracks(&[song]).unwrap(), 1);
+        let pool = db.get_tracks(None, None, None, None).unwrap();
+        assert_eq!(pool.len(), 1);
+
+        let id = pool[0].index_id().unwrap();
+        assert_eq!(db.set_tracks_invalid(&[id, 9999], true).unwrap(), 1);
+        let pool = db.get_tracks(None, None, None, None).unwrap();
+        assert!(pool[0].invalid);
     }
 
     #[test]

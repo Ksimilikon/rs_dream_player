@@ -103,7 +103,11 @@ object Native {
     /** one track by id, or by [path] if it is not null (`NOT_FOUND` — none). */
     @JvmStatic external fun idxGetTrack(id: Long, path: String?): CoreResult<TrackMeta>
 
-    /** indexes [dir] (null — the music directory from [init]). */
+    /**
+     * indexes [dir] (null — the music directory from [init]): every file is
+     * re-read. A frontend that compares the folder with [idxGetTracks] itself
+     * should use [idxAddTracks] / [idxSetTracksInvalid] instead.
+     */
     @JvmStatic external fun idxIndexDir(dir: String?): Int
 
     /** null field — leave as is; artists are rewritten entirely. */
@@ -122,6 +126,16 @@ object Native {
     @JvmStatic external fun idxSetTrackPath(id: Long, path: String): Int
 
     @JvmStatic external fun idxSetTrackInvalid(id: Long, invalid: Boolean): Int
+    /** the invalid mark of several tracks in one transaction (unknown ids are skipped). */
+    @JvmStatic external fun idxSetTracksInvalid(ids: LongArray, invalid: Boolean): Int
+
+    /**
+     * adds song files found by the frontend in one transaction (tags are read
+     * by the core; a path already in the library is updated). Non-music /
+     * unreadable files are skipped; `value` — the number written.
+     */
+    @JvmStatic external fun idxAddTracks(paths: Array<String>): CoreResult<Long>
+
     @JvmStatic external fun idxSetTrackVolume(id: Long, volume: Float): Int
     @JvmStatic external fun idxRemoveTrack(id: Long): Int
 

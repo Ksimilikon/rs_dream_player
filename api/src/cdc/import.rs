@@ -36,7 +36,6 @@ use codec::{Playlist, Song};
 use storage::{Db, db::PlaylistHashRow, traits::indexator::Indexator};
 
 use super::{FFICdcStatus, raw_slice};
-use crate::GLOBAL_STATE;
 
 /// what kind of file has to be written. `repr(u32)`: never renumber.
 #[repr(u32)]
@@ -111,33 +110,35 @@ pub unsafe extern "C" fn cdc_import_prepare(
     out_session: *mut *mut ImportSession,
     out_files: *mut FFIImportFiles,
 ) -> FFICdcStatus {
-    if out_session.is_null() || out_files.is_null() {
-        return FFICdcStatus::NullPointer;
-    }
-    unsafe {
-        *out_session = ptr::null_mut();
-        *out_files = FFIImportFiles {
-            ptr: ptr::null(),
-            len: 0,
-        };
-    }
-    let Some(bytes) = (unsafe { raw_slice(bytes, len) }) else {
-        return FFICdcStatus::NullPointer;
-    };
-    match prepare(&Global, bytes, force) {
-        Ok(session) => {
-            let session = Box::new(session);
-            unsafe {
-                *out_files = FFIImportFiles {
-                    ptr: session.files.as_ptr(),
-                    len: session.files.len(),
-                };
-                *out_session = Box::into_raw(session);
-            }
-            FFICdcStatus::Ok
+    crate::panic::guard(|| {
+        if out_session.is_null() || out_files.is_null() {
+            return FFICdcStatus::NullPointer;
         }
-        Err(e) => e,
-    }
+        unsafe {
+            *out_session = ptr::null_mut();
+            *out_files = FFIImportFiles {
+                ptr: ptr::null(),
+                len: 0,
+            };
+        }
+        let Some(bytes) = (unsafe { raw_slice(bytes, len) }) else {
+            return FFICdcStatus::NullPointer;
+        };
+        match prepare(&Global, bytes, force) {
+            Ok(session) => {
+                let session = Box::new(session);
+                unsafe {
+                    *out_files = FFIImportFiles {
+                        ptr: session.files.as_ptr(),
+                        len: session.files.len(),
+                    };
+                    *out_session = Box::into_raw(session);
+                }
+                FFICdcStatus::Ok
+            }
+            Err(e) => e,
+        }
+    })
 }
 
 /// step 3: saves the import into the db. `paths[i]` is the path where
@@ -159,27 +160,29 @@ pub unsafe extern "C" fn cdc_import_commit(
     paths: *const *const c_char,
     paths_len: usize,
 ) -> FFICdcStatus {
-    if session.is_null() {
-        return FFICdcStatus::NullPointer;
-    }
-    let session = unsafe { Box::from_raw(session) };
-    let Some(raw) = (unsafe { raw_slice(paths, paths_len) }) else {
-        return FFICdcStatus::NullPointer;
-    };
-    let mut parsed = Vec::with_capacity(raw.len());
-    for &p in raw {
-        parsed.push(match p.is_null() {
-            true => None,
-            false => match crate::ptr_to_path(p) {
-                Ok(path) => Some(path),
-                Err(_) => return FFICdcStatus::InvalidUtf8,
-            },
-        });
-    }
-    match commit(&Global, &session, &parsed) {
-        Ok(()) => FFICdcStatus::Ok,
-        Err(e) => e,
-    }
+    crate::panic::guard(|| {
+        if session.is_null() {
+            return FFICdcStatus::NullPointer;
+        }
+        let session = unsafe { Box::from_raw(session) };
+        let Some(raw) = (unsafe { raw_slice(paths, paths_len) }) else {
+            return FFICdcStatus::NullPointer;
+        };
+        let mut parsed = Vec::with_capacity(raw.len());
+        for &p in raw {
+            parsed.push(match p.is_null() {
+                true => None,
+                false => match crate::ptr_to_path(p) {
+                    Ok(path) => Some(path),
+                    Err(_) => return FFICdcStatus::InvalidUtf8,
+                },
+            });
+        }
+        match commit(&Global, &session, &parsed) {
+            Ok(()) => FFICdcStatus::Ok,
+            Err(e) => e,
+        }
+    })
 }
 
 /// cancels the import and frees the session. Null is ignored. The frontend
@@ -190,9 +193,11 @@ pub unsafe extern "C" fn cdc_import_commit(
 /// null).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cdc_import_cancel(session: *mut ImportSession) {
-    if !session.is_null() {
-        drop(unsafe { Box::from_raw(session) });
-    }
+    crate::panic::guard_unit(|| {
+        if !session.is_null() {
+            drop(unsafe { Box::from_raw(session) });
+        }
+    })
 }
 
 // ─────────────────────────────── logic ───────────────────────────────
@@ -207,7 +212,7 @@ struct Global;
 
 impl Store for Global {
     fn with<R>(&self, f: impl FnOnce(&Db) -> Result<R, FFICdcStatus>) -> Result<R, FFICdcStatus> {
-        let guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
+        let guard = crate::core().ok_or(FFICdcStatus::NotInitialized)?;
         f(guard.get_db().ok_or(FFICdcStatus::NoDatabase)?)
     }
 }

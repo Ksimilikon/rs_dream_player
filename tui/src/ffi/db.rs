@@ -5,7 +5,7 @@
 use std::ffi::CString;
 use std::ptr;
 
-use api::idx;
+use api::idx::{self, FFIIdxStatus};
 use api::mem;
 
 use super::types::{PlaylistInfo, TrackMeta};
@@ -24,11 +24,23 @@ fn as_ptr(c: &Option<CString>) -> *const std::os::raw::c_char {
     c.as_ref().map_or(ptr::null(), |c| c.as_ptr())
 }
 
+/// `true` for `Ok`. The TUI shows failed writes as "not saved"; the exact
+/// code is not shown.
+fn ok(st: FFIIdxStatus) -> bool {
+    st == FFIIdxStatus::Ok
+}
+
 // ───────────────────────────── reads ─────────────────────────────
 
-/// every library playlist.
+/// every library playlist (empty on error).
 pub fn get_playlists() -> Vec<PlaylistInfo> {
-    let list = idx::idx_get_playlists();
+    let mut list = idx::FFIPlaylistsList {
+        ptr: ptr::null_mut(),
+        len: 0,
+    };
+    if !ok(unsafe { idx::idx_get_playlists(&mut list) }) {
+        return Vec::new();
+    }
     let out = if list.ptr.is_null() {
         Vec::new()
     } else {
@@ -41,28 +53,39 @@ pub fn get_playlists() -> Vec<PlaylistInfo> {
     out
 }
 
-/// the whole library track pool.
+/// the whole library track pool (empty on error).
 pub fn get_tracks() -> Vec<TrackMeta> {
-    collect_tracks(idx::idx_get_tracks())
+    collect_tracks(|out| unsafe { idx::idx_get_tracks(out) })
 }
 
-/// tracks of a playlist by its id (in playlist order).
+/// tracks of a playlist by its id, in playlist order (empty on error).
 pub fn get_playlist_tracks(id: i64) -> Vec<TrackMeta> {
-    collect_tracks(idx::idx_get_playlist_tracks(id))
+    collect_tracks(|out| unsafe { idx::idx_get_playlist_tracks(id, out) })
 }
 
 /// metadata of one track by id or path (the path wins if given).
 pub fn get_track(id: i64, path: Option<&str>) -> Option<TrackMeta> {
     let path_c = opt_cstr(path);
-    let meta = unsafe { idx::idx_get_track(id, as_ptr(&path_c)) };
-    let found = meta.has_id || !meta.title.is_null() || !meta.path.is_null();
-    let out = found.then(|| unsafe { TrackMeta::from_ffi(&meta) });
+    let mut meta = std::mem::MaybeUninit::uninit();
+    if !ok(unsafe { idx::idx_get_track(id, as_ptr(&path_c), meta.as_mut_ptr()) }) {
+        // on error the core still writes empty metadata; nothing to free.
+        return None;
+    }
+    let meta = unsafe { meta.assume_init() };
+    let out = unsafe { TrackMeta::from_ffi(&meta) };
     unsafe { mem::idx_free_track_metadata(meta) };
-    out
+    Some(out)
 }
 
 /// common `FFITracksList` -> owning Vec conversion, freeing the buffer.
-fn collect_tracks(list: idx::FFITracksList) -> Vec<TrackMeta> {
+fn collect_tracks(get: impl FnOnce(*mut idx::FFITracksList) -> FFIIdxStatus) -> Vec<TrackMeta> {
+    let mut list = idx::FFITracksList {
+        ptr: ptr::null_mut(),
+        len: 0,
+    };
+    if !ok(get(&mut list)) {
+        return Vec::new();
+    }
     let out = if list.ptr.is_null() {
         Vec::new()
     } else {
@@ -80,7 +103,7 @@ fn collect_tracks(list: idx::FFITracksList) -> Vec<TrackMeta> {
 /// indexes a directory (None -> the music directory from the configuration).
 pub fn index_dir(dir: Option<&str>) -> bool {
     let c = opt_cstr(dir);
-    unsafe { idx::idx_index_dir(as_ptr(&c)) }
+    ok(unsafe { idx::idx_index_dir(as_ptr(&c)) })
 }
 
 /// edits the title and/or the artist list (None — leave the field alone).
@@ -95,64 +118,62 @@ pub fn set_track_meta(id: i64, title: Option<&str>, artists: Option<&[String]>) 
         Some(v) => (v.as_ptr(), v.len()),
         None => (ptr::null(), 0),
     };
-    unsafe { idx::idx_set_track_meta(id, as_ptr(&title_c), aptr, alen) }
+    ok(unsafe { idx::idx_set_track_meta(id, as_ptr(&title_c), aptr, alen) })
 }
 
 /// album (None -> clear).
 pub fn set_track_album(id: i64, album: Option<&str>) -> bool {
     let c = opt_cstr(album);
-    unsafe { idx::idx_set_track_album(id, as_ptr(&c)) }
+    ok(unsafe { idx::idx_set_track_album(id, as_ptr(&c)) })
 }
 
 /// genres (rewrite entirely; empty -> clear).
 pub fn set_track_genres(id: i64, genres: &[String]) -> bool {
     let cs: Vec<CString> = genres.iter().map(|s| cstr(s)).collect();
     let ptrs: Vec<*const std::os::raw::c_char> = cs.iter().map(|c| c.as_ptr()).collect();
-    unsafe { idx::idx_set_track_genres(id, ptrs.as_ptr(), ptrs.len()) }
+    ok(unsafe { idx::idx_set_track_genres(id, ptrs.as_ptr(), ptrs.len()) })
 }
 
 /// cover path (None -> clear).
 pub fn set_track_cover(id: i64, cover_path: Option<&str>) -> bool {
     let c = opt_cstr(cover_path);
-    unsafe { idx::idx_set_track_cover(id, as_ptr(&c)) }
+    ok(unsafe { idx::idx_set_track_cover(id, as_ptr(&c)) })
 }
 
 /// color label (None -> clear).
 pub fn set_track_color(id: i64, color: Option<&str>) -> bool {
     let c = opt_cstr(color);
-    unsafe { idx::idx_set_track_color(id, as_ptr(&c)) }
+    ok(unsafe { idx::idx_set_track_color(id, as_ptr(&c)) })
 }
 
 /// text label (None -> clear).
 pub fn set_track_label(id: i64, label: Option<&str>) -> bool {
     let c = opt_cstr(label);
-    unsafe { idx::idx_set_track_label(id, as_ptr(&c)) }
+    ok(unsafe { idx::idx_set_track_label(id, as_ptr(&c)) })
 }
 
 pub fn set_track_invalid(id: i64, invalid: bool) -> bool {
-    idx::idx_set_track_invalid(id, invalid)
+    ok(idx::idx_set_track_invalid(id, invalid))
 }
 
 pub fn set_track_volume(id: i64, volume: f32) -> bool {
-    idx::idx_set_track_volume(id, volume)
+    ok(idx::idx_set_track_volume(id, volume))
 }
 
 /// new track file path.
 pub fn set_track_path(id: i64, path: &str) -> bool {
     let c = cstr(path);
-    unsafe { idx::idx_set_track_path(id, c.as_ptr()) }
+    ok(unsafe { idx::idx_set_track_path(id, c.as_ptr()) })
 }
 
 pub fn remove_track(id: i64) -> bool {
-    idx::idx_remove_track(id)
+    ok(idx::idx_remove_track(id))
 }
 
 /// removes every invalid track; returns the number removed (None — error).
 pub fn remove_invalid_tracks() -> Option<usize> {
-    match idx::idx_remove_invalid_tracks() {
-        n if n >= 0 => Some(n as usize),
-        _ => None,
-    }
+    let mut n = 0u64;
+    ok(unsafe { idx::idx_remove_invalid_tracks(&mut n) }).then_some(n as usize)
 }
 
 /// creates / updates playlist `name` from tracks `ids` (in this order).
@@ -164,11 +185,11 @@ pub fn save_playlist(name: &str, ids: &[i64], cover: Option<&str>) -> bool {
     } else {
         (ids.as_ptr(), ids.len())
     };
-    unsafe { idx::idx_save_playlist(name_c.as_ptr(), iptr, ilen, as_ptr(&cover_c)) }
+    ok(unsafe { idx::idx_save_playlist(name_c.as_ptr(), iptr, ilen, as_ptr(&cover_c)) })
 }
 
 /// removes a playlist by name.
 pub fn remove_playlist(name: &str) -> bool {
     let c = cstr(name);
-    unsafe { idx::idx_remove_playlist(c.as_ptr()) }
+    ok(unsafe { idx::idx_remove_playlist(c.as_ptr()) })
 }

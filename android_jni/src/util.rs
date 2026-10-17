@@ -66,6 +66,43 @@ pub(crate) fn boxed_long<'l>(env: &mut Env<'l>, v: Option<i64>) -> Result<JObjec
     .l()
 }
 
+/// `bool` -> `java.lang.Boolean`.
+pub(crate) fn boxed_bool<'l>(env: &mut Env<'l>, v: bool) -> Result<JObject<'l>> {
+    env.call_static_method(
+        jni_str!("java/lang/Boolean"),
+        jni_str!("valueOf"),
+        jni_sig!("(Z)Ljava/lang/Boolean;"),
+        &[JValue::Bool(v)],
+    )?
+    .l()
+}
+
+/// `f32` -> `java.lang.Float`.
+pub(crate) fn boxed_float<'l>(env: &mut Env<'l>, v: f32) -> Result<JObject<'l>> {
+    env.call_static_method(
+        jni_str!("java/lang/Float"),
+        jni_str!("valueOf"),
+        jni_sig!("(F)Ljava/lang/Float;"),
+        &[JValue::Float(v)],
+    )?
+    .l()
+}
+
+/// a status code + a value -> Kotlin `CoreResult<T>` (generic, so the value
+/// is always an object: primitives go boxed). The value must be null unless
+/// the status is ok.
+pub(crate) fn core_result<'l>(
+    env: &mut Env<'l>,
+    status: i32,
+    value: &JObject<'l>,
+) -> Result<JObject<'l>> {
+    env.new_object(
+        jni_str!("dev/dreamplayer/core/CoreResult"),
+        jni_sig!("(ILjava/lang/Object;)V"),
+        &[JValue::Int(status), JValue::Object(value)],
+    )
+}
+
 /// objects -> `java.util.List` (Kotlin `List<T>`), via `Arrays.asList`.
 pub(crate) fn list<'l>(env: &mut Env<'l>, items: Vec<JObject<'l>>) -> Result<JObject<'l>> {
     let array = env.new_object_array(
@@ -125,8 +162,9 @@ unsafe extern "C" {
 }
 
 /// installs (once) a panic hook that writes the panic message and location
-/// to logcat (tag `dream_player`). stderr goes nowhere on Android, so without
-/// it a panic in the core (which aborts across `extern "C"`) leaves no trace.
+/// to logcat (tag `dream_player`), then passes it on to the core hook
+/// (counter, last message, `core_panic.log`). stderr goes nowhere on Android,
+/// so without it a panic in the core would only be seen in that file.
 pub(crate) fn install_panic_logger() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {

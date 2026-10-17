@@ -7,6 +7,18 @@ package dev.dreamplayer.core
 /** packet format version written by default (`codec::Version::V0_1`). */
 const val PACKET_VERSION: Int = 1
 
+/**
+ * result of a call that returns a value: [value] is set only when [status] is
+ * 0 (OK) — except where a function documents a null value on OK. [status] is
+ * a code of that function's subsystem ([EngineStatus], [IdxStatus]).
+ */
+data class CoreResult<T>(
+    val status: Int,
+    val value: T?,
+) {
+    val isOk: Boolean get() = status == 0
+}
+
 /** end-of-track listener; called on the core audio thread. */
 fun interface TrackEndListener {
     fun onTrackEnd()
@@ -128,4 +140,59 @@ object CdcStatus {
     const val PLAYLIST_NOT_FOUND = 205
     const val WRITE_FAILED = 206
     const val INVALID_ARGUMENT = 207
+    const val NOT_INITIALIZED = 208
+    /** the core panicked; see [Native.coreLastPanic]. */
+    const val PANIC = 209
+}
+
+/** status codes of [Native.init] (`api::FFIInitStatus`). */
+object InitStatus {
+    const val OK = 0
+    const val NULL_POINTER = 1
+    const val INVALID_UTF8 = 2
+    /** already initialized; the first instance stays (not a failure). */
+    const val ALREADY_INITIALIZED = 3
+    const val DB_FAILED = 4
+    const val AUDIO_FAILED = 5
+    /** the core panicked; see [Native.coreLastPanic]. */
+    const val PANIC = 6
+}
+
+/** status codes of the `engine*` functions (`api::player::FFIEngineStatus`). */
+object EngineStatus {
+    const val OK = 0
+    const val NOT_INITIALIZED = 1
+    const val NULL_POINTER = 2
+    const val INVALID_UTF8 = 3
+    const val NO_DATABASE = 4
+    const val READ_FAILED = 5
+    const val TRACK_NOT_FOUND = 6
+    /** the track file can't be read / is not audio. */
+    const val LOAD_FAILED = 7
+    /** the engine can't decode the track. */
+    const val PLAYBACK_FAILED = 8
+    const val SEEK_FAILED = 9
+    /** no output device with this name, or it failed to start. */
+    const val DEVICE_FAILED = 10
+    /** the value was applied, but the config couldn't be saved. */
+    const val CONFIG_WRITE_FAILED = 11
+    /** the core panicked; see [Native.coreLastPanic]. */
+    const val PANIC = 12
+}
+
+/** status codes of the `idx*` functions (`api::idx::FFIIdxStatus`). */
+object IdxStatus {
+    const val OK = 0
+    const val NOT_INITIALIZED = 1
+    const val NULL_POINTER = 2
+    const val INVALID_UTF8 = 3
+    const val NO_DATABASE = 4
+    /** no track / playlist with this id / path / name. */
+    const val NOT_FOUND = 5
+    const val READ_FAILED = 6
+    const val WRITE_FAILED = 7
+    /** indexing failed (unreadable directory or db error). */
+    const val INDEX_FAILED = 8
+    /** the core panicked; see [Native.coreLastPanic]. */
+    const val PANIC = 9
 }

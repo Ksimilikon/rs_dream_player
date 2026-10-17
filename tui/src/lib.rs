@@ -27,16 +27,21 @@ pub struct Dirs<'a> {
 /// initializes the core, indexes the music directory and starts the
 /// interface. Takes over the current thread until the user quits.
 pub fn run(dirs: Dirs) -> std::io::Result<()> {
+    // a panic must not "take down" the console: restore the terminal and write
+    // the cause to a log file (the console may close on Windows — the log stays).
+    // Installed BEFORE the first core call: the core hook then wraps this one
+    // and keeps panics the core caught itself (returned as a `Panic` status)
+    // away from it, so they don't tear down the interface.
+    install_panic_hook(dirs.config.join("tui_panic.log"));
+
     // bring up the core (a db is needed). The core applies the master volume
     // from its own saved config — don't touch it here.
-    ffi::engine::init(dirs.cache, dirs.config, dirs.data, dirs.music, true);
+    ffi::engine::init(dirs.cache, dirs.config, dirs.data, dirs.music, true)
+        .map_err(|st| std::io::Error::other(format!("core init: {}", ffi::engine::describe_init(st))))?;
     // fill the index from the music directory (idempotent).
     ffi::db::index_dir(None);
 
     let mut terminal = ratatui::init();
-    // a panic must not "take down" the console: restore the terminal and write
-    // the cause to a log file (the console may close on Windows — the log stays).
-    install_panic_hook(dirs.config.join("tui_panic.log"));
     let mut app = app::App::new(dirs.music.to_path_buf());
     let res = app.run(&mut terminal);
     ratatui::restore();

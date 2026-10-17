@@ -3,12 +3,20 @@
 // return types. Copy this directory into the frontend as is.
 //
 // conventions:
-// - core failures are values (`false`, `null`, status codes), not exceptions;
-//   a JNI-level failure surfaces as a RuntimeException.
+// - core failures are status codes, not exceptions: every subsystem has its
+//   own set ([InitStatus], [EngineStatus], [IdxStatus], [CdcStatus]; 0 = OK).
+//   Calls without a result return the code as `Int`; calls with one return
+//   [CoreResult] (`value` is set only for OK). A JNI-level failure surfaces as
+//   a RuntimeException.
+// - the core never crashes on a panic: the call returns its subsystem's
+//   `PANIC` code. Every panic is counted ([Native.corePanicCount]), kept
+//   ([Native.coreLastPanic]) and appended to `<dataDir>/core_panic.log`, which
+//   also catches panics that do kill the process (core audio threads).
 // - packets and audio never go through the Java heap: pass file descriptors
 //   (`ParcelFileDescriptor.fd`). The descriptor is borrowed — the caller
 //   closes it after the call.
-// - `cdc*` functions return `CdcStatus` codes.
+// - `init` returns `InitStatus`, `engine*` — `EngineStatus`, `idx*` —
+//   `IdxStatus`, `cdc*` — `CdcStatus` codes.
 
 package dev.dreamplayer.core
 
@@ -22,6 +30,8 @@ object Native {
     /**
      * initializes the core. Call once before anything else. [context] — any
      * context (its application context is kept): the audio backend needs it.
+     * Returns an [InitStatus]; until it is OK every other call returns its
+     * `NOT_INITIALIZED`.
      */
     @JvmStatic external fun init(
         context: android.content.Context,
@@ -30,83 +40,98 @@ object Native {
         dataDir: String,
         musicDir: String,
         needDb: Boolean,
-    )
+    ): Int
 
     /** end-of-track listener (null — none). Called on the core audio thread. */
     @JvmStatic external fun setTrackEndListener(listener: TrackEndListener?)
 
-    // ── playback (engine_*) ──
+    // ── diagnostics ──
+
+    /** number of core panics in this process (caught and uncaught). */
+    @JvmStatic external fun corePanicCount(): Long
+
+    /** thread, location and message of the last core panic (null — none). */
+    @JvmStatic external fun coreLastPanic(): String?
+
+    // ── playback (engine_*), `EngineStatus` codes ──
 
     /** plays a library track by id. */
-    @JvmStatic external fun engineAddTrackId(id: Long): Boolean
+    @JvmStatic external fun engineAddTrackId(id: Long): Int
 
     /** plays a file by path (its library row is used if it exists). */
-    @JvmStatic external fun engineAddTrackPath(path: String): Boolean
+    @JvmStatic external fun engineAddTrackPath(path: String): Int
 
-    @JvmStatic external fun enginePlayPause()
-    @JvmStatic external fun enginePlay()
-    @JvmStatic external fun enginePause()
-    @JvmStatic external fun engineStop()
-    @JvmStatic external fun engineSetSpeed(speed: Float)
+    @JvmStatic external fun enginePlayPause(): Int
+    @JvmStatic external fun enginePlay(): Int
+    @JvmStatic external fun enginePause(): Int
+    @JvmStatic external fun engineStop(): Int
+    @JvmStatic external fun engineSetSpeed(speed: Float): Int
 
     /** seek to [sec] seconds. */
-    @JvmStatic external fun engineSetSeek(sec: Long)
+    @JvmStatic external fun engineSetSeek(sec: Long): Int
 
     /** current position in seconds. */
-    @JvmStatic external fun engineGetSeek(): Long
+    @JvmStatic external fun engineGetSeek(): CoreResult<Long>
 
     /** duration of the current track in seconds (0 — unknown). */
-    @JvmStatic external fun engineGetDuration(): Long
+    @JvmStatic external fun engineGetDuration(): CoreResult<Long>
 
-    @JvmStatic external fun engineIsPause(): Boolean
-    @JvmStatic external fun engineIsEmpty(): Boolean
-    @JvmStatic external fun engineSetVolumeTrack(volume: Float)
-    @JvmStatic external fun engineSetVolumeMaster(volume: Float)
-    @JvmStatic external fun engineGetVolumeTrack(): Float
-    @JvmStatic external fun engineGetVolumeMaster(): Float
-    @JvmStatic external fun engineGetOutputDevices(): List<String>
-    @JvmStatic external fun engineGetOutputDevice(): String?
-    @JvmStatic external fun engineSetOutputDevice(name: String): Boolean
+    @JvmStatic external fun engineIsPause(): CoreResult<Boolean>
+    @JvmStatic external fun engineIsEmpty(): CoreResult<Boolean>
+    @JvmStatic external fun engineSetVolumeTrack(volume: Float): Int
 
-    // ── library (idx_*) ──
+    /** applied and saved; `CONFIG_WRITE_FAILED` — applied, but not saved. */
+    @JvmStatic external fun engineSetVolumeMaster(volume: Float): Int
+    @JvmStatic external fun engineGetVolumeTrack(): CoreResult<Float>
+    @JvmStatic external fun engineGetVolumeMaster(): CoreResult<Float>
+    @JvmStatic external fun engineGetOutputDevices(): CoreResult<List<String>>
 
-    @JvmStatic external fun idxGetPlaylists(): List<PlaylistInfo>
-    @JvmStatic external fun idxGetTracks(): List<TrackMeta>
+    /** `value` is null on OK too when the device is unknown. */
+    @JvmStatic external fun engineGetOutputDevice(): CoreResult<String>
+    @JvmStatic external fun engineSetOutputDevice(name: String): Int
 
-    /** one track by id, or by [path] if it is not null. */
-    @JvmStatic external fun idxGetTrack(id: Long, path: String?): TrackMeta?
+    // ── library (idx_*), `IdxStatus` codes ──
+
+    @JvmStatic external fun idxGetPlaylists(): CoreResult<List<PlaylistInfo>>
+    @JvmStatic external fun idxGetTracks(): CoreResult<List<TrackMeta>>
+
+    /** one track by id, or by [path] if it is not null (`NOT_FOUND` — none). */
+    @JvmStatic external fun idxGetTrack(id: Long, path: String?): CoreResult<TrackMeta>
 
     /** indexes [dir] (null — the music directory from [init]). */
-    @JvmStatic external fun idxIndexDir(dir: String?): Boolean
+    @JvmStatic external fun idxIndexDir(dir: String?): Int
 
     /** null field — leave as is; artists are rewritten entirely. */
-    @JvmStatic external fun idxSetTrackMeta(id: Long, title: String?, artists: Array<String>?): Boolean
+    @JvmStatic external fun idxSetTrackMeta(id: Long, title: String?, artists: Array<String>?): Int
 
     /** genres are rewritten entirely; null / empty — cleared. */
-    @JvmStatic external fun idxSetTrackGenres(id: Long, genres: Array<String>?): Boolean
+    @JvmStatic external fun idxSetTrackGenres(id: Long, genres: Array<String>?): Int
 
     // null clears the field.
-    @JvmStatic external fun idxSetTrackAlbum(id: Long, album: String?): Boolean
-    @JvmStatic external fun idxSetTrackCover(id: Long, coverPath: String?): Boolean
-    @JvmStatic external fun idxSetTrackColor(id: Long, color: String?): Boolean
-    @JvmStatic external fun idxSetTrackLabel(id: Long, label: String?): Boolean
+    @JvmStatic external fun idxSetTrackAlbum(id: Long, album: String?): Int
+    @JvmStatic external fun idxSetTrackCover(id: Long, coverPath: String?): Int
+    @JvmStatic external fun idxSetTrackColor(id: Long, color: String?): Int
+    @JvmStatic external fun idxSetTrackLabel(id: Long, label: String?): Int
 
     /** new file path after a rename on disk. */
-    @JvmStatic external fun idxSetTrackPath(id: Long, path: String): Boolean
+    @JvmStatic external fun idxSetTrackPath(id: Long, path: String): Int
 
-    @JvmStatic external fun idxSetTrackInvalid(id: Long, invalid: Boolean): Boolean
-    @JvmStatic external fun idxSetTrackVolume(id: Long, volume: Float): Boolean
-    @JvmStatic external fun idxRemoveTrack(id: Long): Boolean
+    @JvmStatic external fun idxSetTrackInvalid(id: Long, invalid: Boolean): Int
+    @JvmStatic external fun idxSetTrackVolume(id: Long, volume: Float): Int
+    @JvmStatic external fun idxRemoveTrack(id: Long): Int
 
-    /** removes every invalid track; the number removed (-1 on error). */
-    @JvmStatic external fun idxRemoveInvalidTracks(): Long
+    /** removes every invalid track; `value` — the number removed. */
+    @JvmStatic external fun idxRemoveInvalidTracks(): CoreResult<Long>
 
-    /** creates / updates playlist [name] from [trackIds] in this order. */
-    @JvmStatic external fun idxSavePlaylist(name: String, trackIds: LongArray, cover: String?): Boolean
+    /**
+     * creates / updates playlist [name] from [trackIds] in this order (ids
+     * missing from the library are skipped).
+     */
+    @JvmStatic external fun idxSavePlaylist(name: String, trackIds: LongArray, cover: String?): Int
 
-    @JvmStatic external fun idxRemovePlaylist(name: String): Boolean
+    @JvmStatic external fun idxRemovePlaylist(name: String): Int
 
-    // ── packets (cdc_*) ──
+    // ── packets (cdc_*), `CdcStatus` codes ──
 
     /** snapshot of the whole library into [fd]. */
     @JvmStatic external fun cdcPackLibrary(

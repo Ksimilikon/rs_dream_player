@@ -1,11 +1,14 @@
-//! the index (`idx_*`): library reads and edits.
+//! the index (`idx_*`): library reads and edits. Statuses are
+//! `api::idx::FFIIdxStatus` codes as `Int`; reads return
+//! `CoreResult(status, value)`.
 
 #![allow(non_snake_case)]
 
 use std::ffi::{CString, c_char};
 use std::ptr;
 
-use api::{idx, mem};
+use api::idx::{self, FFIIdxStatus};
+use api::mem;
 use jni::{
     Env, EnvUnowned, JValue,
     errors::Result,
@@ -14,8 +17,14 @@ use jni::{
 };
 
 use crate::util::{
-    boxed_long, c_string, cstring, list, new_string, opt_ptr, opt_string, run, string_list,
+    boxed_long, c_string, core_result, cstring, list, new_string, opt_ptr, opt_string, run,
+    string_list,
 };
+
+/// status -> the `Int` returned to Kotlin.
+fn code(st: FFIIdxStatus) -> i32 {
+    st as u32 as i32
+}
 
 /// array of C strings owned by the core -> `Vec<String>`.
 ///
@@ -70,8 +79,20 @@ fn track_meta<'l>(env: &mut Env<'l>, m: &idx::FFITrackMetadata) -> Result<JObjec
     )
 }
 
-/// `FFITracksList` -> `List<TrackMeta>`, freeing the core buffer.
-fn tracks_list<'l>(env: &mut Env<'l>, l: idx::FFITracksList) -> Result<JObject<'l>> {
+/// an `idx_get_*(out)` track list -> `CoreResult<List<TrackMeta>>`, freeing
+/// the core buffer.
+fn tracks_result<'l>(
+    env: &mut Env<'l>,
+    get: impl FnOnce(*mut idx::FFITracksList) -> FFIIdxStatus,
+) -> Result<JObject<'l>> {
+    let mut l = idx::FFITracksList {
+        ptr: ptr::null_mut(),
+        len: 0,
+    };
+    let st = get(&mut l);
+    if st != FFIIdxStatus::Ok {
+        return core_result(env, code(st), &JObject::null());
+    }
     let metas = match l.ptr.is_null() {
         true => &[][..],
         false => unsafe { std::slice::from_raw_parts(l.ptr, l.len) },
@@ -83,7 +104,8 @@ fn tracks_list<'l>(env: &mut Env<'l>, l: idx::FFITracksList) -> Result<JObject<'
     });
     unsafe { mem::idx_free_tracks_list(l) };
     res?;
-    list(env, items)
+    let items = list(env, items)?;
+    core_result(env, code(st), &items)
 }
 
 /// Java `String[]` -> `Vec<CString>` (null array -> empty).
@@ -102,14 +124,21 @@ fn c_string_array(env: &mut Env, arr: &JObjectArray<JString>) -> Result<Vec<CStr
 
 // ───────────────────────────────── reads ─────────────────────────────────
 
-/// every playlist -> `List<PlaylistInfo>`.
+/// every playlist -> `CoreResult<List<PlaylistInfo>>`.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_dreamplayer_core_Native_idxGetPlaylists<'c>(
     mut env: EnvUnowned<'c>,
     _class: JClass<'c>,
 ) -> JObject<'c> {
     run(&mut env, |env| {
-        let l = idx::idx_get_playlists();
+        let mut l = idx::FFIPlaylistsList {
+            ptr: ptr::null_mut(),
+            len: 0,
+        };
+        let st = unsafe { idx::idx_get_playlists(&mut l) };
+        if st != FFIIdxStatus::Ok {
+            return core_result(env, code(st), &JObject::null());
+        }
         let pls = match l.ptr.is_null() {
             true => &[][..],
             false => unsafe { std::slice::from_raw_parts(l.ptr, l.len) },
@@ -144,20 +173,22 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxGetPlaylists<'c>(
         });
         unsafe { mem::idx_free_playlists_list(l) };
         res?;
-        list(env, items)
+        let items = list(env, items)?;
+        core_result(env, code(st), &items)
     })
 }
 
-/// the whole track pool -> `List<TrackMeta>`.
+/// the whole track pool -> `CoreResult<List<TrackMeta>>`.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_dreamplayer_core_Native_idxGetTracks<'c>(
     mut env: EnvUnowned<'c>,
     _class: JClass<'c>,
 ) -> JObject<'c> {
-    run(&mut env, |env| tracks_list(env, idx::idx_get_tracks()))
+    run(&mut env, |env| tracks_result(env, |out| unsafe { idx::idx_get_tracks(out) }))
 }
 
-/// one track by id or path (the path wins if not null) -> `TrackMeta?`.
+/// one track by id or path (the path wins if not null) ->
+/// `CoreResult<TrackMeta>` (`NOT_FOUND` — no such track).
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_dreamplayer_core_Native_idxGetTrack<'c>(
     mut env: EnvUnowned<'c>,
@@ -167,14 +198,16 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxGetTrack<'c>(
 ) -> JObject<'c> {
     run(&mut env, |env| {
         let path = opt_string(env, &path)?.map(|p| cstring(&p));
-        let m = unsafe { idx::idx_get_track(id, opt_ptr(&path)) };
-        let found = m.has_id || !m.title.is_null() || !m.path.is_null();
-        let res = match found {
-            true => track_meta(env, &m),
-            false => Ok(JObject::null()),
+        let mut m = std::mem::MaybeUninit::uninit();
+        let st = unsafe { idx::idx_get_track(id, opt_ptr(&path), m.as_mut_ptr()) };
+        // the core always fills a non-null out-parameter (empty on error).
+        let m = unsafe { m.assume_init() };
+        let res = match st {
+            FFIIdxStatus::Ok => track_meta(env, &m),
+            _ => Ok(JObject::null()),
         };
         unsafe { mem::idx_free_track_metadata(m) };
-        res
+        core_result(env, code(st), &res?)
     })
 }
 
@@ -186,10 +219,10 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxIndexDir<'c>(
     mut env: EnvUnowned<'c>,
     _class: JClass<'c>,
     dir: JString<'c>,
-) -> bool {
+) -> i32 {
     run(&mut env, |env| {
         let dir = opt_string(env, &dir)?.map(|d| cstring(&d));
-        Ok(unsafe { idx::idx_index_dir(opt_ptr(&dir)) })
+        Ok(code(unsafe { idx::idx_index_dir(opt_ptr(&dir)) }))
     })
 }
 
@@ -201,7 +234,7 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSetTrackMeta<'c>(
     id: i64,
     title: JString<'c>,
     artists: JObjectArray<'c, JString<'c>>,
-) -> bool {
+) -> i32 {
     run(&mut env, |env| {
         let title = opt_string(env, &title)?.map(|t| cstring(&t));
         let artists = match artists.is_null() {
@@ -214,7 +247,7 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSetTrackMeta<'c>(
             Some(p) => (p.as_ptr(), p.len()),
             None => (ptr::null(), 0),
         };
-        Ok(unsafe { idx::idx_set_track_meta(id, opt_ptr(&title), aptr, alen) })
+        Ok(code(unsafe { idx::idx_set_track_meta(id, opt_ptr(&title), aptr, alen) }))
     })
 }
 
@@ -225,15 +258,15 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSetTrackGenres<'c>(
     _class: JClass<'c>,
     id: i64,
     genres: JObjectArray<'c, JString<'c>>,
-) -> bool {
+) -> i32 {
     run(&mut env, |env| {
         let genres = c_string_array(env, &genres)?;
         let ptrs: Vec<*const c_char> = genres.iter().map(|c| c.as_ptr()).collect();
-        Ok(unsafe { idx::idx_set_track_genres(id, ptrs.as_ptr(), ptrs.len()) })
+        Ok(code(unsafe { idx::idx_set_track_genres(id, ptrs.as_ptr(), ptrs.len()) }))
     })
 }
 
-/// `(id, String?) -> Boolean` setters (null clears the field).
+/// `(id, String?) -> Int` setters (null clears the field).
 macro_rules! string_setter {
     ($($name:ident => $call:path;)*) => {$(
         #[unsafe(no_mangle)]
@@ -242,10 +275,10 @@ macro_rules! string_setter {
             _class: JClass<'c>,
             id: i64,
             value: JString<'c>,
-        ) -> bool {
+        ) -> i32 {
             run(&mut env, |env| {
                 let value = opt_string(env, &value)?.map(|v| cstring(&v));
-                Ok(unsafe { $call(id, opt_ptr(&value)) })
+                Ok(code(unsafe { $call(id, opt_ptr(&value)) }))
             })
         }
     )*};
@@ -265,13 +298,10 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSetTrackPath<'c>(
     _class: JClass<'c>,
     id: i64,
     path: JString<'c>,
-) -> bool {
+) -> i32 {
     run(&mut env, |env| {
-        let Some(path) = opt_string(env, &path)? else {
-            return Ok(false);
-        };
-        let c = cstring(&path);
-        Ok(unsafe { idx::idx_set_track_path(id, c.as_ptr()) })
+        let path = opt_string(env, &path)?.map(|p| cstring(&p));
+        Ok(code(unsafe { idx::idx_set_track_path(id, opt_ptr(&path)) }))
     })
 }
 
@@ -281,8 +311,8 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSetTrackInvalid<'c>(
     _class: JClass<'c>,
     id: i64,
     invalid: bool,
-) -> bool {
-    run(&mut env, |_| Ok(idx::idx_set_track_invalid(id, invalid)))
+) -> i32 {
+    run(&mut env, |_| Ok(code(idx::idx_set_track_invalid(id, invalid))))
 }
 
 #[unsafe(no_mangle)]
@@ -291,8 +321,8 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSetTrackVolume<'c>(
     _class: JClass<'c>,
     id: i64,
     volume: f32,
-) -> bool {
-    run(&mut env, |_| Ok(idx::idx_set_track_volume(id, volume)))
+) -> i32 {
+    run(&mut env, |_| Ok(code(idx::idx_set_track_volume(id, volume))))
 }
 
 #[unsafe(no_mangle)]
@@ -300,17 +330,25 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxRemoveTrack<'c>(
     mut env: EnvUnowned<'c>,
     _class: JClass<'c>,
     id: i64,
-) -> bool {
-    run(&mut env, |_| Ok(idx::idx_remove_track(id)))
+) -> i32 {
+    run(&mut env, |_| Ok(code(idx::idx_remove_track(id))))
 }
 
-/// removes every invalid track; the number removed (`-1` on error).
+/// removes every invalid track -> `CoreResult<Long>` (the number removed).
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_dreamplayer_core_Native_idxRemoveInvalidTracks<'c>(
     mut env: EnvUnowned<'c>,
     _class: JClass<'c>,
-) -> i64 {
-    run(&mut env, |_| Ok(idx::idx_remove_invalid_tracks()))
+) -> JObject<'c> {
+    run(&mut env, |env| {
+        let mut n = 0u64;
+        let st = unsafe { idx::idx_remove_invalid_tracks(&mut n) };
+        let value = match st {
+            FFIIdxStatus::Ok => boxed_long(env, Some(n as i64))?,
+            _ => JObject::null(),
+        };
+        core_result(env, code(st), &value)
+    })
 }
 
 /// creates / updates playlist `name` from track ids (in this order).
@@ -321,11 +359,9 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSavePlaylist<'c>(
     name: JString<'c>,
     track_ids: JLongArray<'c>,
     cover: JString<'c>,
-) -> bool {
+) -> i32 {
     run(&mut env, |env| {
-        let Some(name) = opt_string(env, &name)? else {
-            return Ok(false);
-        };
+        let name = opt_string(env, &name)?.map(|n| cstring(&n));
         let ids = match track_ids.is_null() {
             true => Vec::new(),
             false => {
@@ -334,9 +370,10 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSavePlaylist<'c>(
                 buf
             }
         };
-        let name = cstring(&name);
         let cover = opt_string(env, &cover)?.map(|c| cstring(&c));
-        Ok(unsafe { idx::idx_save_playlist(name.as_ptr(), ids.as_ptr(), ids.len(), opt_ptr(&cover)) })
+        Ok(code(unsafe {
+            idx::idx_save_playlist(opt_ptr(&name), ids.as_ptr(), ids.len(), opt_ptr(&cover))
+        }))
     })
 }
 
@@ -345,12 +382,9 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxRemovePlaylist<'c>(
     mut env: EnvUnowned<'c>,
     _class: JClass<'c>,
     name: JString<'c>,
-) -> bool {
+) -> i32 {
     run(&mut env, |env| {
-        let Some(name) = opt_string(env, &name)? else {
-            return Ok(false);
-        };
-        let c = cstring(&name);
-        Ok(unsafe { idx::idx_remove_playlist(c.as_ptr()) })
+        let name = opt_string(env, &name)?.map(|n| cstring(&n));
+        Ok(code(unsafe { idx::idx_remove_playlist(opt_ptr(&name)) }))
     })
 }

@@ -15,9 +15,11 @@ use crate::idx::{
 /// `s` is either null or a pointer obtained from `idx_*` and not freed yet.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_free_string(s: *mut c_char) {
-    if !s.is_null() {
-        unsafe { drop(CString::from_raw(s)) };
-    }
+    crate::panic::guard_unit(|| {
+        if !s.is_null() {
+            unsafe { drop(CString::from_raw(s)) };
+        }
+    })
 }
 
 /// frees a `*mut *mut c_char` of length `len` together with every string.
@@ -52,7 +54,9 @@ unsafe fn free_metadata_fields(meta: &FFITrackMetadata) {
 /// `meta` comes from `idx_*` and wasn't freed yet.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_free_track_metadata(meta: FFITrackMetadata) {
-    unsafe { free_metadata_fields(&meta) };
+    crate::panic::guard_unit(|| {
+        unsafe { free_metadata_fields(&meta) };
+    })
 }
 
 /// frees a track list (from `idx_get_tracks`/`idx_get_playlist_tracks`).
@@ -61,13 +65,15 @@ pub unsafe extern "C" fn idx_free_track_metadata(meta: FFITrackMetadata) {
 /// `list` comes from `idx_*` and wasn't freed yet.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_free_tracks_list(list: FFITracksList) {
-    if list.ptr.is_null() {
-        return;
-    }
-    let slice = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(list.ptr, list.len)) };
-    for meta in slice.iter() {
-        unsafe { free_metadata_fields(meta) };
-    }
+    crate::panic::guard_unit(|| {
+        if list.ptr.is_null() {
+            return;
+        }
+        let slice = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(list.ptr, list.len)) };
+        for meta in slice.iter() {
+            unsafe { free_metadata_fields(meta) };
+        }
+    })
 }
 
 /// frees the contents of one playlist (strings and the id array).
@@ -90,7 +96,9 @@ unsafe fn free_playlist_fields(pl: &FFIPlaylist) {
 /// `list` comes from `engine_*` and wasn't freed yet.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn engine_free_output_devices(list: FFIStringList) {
-    unsafe { free_string_array(list.ptr, list.len) };
+    crate::panic::guard_unit(|| {
+        unsafe { free_string_array(list.ptr, list.len) };
+    })
 }
 
 /// frees a playlist list (from `idx_get_playlists`).
@@ -99,13 +107,15 @@ pub unsafe extern "C" fn engine_free_output_devices(list: FFIStringList) {
 /// `list` comes from `idx_*` and wasn't freed yet.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_free_playlists_list(list: FFIPlaylistsList) {
-    if list.ptr.is_null() {
-        return;
-    }
-    let slice = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(list.ptr, list.len)) };
-    for pl in slice.iter() {
-        unsafe { free_playlist_fields(pl) };
-    }
+    crate::panic::guard_unit(|| {
+        if list.ptr.is_null() {
+            return;
+        }
+        let slice = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(list.ptr, list.len)) };
+        for pl in slice.iter() {
+            unsafe { free_playlist_fields(pl) };
+        }
+    })
 }
 
 /// frees packet bytes (from `cdc_encode`/`cdc_pack_*`). Null is ignored.
@@ -114,9 +124,11 @@ pub unsafe extern "C" fn idx_free_playlists_list(list: FFIPlaylistsList) {
 /// `ptr`/`len` come from `cdc_*` and weren't freed yet.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cdc_free_bytes(ptr: *mut u8, len: usize) {
-    if !ptr.is_null() {
-        unsafe { drop(Box::from_raw(std::slice::from_raw_parts_mut(ptr, len))) };
-    }
+    crate::panic::guard_unit(|| {
+        if !ptr.is_null() {
+            unsafe { drop(Box::from_raw(std::slice::from_raw_parts_mut(ptr, len))) };
+        }
+    })
 }
 
 /// frees an unpacked packet (from `cdc_decode`) together with its songs
@@ -126,35 +138,37 @@ pub unsafe extern "C" fn cdc_free_bytes(ptr: *mut u8, len: usize) {
 /// `packet` comes from `cdc_decode` and wasn't freed yet.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cdc_free_packet(packet: FFIPacket) {
-    if !packet.songs.is_null() {
-        let songs =
-            unsafe { Box::from_raw(std::slice::from_raw_parts_mut(packet.songs, packet.songs_len)) };
-        for song in songs.iter() {
-            unsafe {
-                idx_free_string(song.name);
-                cdc_free_bytes(song.data, song.data_len);
-            }
-        }
-    }
-    if !packet.playlists.is_null() {
-        let playlists = unsafe {
-            Box::from_raw(std::slice::from_raw_parts_mut(
-                packet.playlists,
-                packet.playlists_len,
-            ))
-        };
-        for pl in playlists.iter() {
-            unsafe {
-                idx_free_string(pl.name);
-                idx_free_string(pl.cover_name);
-                if !pl.tracks.is_null() {
-                    drop(Box::from_raw(std::slice::from_raw_parts_mut(
-                        pl.tracks,
-                        pl.tracks_len,
-                    )));
+    crate::panic::guard_unit(|| {
+        if !packet.songs.is_null() {
+            let songs =
+                unsafe { Box::from_raw(std::slice::from_raw_parts_mut(packet.songs, packet.songs_len)) };
+            for song in songs.iter() {
+                unsafe {
+                    idx_free_string(song.name);
+                    cdc_free_bytes(song.data, song.data_len);
                 }
-                cdc_free_bytes(pl.cover, pl.cover_len);
             }
         }
-    }
+        if !packet.playlists.is_null() {
+            let playlists = unsafe {
+                Box::from_raw(std::slice::from_raw_parts_mut(
+                    packet.playlists,
+                    packet.playlists_len,
+                ))
+            };
+            for pl in playlists.iter() {
+                unsafe {
+                    idx_free_string(pl.name);
+                    idx_free_string(pl.cover_name);
+                    if !pl.tracks.is_null() {
+                        drop(Box::from_raw(std::slice::from_raw_parts_mut(
+                            pl.tracks,
+                            pl.tracks_len,
+                        )));
+                    }
+                    cdc_free_bytes(pl.cover, pl.cover_len);
+                }
+            }
+        }
+    })
 }

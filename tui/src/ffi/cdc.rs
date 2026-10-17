@@ -54,6 +54,8 @@ pub fn describe(st: FFICdcStatus) -> &'static str {
         S::PlaylistNotFound => "some playlist is not in the library",
         S::WriteFailed => "failed to save the import to the database",
         S::InvalidArgument => "internal error: paths don't match the file list",
+        S::NotInitialized => "core is not initialized",
+        S::Panic => "core panicked (see core_panic.log in the data dir)",
     }
 }
 

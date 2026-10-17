@@ -32,7 +32,6 @@ use std::{
 use codec::{CodecError, Playlist, Song, Version};
 use storage::db::PlaylistHashRow;
 
-use super::GLOBAL_STATE;
 use crate::idx::{to_c, vec_to_raw};
 
 mod import;
@@ -94,6 +93,16 @@ pub enum FFICdcStatus {
     /// an argument is inconsistent with the others (e.g. the number of paths
     /// in `cdc_import_commit` differs from the files of `cdc_import_prepare`).
     InvalidArgument = 207,
+    /// `init` hasn't succeeded yet.
+    NotInitialized = 208,
+    /// the core panicked (see `core_last_panic`).
+    Panic = 209,
+}
+
+impl crate::panic::Status for FFICdcStatus {
+    const OK: Self = Self::Ok;
+    const NULL_POINTER: Self = Self::NullPointer;
+    const PANIC: Self = Self::Panic;
 }
 
 impl From<CodecError> for FFICdcStatus {
@@ -265,7 +274,7 @@ fn pack_from_db(
     // only the db query runs under the lock; audio / covers are read without
     // it, so the core (player) isn't held while gigabytes are read from disk.
     let (tracks, playlists) = {
-        let guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
+        let guard = crate::core().ok_or(FFICdcStatus::NotInitialized)?;
         let db = guard.get_db().ok_or(FFICdcStatus::NoDatabase)?;
         let read = |_| FFICdcStatus::ReadFailed;
         match selection {
@@ -562,29 +571,31 @@ pub unsafe extern "C" fn cdc_encode(
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
 ) -> FFICdcStatus {
-    if !unsafe { reset_bytes(out_ptr, out_len) } {
-        return FFICdcStatus::NullPointer;
-    }
-    let res = (|| {
-        let version = Version::try_from(version)?;
-        let songs = unsafe {
-            songs_from_c(songs_len, hashes, names, data, data_lens, with_audio, with_names)
-        }?;
-        let playlists = unsafe {
-            playlists_from_c(
-                playlists_len,
-                pl_names,
-                pl_tracks,
-                pl_tracks_lens,
-                pl_created_at,
-                pl_updated_at,
-                pl_covers,
-                with_covers,
-            )
-        }?;
-        Ok(codec::encode(version, &songs, &playlists)?)
-    })();
-    unsafe { finish_bytes(res, out_ptr, out_len) }
+    crate::panic::guard(|| {
+        if !unsafe { reset_bytes(out_ptr, out_len) } {
+            return FFICdcStatus::NullPointer;
+        }
+        let res = (|| {
+            let version = Version::try_from(version)?;
+            let songs = unsafe {
+                songs_from_c(songs_len, hashes, names, data, data_lens, with_audio, with_names)
+            }?;
+            let playlists = unsafe {
+                playlists_from_c(
+                    playlists_len,
+                    pl_names,
+                    pl_tracks,
+                    pl_tracks_lens,
+                    pl_created_at,
+                    pl_updated_at,
+                    pl_covers,
+                    with_covers,
+                )
+            }?;
+            Ok(codec::encode(version, &songs, &playlists)?)
+        })();
+        unsafe { finish_bytes(res, out_ptr, out_len) }
+    })
 }
 
 /// unpacks the packet `bytes[..len]` into `out`. With a flag off, the matching
@@ -602,42 +613,44 @@ pub unsafe extern "C" fn cdc_decode(
     with_covers: bool,
     out: *mut FFIPacket,
 ) -> FFICdcStatus {
-    if out.is_null() {
-        return FFICdcStatus::NullPointer;
-    }
-    unsafe { *out = FFIPacket::empty() };
-    let Some(bytes) = (unsafe { raw_slice(bytes, len) }) else {
-        return FFICdcStatus::NullPointer;
-    };
-
-    let packet = match codec::decode(bytes) {
-        Ok(p) => p,
-        Err(e) => return e.into(),
-    };
-    let (songs, songs_len) = vec_to_raw(
-        packet
-            .songs
-            .into_iter()
-            .map(|s| song_to_ffi(s, with_audio, with_names))
-            .collect::<Vec<_>>(),
-    );
-    let (playlists, playlists_len) = vec_to_raw(
-        packet
-            .playlists
-            .into_iter()
-            .map(|p| playlist_to_ffi(p, with_covers))
-            .collect::<Vec<_>>(),
-    );
-    unsafe {
-        *out = FFIPacket {
-            version: packet.version.into(),
-            songs,
-            songs_len,
-            playlists,
-            playlists_len,
+    crate::panic::guard(|| {
+        if out.is_null() {
+            return FFICdcStatus::NullPointer;
+        }
+        unsafe { *out = FFIPacket::empty() };
+        let Some(bytes) = (unsafe { raw_slice(bytes, len) }) else {
+            return FFICdcStatus::NullPointer;
         };
-    }
-    FFICdcStatus::Ok
+
+        let packet = match codec::decode(bytes) {
+            Ok(p) => p,
+            Err(e) => return e.into(),
+        };
+        let (songs, songs_len) = vec_to_raw(
+            packet
+                .songs
+                .into_iter()
+                .map(|s| song_to_ffi(s, with_audio, with_names))
+                .collect::<Vec<_>>(),
+        );
+        let (playlists, playlists_len) = vec_to_raw(
+            packet
+                .playlists
+                .into_iter()
+                .map(|p| playlist_to_ffi(p, with_covers))
+                .collect::<Vec<_>>(),
+        );
+        unsafe {
+            *out = FFIPacket {
+                version: packet.version.into(),
+                songs,
+                songs_len,
+                playlists,
+                playlists_len,
+            };
+        }
+        FFICdcStatus::Ok
+    })
 }
 
 /// snapshot packet of the whole db: all tracks (by ascending id) and all
@@ -654,11 +667,13 @@ pub unsafe extern "C" fn cdc_pack_library(
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
 ) -> FFICdcStatus {
-    if !unsafe { reset_bytes(out_ptr, out_len) } {
-        return FFICdcStatus::NullPointer;
-    }
-    let res = pack_from_db(version, Selection::Library, with_audio, with_names, with_covers);
-    unsafe { finish_bytes(res, out_ptr, out_len) }
+    crate::panic::guard(|| {
+        if !unsafe { reset_bytes(out_ptr, out_len) } {
+            return FFICdcStatus::NullPointer;
+        }
+        let res = pack_from_db(version, Selection::Library, with_audio, with_names, with_covers);
+        unsafe { finish_bytes(res, out_ptr, out_len) }
+    })
 }
 
 /// packet of db tracks by their ids (`ids[..ids_len]`, order is kept),
@@ -678,14 +693,16 @@ pub unsafe extern "C" fn cdc_pack_tracks(
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
 ) -> FFICdcStatus {
-    if !unsafe { reset_bytes(out_ptr, out_len) } {
-        return FFICdcStatus::NullPointer;
-    }
-    let Some(ids) = (unsafe { raw_slice(ids, ids_len) }) else {
-        return FFICdcStatus::NullPointer;
-    };
-    let res = pack_from_db(version, Selection::Tracks(ids), with_audio, with_names, false);
-    unsafe { finish_bytes(res, out_ptr, out_len) }
+    crate::panic::guard(|| {
+        if !unsafe { reset_bytes(out_ptr, out_len) } {
+            return FFICdcStatus::NullPointer;
+        }
+        let Some(ids) = (unsafe { raw_slice(ids, ids_len) }) else {
+            return FFICdcStatus::NullPointer;
+        };
+        let res = pack_from_db(version, Selection::Tracks(ids), with_audio, with_names, false);
+        unsafe { finish_bytes(res, out_ptr, out_len) }
+    })
 }
 
 /// packet of db playlists by their names (`names[..names_len]`, order is
@@ -707,24 +724,26 @@ pub unsafe extern "C" fn cdc_pack_playlists(
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
 ) -> FFICdcStatus {
-    if !unsafe { reset_bytes(out_ptr, out_len) } {
-        return FFICdcStatus::NullPointer;
-    }
-    let Some(raw) = (unsafe { raw_slice(names, names_len) }) else {
-        return FFICdcStatus::NullPointer;
-    };
-    let mut list = Vec::with_capacity(raw.len());
-    for &p in raw {
-        if p.is_null() {
+    crate::panic::guard(|| {
+        if !unsafe { reset_bytes(out_ptr, out_len) } {
             return FFICdcStatus::NullPointer;
         }
-        match unsafe { c_to_name(p) } {
-            Ok(name) => list.push(name),
-            Err(e) => return e,
+        let Some(raw) = (unsafe { raw_slice(names, names_len) }) else {
+            return FFICdcStatus::NullPointer;
+        };
+        let mut list = Vec::with_capacity(raw.len());
+        for &p in raw {
+            if p.is_null() {
+                return FFICdcStatus::NullPointer;
+            }
+            match unsafe { c_to_name(p) } {
+                Ok(name) => list.push(name),
+                Err(e) => return e,
+            }
         }
-    }
-    let res = pack_from_db(version, Selection::Playlists(&list), with_audio, with_names, with_covers);
-    unsafe { finish_bytes(res, out_ptr, out_len) }
+        let res = pack_from_db(version, Selection::Playlists(&list), with_audio, with_names, with_covers);
+        unsafe { finish_bytes(res, out_ptr, out_len) }
+    })
 }
 
 #[cfg(test)]

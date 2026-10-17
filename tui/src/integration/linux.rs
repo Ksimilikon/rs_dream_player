@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use zbus::{
@@ -68,7 +68,7 @@ fn run(cmd_tx: Sender<MediaCommand>, meta_rx: Receiver<MediaMeta>) -> Result<(),
             loop {
                 match meta_rx.try_recv() {
                     Ok(new) => {
-                        *data.lock().unwrap() = new;
+                        *data.lock().unwrap_or_else(PoisonError::into_inner) = new;
                         changed = true;
                     }
                     Err(TryRecvError::Empty) => break,
@@ -176,12 +176,13 @@ impl Player {
 
     #[zbus(property)]
     fn metadata(&self) -> HashMap<String, Value<'_>> {
-        let data = self.data.lock().unwrap();
+        let data = self.data.lock().unwrap_or_else(PoisonError::into_inner);
         let mut m = HashMap::new();
         // trackid is required and must be a D-Bus ObjectPath.
         m.insert(
             "mpris:trackid".to_string(),
-            Value::ObjectPath(ObjectPath::try_from("/org/mpris/MediaPlayer2/Track/0").unwrap()),
+            // a constant valid path: no runtime validation needed.
+            Value::ObjectPath(ObjectPath::from_static_str_unchecked("/org/mpris/MediaPlayer2/Track/0")),
         );
         m.insert("xesam:title".to_string(), Value::from(data.title.clone()));
         m.insert("xesam:artist".to_string(), Value::from(data.artists.clone()));

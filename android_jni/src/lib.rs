@@ -19,13 +19,19 @@
 //! - every function upgrades `EnvUnowned` with `with_env` (panics and JNI
 //!   errors don't unwind into the JVM) and resolves errors with
 //!   `ThrowRuntimeExAndDefault`: a JNI failure becomes a Java
-//!   `RuntimeException`, core failures are returned as values (`false`,
-//!   `null`, status codes) exactly like in the C ABI.
+//!   `RuntimeException`, core failures are returned as status codes exactly
+//!   like in the C ABI: as `Int` for calls without a result, otherwise inside
+//!   Kotlin `CoreResult(status, value)`.
+//! - the core never lets a panic out: it becomes the `PANIC` status of the
+//!   call; every panic is also counted (`corePanicCount`), kept
+//!   (`coreLastPanic`), written to logcat and to `<dataDir>/core_panic.log`.
 //! - large data (packets, audio files) never goes through the Java heap: it is
 //!   read from / written to file descriptors passed from Kotlin
 //!   (`ParcelFileDescriptor.fd`). The descriptor is borrowed — Kotlin closes it.
-//! - `cdc_*` statuses are returned as `Int` with the same codes as
-//!   `api::cdc::FFICdcStatus` (`CdcStatus` in Kotlin).
+//! - codes are the same numbers as the C ABI enums: `api::FFIInitStatus`,
+//!   `api::player::FFIEngineStatus`, `api::idx::FFIIdxStatus`,
+//!   `api::cdc::FFICdcStatus` (`InitStatus`, `EngineStatus`, `IdxStatus`,
+//!   `CdcStatus` in Kotlin).
 
 #![cfg(target_os = "android")]
 

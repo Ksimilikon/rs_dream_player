@@ -9,7 +9,8 @@ use std::ptr;
 use audio_structs::{playlist::Playlist, track_virtual::TrackVirtual};
 use storage::traits::indexator::Indexator;
 
-use super::GLOBAL_STATE;
+use crate::panic::Status;
+use crate::{CStrError, with_out};
 
 /// track metadata for the C ABI. Carries the song identifier: `id` (db row)
 /// and/or `path` (file path) — either can serve as the key (see
@@ -196,109 +197,220 @@ pub(crate) fn track_to_ffi(track: &TrackVirtual) -> FFITrackMetadata {
     }
 }
 
-// ───────────────────────────────── API ─────────────────────────────────────
+// ───────────────────────────────── status ──────────────────────────────────
 
-/// every library playlist. Free with `idx_free_playlists_list`.
-#[unsafe(no_mangle)]
-pub extern "C" fn idx_get_playlists() -> FFIPlaylistsList {
-    let guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
-    let playlists = guard
-        .get_db()
-        .and_then(|db| db.get_playlists(None, None).ok())
-        .unwrap_or_default();
-
-    let items: Vec<FFIPlaylist> = playlists
-        .iter()
-        .map(|playlist| {
-            let (tracks, tracks_len) = vec_to_raw(
-                playlist
-                    .get_tracks()
-                    .iter()
-                    .filter_map(TrackVirtual::index_id)
-                    .collect::<Vec<i64>>(),
-            );
-            let (has_updated_at, updated_at) =
-                playlist.get_updated_at().map_or((false, 0), |v| (true, v));
-            let (has_created_at, created_at) =
-                playlist.get_created_at().map_or((false, 0), |v| (true, v));
-
-            FFIPlaylist {
-                name: opt_to_c(playlist.get_name().as_deref()),
-                tracks,
-                tracks_len,
-                cover_art: opt_to_c(
-                    playlist.get_cover_art().map(|p| p.to_string_lossy()).as_deref(),
-                ),
-                has_updated_at,
-                updated_at,
-                has_created_at,
-                created_at,
-            }
-        })
-        .collect();
-
-    let (ptr, len) = vec_to_raw(items);
-    FFIPlaylistsList { ptr, len }
+/// result of any `idx_*` function (except `idx_free_*`). `repr(u32)`: never
+/// renumber, only append.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FFIIdxStatus {
+    Ok = 0,
+    /// `init` hasn't succeeded yet.
+    NotInitialized = 1,
+    /// a required pointer (argument or out-parameter) is null.
+    NullPointer = 2,
+    /// a string argument is not valid UTF-8.
+    InvalidUtf8 = 3,
+    /// the core runs without a db (`need_db == false`).
+    NoDatabase = 4,
+    /// no track / playlist with this id / path / name.
+    NotFound = 5,
+    /// a db query failed.
+    ReadFailed = 6,
+    /// a db write failed.
+    WriteFailed = 7,
+    /// indexing the directory failed (unreadable directory or db error).
+    IndexFailed = 8,
+    /// the core panicked (see `core_last_panic`).
+    Panic = 9,
 }
 
-/// the whole library track pool (metadata). Free with `idx_free_tracks_list`.
-#[unsafe(no_mangle)]
-pub extern "C" fn idx_get_tracks() -> FFITracksList {
-    tracks_list(|db| db.get_tracks(None, None, None, None).ok())
+impl Status for FFIIdxStatus {
+    const OK: Self = Self::Ok;
+    const NULL_POINTER: Self = Self::NullPointer;
+    const PANIC: Self = Self::Panic;
 }
 
-/// tracks of a playlist by its id. Free with `idx_free_tracks_list`.
-#[unsafe(no_mangle)]
-pub extern "C" fn idx_get_playlist_tracks(id_playlist: i64) -> FFITracksList {
-    tracks_list(|db| {
-        let playlist = db.get_playlists(None, Some(id_playlist)).ok()?.into_iter().next()?;
-        Some(playlist.into_tracks())
-    })
-}
-
-/// metadata of one track by identifier: `path` (if not null) takes priority
-/// over `id`. The result fields are zero if the track isn't found.
-///
-/// # Safety
-/// `path` is either null or a valid C pointer to a nul-terminated string.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn idx_get_track(id_track: i64, path: *const c_char) -> FFITrackMetadata {
-    let guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
-    let found = guard.get_db().and_then(|db| {
-        if !path.is_null()
-            && let Ok(p) = crate::ptr_to_path(path)
-        {
-            // lookup by path (exact match on a unique column).
-            db.get_tracks(None, None, None, None)
-                .ok()?
-                .into_iter()
-                .find(|t| t.get_path() == Some(p.as_path()))
-        } else {
-            db.get_tracks(None, None, Some(id_track), None)
-                .ok()?
-                .into_iter()
-                .next()
+impl From<CStrError> for FFIIdxStatus {
+    fn from(e: CStrError) -> Self {
+        match e {
+            CStrError::Null => Self::NullPointer,
+            CStrError::InvalidUtf8 => Self::InvalidUtf8,
         }
-    });
-
-    match found {
-        Some(track) => track_to_ffi(&track),
-        None => empty_metadata(false, 0, ptr::null_mut()),
     }
 }
 
-/// common assembly of an `FFITracksList` from a track selection.
-fn tracks_list(select: impl FnOnce(&storage::Db) -> Option<Vec<TrackVirtual>>) -> FFITracksList {
-    let guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
-    let items: Vec<FFITrackMetadata> = guard
-        .get_db()
-        .and_then(select)
-        .unwrap_or_default()
-        .iter()
-        .map(track_to_ffi)
-        .collect();
-    let (ptr, len) = vec_to_raw(items);
-    FFITracksList { ptr, len }
+/// runs `f` on the db under the lock.
+fn with_db<R>(f: impl FnOnce(&storage::Db) -> Result<R, FFIIdxStatus>) -> Result<R, FFIIdxStatus> {
+    let core = crate::core().ok_or(FFIIdxStatus::NotInitialized)?;
+    f(core.get_db().ok_or(FFIIdxStatus::NoDatabase)?)
+}
+
+/// a db write under the lock -> status; a db error becomes `WriteFailed`.
+fn write<R>(f: impl FnOnce(&storage::Db) -> Result<R, Box<dyn Error>>) -> FFIIdxStatus {
+    status(with_db(|db| f(db).map_err(|_| FFIIdxStatus::WriteFailed)))
+}
+
+fn status<R>(res: Result<R, FFIIdxStatus>) -> FFIIdxStatus {
+    match res {
+        Ok(_) => FFIIdxStatus::Ok,
+        Err(e) => e,
+    }
+}
+
+/// a db read error -> `ReadFailed`.
+fn read_err<E>(_: E) -> FFIIdxStatus {
+    FFIIdxStatus::ReadFailed
+}
+
+/// writes a list into `out` (an empty list on error).
+///
+/// # Safety
+/// `out` is null or valid for writes.
+unsafe fn out_tracks(
+    out: *mut FFITracksList,
+    select: impl FnOnce(&storage::Db) -> Result<Vec<TrackVirtual>, FFIIdxStatus>,
+) -> FFIIdxStatus {
+    let empty = FFITracksList {
+        ptr: ptr::null_mut(),
+        len: 0,
+    };
+    unsafe {
+        with_out(out, empty, || {
+            let items: Vec<FFITrackMetadata> = with_db(select)?.iter().map(track_to_ffi).collect();
+            let (ptr, len) = vec_to_raw(items);
+            Ok(FFITracksList { ptr, len })
+        })
+    }
+}
+
+fn playlist_to_ffi(playlist: &Playlist) -> FFIPlaylist {
+    let (tracks, tracks_len) = vec_to_raw(
+        playlist
+            .get_tracks()
+            .iter()
+            .filter_map(TrackVirtual::index_id)
+            .collect::<Vec<i64>>(),
+    );
+    let (has_updated_at, updated_at) = playlist.get_updated_at().map_or((false, 0), |v| (true, v));
+    let (has_created_at, created_at) = playlist.get_created_at().map_or((false, 0), |v| (true, v));
+
+    FFIPlaylist {
+        name: opt_to_c(playlist.get_name().as_deref()),
+        tracks,
+        tracks_len,
+        cover_art: opt_to_c(playlist.get_cover_art().map(|p| p.to_string_lossy()).as_deref()),
+        has_updated_at,
+        updated_at,
+        has_created_at,
+        created_at,
+    }
+}
+
+// ───────────────────────────────── API ─────────────────────────────────────
+
+/// every library playlist into `out`. Free with `idx_free_playlists_list`.
+///
+/// # Safety
+/// `out` is a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn idx_get_playlists(out: *mut FFIPlaylistsList) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        let empty = FFIPlaylistsList {
+            ptr: ptr::null_mut(),
+            len: 0,
+        };
+        unsafe {
+            with_out(out, empty, || {
+                let playlists = with_db(|db| db.get_playlists(None, None).map_err(read_err))?;
+                let items: Vec<FFIPlaylist> = playlists.iter().map(playlist_to_ffi).collect();
+                let (ptr, len) = vec_to_raw(items);
+                Ok(FFIPlaylistsList { ptr, len })
+            })
+        }
+    })
+}
+
+/// the whole library track pool (metadata) into `out`. Free with
+/// `idx_free_tracks_list`.
+///
+/// # Safety
+/// `out` is a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn idx_get_tracks(out: *mut FFITracksList) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        unsafe { out_tracks(out, |db| db.get_tracks(None, None, None, None).map_err(read_err)) }
+    })
+}
+
+/// tracks of a playlist by its id into `out`. `NotFound` — no such playlist.
+/// Free with `idx_free_tracks_list`.
+///
+/// # Safety
+/// `out` is a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn idx_get_playlist_tracks(
+    id_playlist: i64,
+    out: *mut FFITracksList,
+) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        unsafe {
+            out_tracks(out, |db| {
+                let playlist = db
+                    .get_playlists(None, Some(id_playlist))
+                    .map_err(read_err)?
+                    .into_iter()
+                    .next()
+                    .ok_or(FFIIdxStatus::NotFound)?;
+                Ok(playlist.into_tracks())
+            })
+        }
+    })
+}
+
+/// metadata of one track into `out` by identifier: `path` (if not null)
+/// takes priority over `id`. `NotFound` — no such track. Free with
+/// `idx_free_track_metadata`.
+///
+/// # Safety
+/// `path` is either null or a valid C pointer to a nul-terminated string;
+/// `out` is a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn idx_get_track(
+    id_track: i64,
+    path: *const c_char,
+    out: *mut FFITrackMetadata,
+) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        let empty = empty_metadata(false, 0, ptr::null_mut());
+        unsafe {
+            with_out(out, empty, || {
+                let path = match path.is_null() {
+                    true => None,
+                    false => Some(crate::ptr_to_path(path)?),
+                };
+                let found = with_db(|db| {
+                    Ok(match path {
+                        // lookup by path (exact match on a unique column).
+                        Some(p) => db
+                            .get_tracks(None, None, None, None)
+                            .map_err(read_err)?
+                            .into_iter()
+                            .find(|t| t.get_path() == Some(p.as_path())),
+                        None => db
+                            .get_tracks(None, None, Some(id_track), None)
+                            .map_err(read_err)?
+                            .into_iter()
+                            .next(),
+                    })
+                })?;
+                found
+                    .as_ref()
+                    .map(track_to_ffi)
+                    .ok_or(FFIIdxStatus::NotFound)
+            })
+        }
+    })
 }
 
 // ───────────────────────── writes (db mutations) ───────────────────────────
@@ -307,51 +419,66 @@ fn tracks_list(select: impl FnOnce(&storage::Db) -> Option<Vec<TrackVirtual>>) -
 ///
 /// # Safety
 /// `ptr` is either null or a valid C pointer to a nul-terminated string.
-pub(crate) unsafe fn c_to_opt_string(ptr: *const c_char) -> Option<String> {
-    if ptr.is_null() {
-        return None;
+pub(crate) unsafe fn c_to_opt_string(ptr: *const c_char) -> Result<Option<String>, CStrError> {
+    match ptr.is_null() {
+        true => Ok(None),
+        false => unsafe { c_to_string(ptr) }.map(Some),
     }
-    unsafe { CStr::from_ptr(ptr) }.to_str().ok().map(str::to_owned)
 }
 
-/// reads an array of C strings into `Vec<String>` (null/0 -> empty).
-unsafe fn c_to_strings(ptr: *const *const c_char, len: usize) -> Vec<String> {
+/// reads a required `*const c_char` into `String` (null -> `Null`).
+///
+/// # Safety
+/// `ptr` is either null or a valid C pointer to a nul-terminated string.
+pub(crate) unsafe fn c_to_string(ptr: *const c_char) -> Result<String, CStrError> {
+    if ptr.is_null() {
+        return Err(CStrError::Null);
+    }
+    match unsafe { CStr::from_ptr(ptr) }.to_str() {
+        Ok(s) => Ok(s.to_owned()),
+        Err(_) => Err(CStrError::InvalidUtf8),
+    }
+}
+
+/// reads an array of C strings into `Vec<String>` (null/0 -> empty). A null
+/// element is an error.
+unsafe fn c_to_strings(ptr: *const *const c_char, len: usize) -> Result<Vec<String>, CStrError> {
     if ptr.is_null() || len == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     unsafe { std::slice::from_raw_parts(ptr, len) }
         .iter()
-        .filter_map(|&p| unsafe { c_to_opt_string(p) })
+        .map(|&p| unsafe { c_to_string(p) })
         .collect()
 }
 
-/// runs an operation on the db under the lock; `None` if there is no db or on
-/// error.
-fn with_db<R>(f: impl FnOnce(&storage::Db) -> Result<R, Box<dyn Error>>) -> Option<R> {
-    let guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
-    f(guard.get_db()?).ok()
-}
-
 /// indexes directory `dir` into the library. `dir` == null -> the music
-/// directory from the configuration. Returns `true` on success.
+/// directory from the configuration.
 ///
 /// # Safety
 /// `dir` is null or a valid C string pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn idx_index_dir(dir: *const c_char) -> bool {
-    let guard = GLOBAL_STATE.get().unwrap().lock().unwrap();
-    let Some(db) = guard.get_db() else {
-        return false;
-    };
-    let dir = if dir.is_null() {
-        guard.get_dirs().music_dir.clone()
-    } else {
-        match crate::ptr_to_path(dir) {
-            Ok(p) => p,
-            Err(_) => return false,
+pub unsafe extern "C" fn idx_index_dir(dir: *const c_char) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        let dir = match dir.is_null() {
+            true => None,
+            false => match crate::ptr_to_path(dir) {
+                Ok(p) => Some(p),
+                Err(e) => return e.into(),
+            },
+        };
+        let Some(core) = crate::core() else {
+            return FFIIdxStatus::NotInitialized;
+        };
+        let Some(db) = core.get_db() else {
+            return FFIIdxStatus::NoDatabase;
+        };
+        let dir = dir.unwrap_or_else(|| core.get_dirs().music_dir.clone());
+        match db.index_dir(&dir) {
+            Ok(_) => FFIIdxStatus::Ok,
+            Err(_) => FFIIdxStatus::IndexFailed,
         }
-    };
-    db.index_dir(&dir).is_ok()
+    })
 }
 
 /// edits track metadata: `title` and/or the artist list. A null field is left
@@ -367,11 +494,21 @@ pub unsafe extern "C" fn idx_set_track_meta(
     title: *const c_char,
     artists: *const *const c_char,
     artists_len: usize,
-) -> bool {
-    let title = unsafe { c_to_opt_string(title) };
-    let artists =
-        (!artists.is_null()).then(|| unsafe { c_to_strings(artists, artists_len) });
-    with_db(|db| db.set_track_meta(id, title.as_deref(), artists.as_deref())).is_some()
+) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        let title = match unsafe { c_to_opt_string(title) } {
+            Ok(t) => t,
+            Err(e) => return e.into(),
+        };
+        let artists = match artists.is_null() {
+            true => None,
+            false => match unsafe { c_to_strings(artists, artists_len) } {
+                Ok(a) => Some(a),
+                Err(e) => return e.into(),
+            },
+        };
+        write(|db| db.set_track_meta(id, title.as_deref(), artists.as_deref()))
+    })
 }
 
 /// track album (null -> clear).
@@ -379,9 +516,13 @@ pub unsafe extern "C" fn idx_set_track_meta(
 /// # Safety
 /// `album` is null or a C string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn idx_set_track_album(id: i64, album: *const c_char) -> bool {
-    let album = unsafe { c_to_opt_string(album) };
-    with_db(|db| db.set_track_album(id, album.as_deref())).is_some()
+pub unsafe extern "C" fn idx_set_track_album(id: i64, album: *const c_char) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        match unsafe { c_to_opt_string(album) } {
+            Ok(album) => write(|db| db.set_track_album(id, album.as_deref())),
+            Err(e) => e.into(),
+        }
+    })
 }
 
 /// track genres (rewrite entirely; null/0 -> clear).
@@ -393,9 +534,13 @@ pub unsafe extern "C" fn idx_set_track_genres(
     id: i64,
     genres: *const *const c_char,
     genres_len: usize,
-) -> bool {
-    let genres = unsafe { c_to_strings(genres, genres_len) };
-    with_db(|db| db.set_track_genres(id, &genres)).is_some()
+) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        match unsafe { c_to_strings(genres, genres_len) } {
+            Ok(genres) => write(|db| db.set_track_genres(id, &genres)),
+            Err(e) => e.into(),
+        }
+    })
 }
 
 /// track cover path (null -> clear).
@@ -403,16 +548,17 @@ pub unsafe extern "C" fn idx_set_track_genres(
 /// # Safety
 /// `cover_path` is null or a C string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn idx_set_track_cover(id: i64, cover_path: *const c_char) -> bool {
-    let cover = if cover_path.is_null() {
-        None
-    } else {
-        match crate::ptr_to_path(cover_path) {
-            Ok(p) => Some(p),
-            Err(_) => return false,
-        }
-    };
-    with_db(|db| db.set_track_cover(id, cover.as_deref())).is_some()
+pub unsafe extern "C" fn idx_set_track_cover(id: i64, cover_path: *const c_char) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        let cover = match cover_path.is_null() {
+            true => None,
+            false => match crate::ptr_to_path(cover_path) {
+                Ok(p) => Some(p),
+                Err(e) => return e.into(),
+            },
+        };
+        write(|db| db.set_track_cover(id, cover.as_deref()))
+    })
 }
 
 /// track color label (null -> clear).
@@ -420,9 +566,13 @@ pub unsafe extern "C" fn idx_set_track_cover(id: i64, cover_path: *const c_char)
 /// # Safety
 /// `color` is null or a C string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn idx_set_track_color(id: i64, color: *const c_char) -> bool {
-    let color = unsafe { c_to_opt_string(color) };
-    with_db(|db| db.set_track_color(id, color.as_deref())).is_some()
+pub unsafe extern "C" fn idx_set_track_color(id: i64, color: *const c_char) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        match unsafe { c_to_opt_string(color) } {
+            Ok(color) => write(|db| db.set_track_color(id, color.as_deref())),
+            Err(e) => e.into(),
+        }
+    })
 }
 
 /// track text label (null -> clear).
@@ -430,21 +580,29 @@ pub unsafe extern "C" fn idx_set_track_color(id: i64, color: *const c_char) -> b
 /// # Safety
 /// `label` is null or a C string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn idx_set_track_label(id: i64, label: *const c_char) -> bool {
-    let label = unsafe { c_to_opt_string(label) };
-    with_db(|db| db.set_track_label(id, label.as_deref())).is_some()
+pub unsafe extern "C" fn idx_set_track_label(id: i64, label: *const c_char) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        match unsafe { c_to_opt_string(label) } {
+            Ok(label) => write(|db| db.set_track_label(id, label.as_deref())),
+            Err(e) => e.into(),
+        }
+    })
 }
 
 /// the "file is invalid" mark.
 #[unsafe(no_mangle)]
-pub extern "C" fn idx_set_track_invalid(id: i64, invalid: bool) -> bool {
-    with_db(|db| db.set_track_invalid(id, invalid)).is_some()
+pub extern "C" fn idx_set_track_invalid(id: i64, invalid: bool) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        write(|db| db.set_track_invalid(id, invalid))
+    })
 }
 
 /// saved track volume.
 #[unsafe(no_mangle)]
-pub extern "C" fn idx_set_track_volume(id: i64, volume: f32) -> bool {
-    with_db(|db| db.set_track_volume_id(id, volume)).is_some()
+pub extern "C" fn idx_set_track_volume(id: i64, volume: f32) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        write(|db| db.set_track_volume_id(id, volume))
+    })
 }
 
 /// new track file path (after a rename on disk). `path` != null.
@@ -452,28 +610,45 @@ pub extern "C" fn idx_set_track_volume(id: i64, volume: f32) -> bool {
 /// # Safety
 /// `path` is a valid C string pointer (not null).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn idx_set_track_path(id: i64, path: *const c_char) -> bool {
-    let Ok(path) = crate::ptr_to_path(path) else {
-        return false;
-    };
-    with_db(|db| db.set_track_path(id, &path)).is_some()
+pub unsafe extern "C" fn idx_set_track_path(id: i64, path: *const c_char) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        match crate::ptr_to_path(path) {
+            Ok(path) => write(|db| db.set_track_path(id, &path)),
+            Err(e) => e.into(),
+        }
+    })
 }
 
 /// removes a track from the index by id.
 #[unsafe(no_mangle)]
-pub extern "C" fn idx_remove_track(id: i64) -> bool {
-    with_db(|db| db.remove_track(id)).is_some()
+pub extern "C" fn idx_remove_track(id: i64) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        write(|db| db.remove_track(id))
+    })
 }
 
-/// removes every track marked "invalid". Returns the number removed (`-1` on
-/// error / no db).
+/// removes every track marked "invalid"; the number removed goes to `out`.
+///
+/// # Safety
+/// `out` is a valid pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn idx_remove_invalid_tracks() -> i64 {
-    with_db(|db| db.remove_invalid_tracks()).map_or(-1, |n| n as i64)
+pub unsafe extern "C" fn idx_remove_invalid_tracks(out: *mut u64) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        unsafe {
+            with_out(out, 0, || {
+                with_db(|db| {
+                    db.remove_invalid_tracks()
+                        .map(|n| n as u64)
+                        .map_err(|_| FFIIdxStatus::WriteFailed)
+                })
+            })
+        }
+    })
 }
 
 /// creates / updates playlist `name` from the tracks with the given ids (in
-/// this order). `cover` is null or a cover path.
+/// this order; ids missing from the db are skipped). `cover` is null or a
+/// cover path.
 ///
 /// # Safety
 /// `name` is a valid C string (not null); `track_ids` is null or an array of
@@ -484,31 +659,36 @@ pub unsafe extern "C" fn idx_save_playlist(
     track_ids: *const i64,
     track_ids_len: usize,
     cover: *const c_char,
-) -> bool {
-    let Some(name) = (unsafe { c_to_opt_string(name) }) else {
-        return false;
-    };
-    let ids: &[i64] = if track_ids.is_null() || track_ids_len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(track_ids, track_ids_len) }
-    };
-    let cover = unsafe { c_to_opt_string(cover) };
+) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        let name = match unsafe { c_to_string(name) } {
+            Ok(n) => n,
+            Err(e) => return e.into(),
+        };
+        let Some(ids) = (unsafe { crate::cdc::raw_slice(track_ids, track_ids_len) }) else {
+            return FFIIdxStatus::NullPointer;
+        };
+        let cover = match unsafe { c_to_opt_string(cover) } {
+            Ok(c) => c,
+            Err(e) => return e.into(),
+        };
 
-    with_db(|db| {
-        // assemble the playlist tracks by id in the given order.
-        let mut tracks = Vec::with_capacity(ids.len());
-        for &id in ids {
-            if let Some(t) = db.get_tracks(None, None, Some(id), None)?.into_iter().next() {
-                tracks.push(t);
+        status(with_db(|db| {
+            // assemble the playlist tracks by id in the given order.
+            let mut tracks = Vec::with_capacity(ids.len());
+            for &id in ids {
+                let found = db.get_tracks(None, None, Some(id), None).map_err(read_err)?;
+                if let Some(t) = found.into_iter().next() {
+                    tracks.push(t);
+                }
             }
-        }
-        let mut playlist = Playlist::from_tracks(tracks);
-        playlist.set_name(name);
-        playlist.set_cover_art(cover.map(Into::into));
-        db.save_playlist(playlist)
+            let mut playlist = Playlist::from_tracks(tracks);
+            playlist.set_name(name);
+            playlist.set_cover_art(cover.map(Into::into));
+            db.save_playlist(playlist)
+                .map_err(|_| FFIIdxStatus::WriteFailed)
+        }))
     })
-    .is_some()
 }
 
 /// removes a playlist by name.
@@ -516,9 +696,11 @@ pub unsafe extern "C" fn idx_save_playlist(
 /// # Safety
 /// `name` is a valid C string (not null).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn idx_remove_playlist(name: *const c_char) -> bool {
-    let Some(name) = (unsafe { c_to_opt_string(name) }) else {
-        return false;
-    };
-    with_db(|db| db.remove_playlist(&name)).is_some()
+pub unsafe extern "C" fn idx_remove_playlist(name: *const c_char) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        match unsafe { c_to_string(name) } {
+            Ok(name) => write(|db| db.remove_playlist(&name)),
+            Err(e) => e.into(),
+        }
+    })
 }

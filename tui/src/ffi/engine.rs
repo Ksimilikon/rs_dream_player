@@ -6,9 +6,11 @@
 
 use std::ffi::CString;
 use std::path::Path;
+use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use api::player;
+use api::FFIInitStatus;
+use api::player::{self, FFIEngineStatus};
 
 use super::types::opt_string;
 
@@ -29,21 +31,58 @@ fn path_cstr(p: &Path) -> CString {
     CString::new(p.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
+/// human-readable description of an init failure.
+pub fn describe_init(st: FFIInitStatus) -> &'static str {
+    use FFIInitStatus as S;
+    match st {
+        S::Ok => "ok",
+        S::NullPointer => "internal error: null directory",
+        S::InvalidUtf8 => "a directory path is not valid UTF-8",
+        S::AlreadyInitialized => "core is already initialized",
+        S::DbFailed => "failed to open the database",
+        S::AudioFailed => "failed to start audio output",
+        S::Panic => "core panicked (see core_panic.log in the data dir)",
+    }
+}
+
 /// initializes the core: directories + the needs-a-db flag. Call once before
 /// anything else.
-pub fn init(cache: &Path, config: &Path, data: &Path, music: &Path, need_db: bool) {
+pub fn init(
+    cache: &Path,
+    config: &Path,
+    data: &Path,
+    music: &Path,
+    need_db: bool,
+) -> Result<(), FFIInitStatus> {
     let (c, cfg, d, m) = (
         path_cstr(cache),
         path_cstr(config),
         path_cstr(data),
         path_cstr(music),
     );
-    api::init(c.as_ptr(), cfg.as_ptr(), d.as_ptr(), m.as_ptr(), need_db);
+    match unsafe { api::init(c.as_ptr(), cfg.as_ptr(), d.as_ptr(), m.as_ptr(), need_db) } {
+        FFIInitStatus::Ok => Ok(()),
+        e => Err(e),
+    }
+}
+
+/// `true` for `Ok`.
+fn ok(st: FFIEngineStatus) -> bool {
+    st == FFIEngineStatus::Ok
+}
+
+/// reads a value through an out-parameter; `default` on error.
+fn get<T: Copy>(default: T, f: unsafe extern "C" fn(*mut T) -> FFIEngineStatus) -> T {
+    let mut v = default;
+    match unsafe { f(&mut v) } {
+        FFIEngineStatus::Ok => v,
+        _ => default,
+    }
 }
 
 /// plays a track from the index by id (autoplaying the next one when done).
 pub fn play_track_id(id: i64) -> bool {
-    player::engine_add_track_id(id, Some(on_track_end))
+    ok(player::engine_add_track_id(id, Some(on_track_end)))
 }
 
 /// plays a track by file path (autoplaying the next one when done).
@@ -51,9 +90,12 @@ pub fn play_track_path(path: &str) -> bool {
     let c = CString::new(path).unwrap_or_default();
     // reset a possibly "stale" end flag of the previous track.
     TRACK_ENDED.store(false, Ordering::SeqCst);
-    unsafe { player::engine_add_track_path(c.as_ptr(), Some(on_track_end)) }
+    ok(unsafe { player::engine_add_track_path(c.as_ptr(), Some(on_track_end)) })
 }
 
+// the TUI only reacts to the outcome of `engine_add_*` / device switching; a
+// failed play / pause / seek just leaves the state as it was — the next UI
+// tick shows the real state.
 pub fn play() {
     player::engine_play();
 }
@@ -73,33 +115,39 @@ pub fn seek(secs: u64) {
     player::engine_set_seek(secs);
 }
 pub fn position() -> u64 {
-    player::engine_get_seek()
+    get(0, player::engine_get_seek)
 }
 pub fn duration() -> u64 {
-    player::engine_get_duration()
+    get(0, player::engine_get_duration)
 }
 pub fn is_paused() -> bool {
-    player::engine_is_pause()
+    get(false, player::engine_is_pause)
 }
 pub fn is_empty() -> bool {
-    player::engine_is_empty()
+    get(true, player::engine_is_empty)
 }
 pub fn set_master_volume(v: f32) {
     player::engine_set_volume_master(v);
 }
 pub fn master_volume() -> f32 {
-    player::engine_get_volume_master()
+    get(1.0, player::engine_get_volume_master)
 }
 pub fn set_track_volume(v: f32) {
     player::engine_set_volume_track(v);
 }
 pub fn track_volume() -> f32 {
-    player::engine_get_volume_track()
+    get(1.0, player::engine_get_volume_track)
 }
 
 /// names of the available output devices.
 pub fn output_devices() -> Vec<String> {
-    let list = player::engine_get_output_devices();
+    let mut list = api::idx::FFIStringList {
+        ptr: ptr::null_mut(),
+        len: 0,
+    };
+    if !ok(unsafe { player::engine_get_output_devices(&mut list) }) {
+        return Vec::new();
+    }
     let out = if list.ptr.is_null() {
         Vec::new()
     } else {
@@ -114,7 +162,10 @@ pub fn output_devices() -> Vec<String> {
 
 /// name of the current output device.
 pub fn current_output_device() -> Option<String> {
-    let ptr = player::engine_get_output_device();
+    let mut ptr = ptr::null_mut();
+    if !ok(unsafe { player::engine_get_output_device(&mut ptr) }) {
+        return None;
+    }
     let out = unsafe { opt_string(ptr) };
     unsafe { api::mem::idx_free_string(ptr) };
     out
@@ -123,5 +174,5 @@ pub fn current_output_device() -> Option<String> {
 /// switches the output device by name.
 pub fn set_output_device(name: &str) -> bool {
     let c = CString::new(name).unwrap_or_default();
-    unsafe { player::engine_set_output_device(c.as_ptr()) }
+    ok(unsafe { player::engine_set_output_device(c.as_ptr()) })
 }

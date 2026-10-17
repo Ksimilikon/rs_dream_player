@@ -122,6 +122,16 @@ fn c_string_array(env: &mut Env, arr: &JObjectArray<JString>) -> Result<Vec<CStr
     Ok(out)
 }
 
+/// `LongArray` -> `Vec<i64>` (null -> empty).
+fn long_array(env: &mut Env, arr: &JLongArray) -> Result<Vec<i64>> {
+    if arr.is_null() {
+        return Ok(Vec::new());
+    }
+    let mut buf = vec![0i64; arr.len(env)?];
+    arr.get_region(env, 0, &mut buf)?;
+    Ok(buf)
+}
+
 // ───────────────────────────────── reads ─────────────────────────────────
 
 /// every playlist -> `CoreResult<List<PlaylistInfo>>`.
@@ -315,6 +325,40 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSetTrackInvalid<'c>(
     run(&mut env, |_| Ok(code(idx::idx_set_track_invalid(id, invalid))))
 }
 
+/// the invalid mark of several tracks in one transaction.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSetTracksInvalid<'c>(
+    mut env: EnvUnowned<'c>,
+    _class: JClass<'c>,
+    ids: JLongArray<'c>,
+    invalid: bool,
+) -> i32 {
+    run(&mut env, |env| {
+        let ids = long_array(env, &ids)?;
+        Ok(code(unsafe { idx::idx_set_tracks_invalid(ids.as_ptr(), ids.len(), invalid) }))
+    })
+}
+
+/// adds song files in one transaction -> `CoreResult<Long>` (the number written).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dreamplayer_core_Native_idxAddTracks<'c>(
+    mut env: EnvUnowned<'c>,
+    _class: JClass<'c>,
+    paths: JObjectArray<'c, JString<'c>>,
+) -> JObject<'c> {
+    run(&mut env, |env| {
+        let paths = c_string_array(env, &paths)?;
+        let ptrs: Vec<*const c_char> = paths.iter().map(|c| c.as_ptr()).collect();
+        let mut n = 0u64;
+        let st = unsafe { idx::idx_add_tracks(ptrs.as_ptr(), ptrs.len(), &mut n) };
+        let value = match st {
+            FFIIdxStatus::Ok => boxed_long(env, Some(n as i64))?,
+            _ => JObject::null(),
+        };
+        core_result(env, code(st), &value)
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSetTrackVolume<'c>(
     mut env: EnvUnowned<'c>,
@@ -362,14 +406,7 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSavePlaylist<'c>(
 ) -> i32 {
     run(&mut env, |env| {
         let name = opt_string(env, &name)?.map(|n| cstring(&n));
-        let ids = match track_ids.is_null() {
-            true => Vec::new(),
-            false => {
-                let mut buf = vec![0i64; track_ids.len(env)?];
-                track_ids.get_region(env, 0, &mut buf)?;
-                buf
-            }
-        };
+        let ids = long_array(env, &track_ids)?;
         let cover = opt_string(env, &cover)?.map(|c| cstring(&c));
         Ok(code(unsafe {
             idx::idx_save_playlist(opt_ptr(&name), ids.as_ptr(), ids.len(), opt_ptr(&cover))

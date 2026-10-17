@@ -118,6 +118,16 @@ pub unsafe extern "C" fn idx_free_playlists_list(list: FFIPlaylistsList) {
     })
 }
 
+/// frees bytes handed out by `idx_*` (`idx_get_track_cover`). Null is
+/// ignored.
+///
+/// # Safety
+/// `ptr`/`len` come from `idx_*` and weren't freed yet.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn idx_free_bytes(ptr: *mut u8, len: usize) {
+    unsafe { cdc_free_bytes(ptr, len) }
+}
+
 /// frees packet bytes (from `cdc_encode`/`cdc_pack_*`). Null is ignored.
 ///
 /// # Safety

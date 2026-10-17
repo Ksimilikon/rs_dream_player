@@ -284,7 +284,9 @@ pub unsafe extern "C" fn engine_get_volume_master(out: *mut f32) -> FFIEngineSta
     })
 }
 
-/// names of the available output devices. Works before `init` too. Free with
+/// names of the available output devices, the system default
+/// (`"Default Device"`, follows the system routing) first. Works before
+/// `init` too. Free with
 /// `engine_free_output_devices`.
 ///
 /// # Safety

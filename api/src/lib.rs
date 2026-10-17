@@ -211,6 +211,12 @@ mod tests {
         );
         assert!(list.ptr.is_null() && list.len == 0);
         assert_eq!(idx::idx_remove_track(1), FFIIdxStatus::NotInitialized);
+        let (mut cover, mut cover_len) = (ptr::dangling_mut(), 5);
+        assert_eq!(
+            unsafe { idx::idx_get_track_cover(1, ptr::null(), &mut cover, &mut cover_len) },
+            FFIIdxStatus::NotInitialized
+        );
+        assert!(cover.is_null() && cover_len == 0, "the out-parameters are reset");
 
         let (mut p, mut l) = (ptr::null_mut(), 0);
         assert_eq!(
@@ -235,6 +241,10 @@ mod tests {
         );
         assert_eq!(
             unsafe { idx::idx_remove_playlist(ptr::null()) },
+            FFIIdxStatus::NullPointer
+        );
+        assert_eq!(
+            unsafe { idx::idx_get_track_cover(1, ptr::null(), ptr::null_mut(), ptr::null_mut()) },
             FFIIdxStatus::NullPointer
         );
         assert_eq!(

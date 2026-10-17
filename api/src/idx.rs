@@ -4,9 +4,12 @@
 
 use std::error::Error;
 use std::ffi::{CStr, CString, c_char};
+use std::path::{Path, PathBuf};
 use std::ptr;
 
-use audio_structs::{playlist::Playlist, track_virtual::TrackVirtual};
+use audio_structs::{
+    playlist::Playlist, track_metadata::TrackMetadata, track_virtual::TrackVirtual,
+};
 use storage::traits::indexator::Indexator;
 
 use crate::panic::Status;
@@ -385,32 +388,101 @@ pub unsafe extern "C" fn idx_get_track(
         let empty = empty_metadata(false, 0, ptr::null_mut());
         unsafe {
             with_out(out, empty, || {
-                let path = match path.is_null() {
-                    true => None,
-                    false => Some(crate::ptr_to_path(path)?),
-                };
-                let found = with_db(|db| {
-                    Ok(match path {
-                        // lookup by path (exact match on a unique column).
-                        Some(p) => db
-                            .get_tracks(None, None, None, None)
-                            .map_err(read_err)?
-                            .into_iter()
-                            .find(|t| t.get_path() == Some(p.as_path())),
-                        None => db
-                            .get_tracks(None, None, Some(id_track), None)
-                            .map_err(read_err)?
-                            .into_iter()
-                            .next(),
-                    })
-                })?;
-                found
+                let path = opt_path(path)?;
+                find_track(id_track, path.as_deref())?
                     .as_ref()
                     .map(track_to_ffi)
                     .ok_or(FFIIdxStatus::NotFound)
             })
         }
     })
+}
+
+/// a nullable C string -> optional path.
+fn opt_path(path: *const c_char) -> Result<Option<PathBuf>, FFIIdxStatus> {
+    match path.is_null() {
+        true => Ok(None),
+        false => Ok(Some(crate::ptr_to_path(path)?)),
+    }
+}
+
+/// a db track by identifier: `path` (if given) takes priority over `id`.
+fn find_track(id_track: i64, path: Option<&Path>) -> Result<Option<TrackVirtual>, FFIIdxStatus> {
+    with_db(|db| {
+        Ok(match path {
+            // lookup by path (exact match on a unique column).
+            Some(p) => db
+                .get_tracks(None, None, None, None)
+                .map_err(read_err)?
+                .into_iter()
+                .find(|t| t.get_path() == Some(p)),
+            None => db
+                .get_tracks(None, None, Some(id_track), None)
+                .map_err(read_err)?
+                .into_iter()
+                .next(),
+        })
+    })
+}
+
+/// cover bytes of a track to display, by identifier (as in `idx_get_track`):
+/// the cover file from the db if it is set and readable, otherwise the cover
+/// embedded in the audio file tags. A `path` missing from the db is read
+/// directly (embedded cover only). No cover -> `Ok` with `*out_ptr == null`,
+/// `*out_len == 0`; an `id` missing from the db -> `NotFound`. The image is
+/// returned as stored (png / jpg / ...). Free with `idx_free_bytes`.
+///
+/// # Safety
+/// `path` is either null or a valid C string; `out_ptr`/`out_len` are valid
+/// pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn idx_get_track_cover(
+    id_track: i64,
+    path: *const c_char,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        if out_ptr.is_null() || out_len.is_null() {
+            return FFIIdxStatus::NullPointer;
+        }
+        unsafe {
+            *out_ptr = ptr::null_mut();
+            *out_len = 0;
+        }
+        match track_cover(id_track, path) {
+            Ok(Some(bytes)) => {
+                let (p, l) = vec_to_raw(bytes);
+                unsafe {
+                    *out_ptr = p;
+                    *out_len = l;
+                }
+                FFIIdxStatus::Ok
+            }
+            Ok(None) => FFIIdxStatus::Ok,
+            Err(e) => e,
+        }
+    })
+}
+
+/// see `idx_get_track_cover`. Only the db lookup runs under the lock; files
+/// (the cover, the audio tags) are read without it.
+fn track_cover(id_track: i64, path: *const c_char) -> Result<Option<Vec<u8>>, FFIIdxStatus> {
+    let path = opt_path(path)?;
+    let (cover_file, audio) = match find_track(id_track, path.as_deref())? {
+        Some(track) => {
+            let cover = track
+                .get_metadata()
+                .ok()
+                .and_then(|m| m.params.as_ref()?.cover_art.clone());
+            (cover, track.get_path().map(Path::to_path_buf))
+        }
+        None if path.is_some() => (None, path),
+        None => return Err(FFIIdxStatus::NotFound),
+    };
+    Ok(cover_file
+        .and_then(|p| std::fs::read(p).ok())
+        .or_else(|| TrackMetadata::read_cover(audio.as_deref()?)))
 }
 
 // ───────────────────────── writes (db mutations) ───────────────────────────

@@ -84,6 +84,11 @@ object Native {
     @JvmStatic external fun engineSetVolumeMaster(volume: Float): Int
     @JvmStatic external fun engineGetVolumeTrack(): CoreResult<Float>
     @JvmStatic external fun engineGetVolumeMaster(): CoreResult<Float>
+    /**
+     * output device names; the first one is the system default
+     * (`"Default Device"`): its stream follows the system routing, reopen it
+     * with [engineSetOutputDevice] after the route changed (headphones).
+     */
     @JvmStatic external fun engineGetOutputDevices(): CoreResult<List<String>>
 
     /** `value` is null on OK too when the device is unknown. */

@@ -53,6 +53,12 @@ impl AudioEngine {
         Ok(())
     }
 }
+/// name of the system default output device in [`AudioEngine::output_devices`].
+/// Its stream follows the system routing: on Android a stream opened on a
+/// concrete device dies when the route changes (headphones plugged in / out),
+/// and reopening this one is the way to get sound back.
+pub const DEFAULT_DEVICE: &str = "Default Device";
+
 impl AudioEngine {
     pub fn new() -> Result<Self, Box<dyn Error>> {
         let device = DeviceSinkBuilder::open_default_sink()?;
@@ -78,14 +84,18 @@ impl AudioEngine {
         self.duration
     }
 
-    /// names of the available output devices (on the default host).
+    /// names of the available output devices (on the default host), the
+    /// system default ([`DEFAULT_DEVICE`]) first.
     pub fn output_devices() -> Vec<String> {
-        match rodio::cpal::default_host().output_devices() {
-            Ok(devices) => devices
-                .filter_map(|d| d.description().ok().map(|desc| desc.name().to_string()))
-                .collect(),
-            Err(_) => Vec::new(),
+        let mut names = vec![DEFAULT_DEVICE.to_string()];
+        if let Ok(devices) = rodio::cpal::default_host().output_devices() {
+            names.extend(
+                devices
+                    .filter_map(|d| d.description().ok().map(|desc| desc.name().to_string()))
+                    .filter(|n| n != DEFAULT_DEVICE),
+            );
         }
+        names
     }
 
     /// name of the active output device, if known.
@@ -96,17 +106,21 @@ impl AudioEngine {
     /// switches output to the device named `name` (from
     /// [`Self::output_devices`]). The currently loaded track is dropped —
     /// playback has to be started again; the volume (master/track) is kept.
+    /// [`DEFAULT_DEVICE`] reopens the system default stream.
     pub fn set_output_device(&mut self, name: &str) -> Result<(), Box<dyn Error>> {
-        let device = rodio::cpal::default_host()
-            .output_devices()?
-            .find(|d| {
-                d.description()
-                    .map(|desc| desc.name() == name)
-                    .unwrap_or(false)
-            })
-            .ok_or_else(|| format!("output device not found: {name}"))?;
-
-        let sink = DeviceSinkBuilder::from_device(device)?.open_stream()?;
+        let sink = if name == DEFAULT_DEVICE {
+            DeviceSinkBuilder::open_default_sink()?
+        } else {
+            let device = rodio::cpal::default_host()
+                .output_devices()?
+                .find(|d| {
+                    d.description()
+                        .map(|desc| desc.name() == name)
+                        .unwrap_or(false)
+                })
+                .ok_or_else(|| format!("output device not found: {name}"))?;
+            DeviceSinkBuilder::from_device(device)?.open_stream()?
+        };
         let player = RodioPlayer::connect_new(sink.mixer());
         player.set_volume(self.track_volume * self.master_volume);
 

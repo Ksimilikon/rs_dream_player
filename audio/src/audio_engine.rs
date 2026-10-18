@@ -35,7 +35,14 @@ impl AudioEngine {
     where
         F: FnOnce() + Send + 'static,
     {
-        let decoder = Decoder::new(Cursor::new(data))?;
+        // the byte length makes the stream seekable: without it symphonia
+        // reads forward only and seeking backwards fails (`ForwardOnly`).
+        let len = data.len() as u64;
+        let decoder = Decoder::builder()
+            .with_data(Cursor::new(data))
+            .with_byte_len(len)
+            .with_seekable(true)
+            .build()?;
         // remember the duration before the decoder moves into the queue.
         self.duration = decoder.total_duration().unwrap_or_default();
 

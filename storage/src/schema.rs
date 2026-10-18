@@ -33,6 +33,8 @@ const REQUIRED_SCHEMA: &[(&str, &[&str])] = &[
             "color",
             "user_label",
             "invalid",
+            // added by migration 2.
+            "ignore_orphan",
         ],
     ),
     ("artists", &["id", "name"]),
@@ -42,7 +44,8 @@ const REQUIRED_SCHEMA: &[(&str, &[&str])] = &[
     ("track_genres", &["track_id", "genre_id"]),
     (
         "playlists",
-        &["id", "name", "cover_art", "created_at", "updated_at"],
+        // `deleted_at` — added by migration 2.
+        &["id", "name", "cover_art", "created_at", "updated_at", "deleted_at"],
     ),
     ("playlist_tracks", &["playlist_id", "song_hash", "position"]),
     // added by migration 1.
@@ -125,6 +128,14 @@ CREATE TABLE IF NOT EXISTS paired_devices (
     pub_key BLOB NOT NULL UNIQUE,
     name    TEXT NOT NULL DEFAULT 'Unknown'
 );
+",
+    // 2: soft deletion of playlists — a deleted playlist keeps its row (the
+    // name is its identifier across devices) with the deletion time, so the
+    // deletion syncs; and a per-track mark "kept on purpose though in no
+    // playlist" for the orphan collector.
+    "\
+ALTER TABLE playlists ADD COLUMN deleted_at INTEGER;
+ALTER TABLE tracks ADD COLUMN ignore_orphan INTEGER NOT NULL DEFAULT 0;
 ",
 ];
 

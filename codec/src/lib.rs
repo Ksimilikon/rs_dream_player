@@ -33,6 +33,17 @@
 //! 4. track lists: `M` × (`u32` count `K` + `K` × `u128` song hash), in
 //!    playlist order. Hashes may point to songs that are not in the packet.
 //!
+//! ## deleted playlists section ([`SectionTag::Deleted`])
+//!
+//! v0.11+, written before the covers and only if some playlist is deleted.
+//! A deleted playlist is soft-deleted: only its name (the identifier) and
+//! when it was deleted travel, so the receiver deletes its copy too unless
+//! that copy was changed later.
+//!
+//! 1. count rows: `u32`, number of deleted playlists `D`
+//! 2. names: `D` × (`u16` length + UTF-8 payload)
+//! 3. deletion times: `D` × `u64` (unix seconds)
+//!
 //! ## covers section ([`SectionTag::Covers`])
 //!
 //! written last and only if at least one playlist has a cover.
@@ -103,21 +114,46 @@ pub struct Playlist {
     pub cover: Vec<u8>,
 }
 
+/// a deleted playlist inside a packet (v0.11+).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeletedPlaylist {
+    /// playlist name, max `u16::MAX` bytes of UTF-8.
+    pub name: String,
+    /// deletion time (unix seconds).
+    pub deleted_at: u64,
+}
+
 /// decoded packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Packet {
     pub version: Version,
     pub songs: Vec<Song>,
     pub playlists: Vec<Playlist>,
+    /// deleted playlists; always empty in v0.1.
+    pub deleted: Vec<DeletedPlaylist>,
 }
 
-/// encodes `songs` and `playlists` into a packet of the given `version`.
+/// encodes `songs` and `playlists` into a packet of the given `version`
+/// (without deleted playlists).
 pub fn encode(
     version: Version,
     songs: &[Song],
     playlists: &[Playlist],
 ) -> Result<Vec<u8>, CodecError> {
+    encode_with(version, songs, playlists, &[])
+}
+
+/// encodes `songs`, `playlists` and the `deleted` playlists into a packet of
+/// the given `version`. v0.1 has no deleted playlists section: `deleted` is
+/// left out there.
+pub fn encode_with(
+    version: Version,
+    songs: &[Song],
+    playlists: &[Playlist],
+    deleted: &[DeletedPlaylist],
+) -> Result<Vec<u8>, CodecError> {
     let with_covers = playlists.iter().any(|p| !p.cover.is_empty());
+    let with_deleted = version.has_deleted() && !deleted.is_empty();
 
     // reserve close to the final size: audio dominates, and growing a
     // multi-gigabyte `Vec` by doubling would briefly need twice the memory.
@@ -131,7 +167,8 @@ pub fn encode(
             .map(|p| {
                 33 + p.name.len() + 16 * p.tracks.len() + p.cover_name.len() + p.cover.len()
             })
-            .sum::<usize>();
+            .sum::<usize>()
+        + deleted.iter().map(|d| 10 + d.name.len()).sum::<usize>();
     let mut out = Vec::with_capacity(size);
 
     // 1) start word
@@ -139,12 +176,15 @@ pub fn encode(
     // 2) version
     out.extend_from_slice(&u32::from(version).to_le_bytes());
     // 3) count sections
-    out.push(if with_covers { 3 } else { 2 });
+    out.push(2 + u8::from(with_deleted) + u8::from(with_covers));
     // 4) sections
     section(&mut out, SectionTag::Songs, |out| write_songs(out, songs))?;
     section(&mut out, SectionTag::Playlists, |out| {
         write_playlists(out, playlists)
     })?;
+    if with_deleted {
+        section(&mut out, SectionTag::Deleted, |out| write_deleted(out, deleted))?;
+    }
     if with_covers {
         section(&mut out, SectionTag::Covers, |out| write_covers(out, playlists))?;
     }
@@ -169,6 +209,7 @@ pub fn decode(bytes: &[u8]) -> Result<Packet, CodecError> {
     let mut songs = None;
     let mut playlists = None;
     let mut covers = None;
+    let mut deleted = None;
     for _ in 0..count {
         let tag = r.u8()?;
         let len = usize::try_from(r.u64()?).map_err(|_| CodecError::UnexpectedEof)?;
@@ -177,6 +218,7 @@ pub fn decode(bytes: &[u8]) -> Result<Packet, CodecError> {
             Ok(SectionTag::Songs) => set_once(&mut songs, read_songs(&mut s)?)?,
             Ok(SectionTag::Playlists) => set_once(&mut playlists, read_playlists(&mut s)?)?,
             Ok(SectionTag::Covers) => set_once(&mut covers, read_covers(&mut s)?)?,
+            Ok(SectionTag::Deleted) => set_once(&mut deleted, read_deleted(&mut s)?)?,
             // unknown section: already skipped by `take(len)`.
             Err(_) => continue,
         }
@@ -199,6 +241,7 @@ pub fn decode(bytes: &[u8]) -> Result<Packet, CodecError> {
         version,
         songs: songs.unwrap_or_default(),
         playlists,
+        deleted: deleted.unwrap_or_default(),
     })
 }
 
@@ -336,6 +379,38 @@ fn write_covers(out: &mut Vec<u8>, playlists: &[Playlist]) -> Result<(), CodecEr
     Ok(())
 }
 
+fn write_deleted(out: &mut Vec<u8>, deleted: &[DeletedPlaylist]) -> Result<(), CodecError> {
+    // deleted 1. count rows
+    put_count(out, deleted.len())?;
+    // deleted 2. names
+    for d in deleted {
+        put_name(out, &d.name)?;
+    }
+    // deleted 3. deletion times
+    for d in deleted {
+        out.extend_from_slice(&d.deleted_at.to_le_bytes());
+    }
+    Ok(())
+}
+
+fn read_deleted(r: &mut Reader<'_>) -> Result<Vec<DeletedPlaylist>, CodecError> {
+    // deleted 1. count rows: every entry takes at least 2 + 8 bytes.
+    let (count, cap) = r.count(10)?;
+    // deleted 2. names
+    let mut deleted = Vec::with_capacity(cap);
+    for _ in 0..count {
+        deleted.push(DeletedPlaylist {
+            name: r.name()?,
+            deleted_at: 0,
+        });
+    }
+    // deleted 3. deletion times
+    for d in &mut deleted {
+        d.deleted_at = r.u64()?;
+    }
+    Ok(deleted)
+}
+
 /// `(file name, image)` per playlist.
 fn read_covers(r: &mut Reader<'_>) -> Result<Vec<(String, Vec<u8>)>, CodecError> {
     // covers 1. count rows: every cover takes at least 2 + 4 bytes.
@@ -414,6 +489,46 @@ mod tests {
         assert_eq!(packet.version, Version::V0_1);
         assert_eq!(packet.songs, songs());
         assert_eq!(packet.playlists, playlists());
+    }
+
+    fn deleted() -> Vec<DeletedPlaylist> {
+        vec![
+            DeletedPlaylist {
+                name: "старый".into(),
+                deleted_at: 1_700_000_100,
+            },
+            DeletedPlaylist {
+                name: "gone".into(),
+                deleted_at: 7,
+            },
+        ]
+    }
+
+    #[test]
+    fn deleted_roundtrip_v0_11() {
+        let bytes = encode_with(Version::V0_11, &songs(), &playlists(), &deleted()).unwrap();
+        let packet = decode(&bytes).unwrap();
+        assert_eq!(packet.version, Version::V0_11);
+        assert_eq!(packet.playlists, playlists());
+        assert_eq!(packet.deleted, deleted());
+        // the deleted section comes before the covers, which stay last.
+        assert!(section_at(&bytes, SectionTag::Deleted) < section_at(&bytes, SectionTag::Covers));
+        assert_eq!(bytes[8], 4, "songs, playlists, deleted, covers");
+    }
+
+    #[test]
+    fn v0_1_has_no_deleted_section() {
+        let bytes = encode_with(Version::V0_1, &songs(), &playlists(), &deleted()).unwrap();
+        assert_eq!(bytes[8], 3, "songs, playlists, covers");
+        assert!(decode(&bytes).unwrap().deleted.is_empty());
+    }
+
+    #[test]
+    fn deleted_truncated_at_every_point() {
+        let bytes = encode_with(Version::V0_11, &[], &[], &deleted()).unwrap();
+        for cut in 0..bytes.len() {
+            assert!(decode(&bytes[..cut]).is_err(), "cut at {cut}");
+        }
     }
 
     #[test]

@@ -19,6 +19,14 @@ ratatui-image = { version = "11.0.6", default-features = false, features = [
     "crossterm",
 ] }
 
+# USB sync transport without adb (Android Open Accessory) via libusb: the
+# system library on Linux / macOS, built from source on Windows.
+rusb = "0.9"
+
+[target.'cfg(target_os = "windows")'.dependencies.rusb]
+version = "0.9"
+features = ["vendored"]
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # MPRIS integration (moved from the removed `dbus` crate): the system media
 # transport on Linux via zbus. Runs on a single single-threaded tokio runtime

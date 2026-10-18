@@ -1,8 +1,10 @@
 //! FFI over the `codec` crate. Prefix `cdc_` = packet pack / unpack.
 //!
 //! - the packet version is passed as a `u32` number (= `codec::Version`
-//!   discriminant, currently `1` = v0.1); an unknown number ->
+//!   discriminant: `1` = v0.1, `2` = v0.11); an unknown number ->
 //!   `UnsupportedVersion`.
+//! - deleted playlists (soft deletion, v0.11+) go into a library packet so
+//!   the receiver deletes them too; v0.1 can't carry them.
 //! - every function returns [`FFICdcStatus`] (`0` = ok), results go through
 //!   out-parameters. On error the out-parameters are zeroed (null/0).
 //! - a song hash at the FFI boundary is `[u8; 16]` big-endian: the bytes go in
@@ -29,8 +31,8 @@ use std::{
     ptr, slice,
 };
 
-use codec::{CodecError, Playlist, Song, Version};
-use storage::db::PlaylistHashRow;
+use codec::{CodecError, DeletedPlaylist, Playlist, Song, Version};
+use storage::db::{DeletedPlaylistRow, PlaylistHashRow};
 
 use crate::idx::{to_c, vec_to_raw};
 
@@ -274,7 +276,7 @@ fn pack_from_db(
 
     // only the db query runs under the lock; audio / covers are read without
     // it, so the core (player) isn't held while gigabytes are read from disk.
-    let (tracks, playlists) = {
+    let (tracks, playlists, deleted) = {
         let guard = crate::core().ok_or(FFICdcStatus::NotInitialized)?;
         let db = guard.get_db().ok_or(FFICdcStatus::NoDatabase)?;
         let read = |_| FFICdcStatus::ReadFailed;
@@ -282,13 +284,14 @@ fn pack_from_db(
             Selection::Library => (
                 db.get_track_hashes(None).map_err(read)?,
                 db.get_playlist_hashes(None).map_err(read)?,
+                db.get_deleted_playlists(None).map_err(read)?,
             ),
             Selection::Tracks(ids) => {
                 let tracks = db.get_track_hashes(Some(ids)).map_err(read)?;
                 if tracks.len() != ids.len() {
                     return Err(FFICdcStatus::TrackNotFound);
                 }
-                (tracks, Vec::new())
+                (tracks, Vec::new(), Vec::new())
             }
             Selection::Playlists(names) => {
                 let playlists = db.get_playlist_hashes(Some(names)).map_err(read)?;
@@ -305,7 +308,11 @@ fn pack_from_db(
                     .filter(|h| seen.insert(h.as_str()))
                     .cloned()
                     .collect();
-                (db.get_track_hashes_by_hash(&hashes).map_err(read)?, playlists)
+                (
+                    db.get_track_hashes_by_hash(&hashes).map_err(read)?,
+                    playlists,
+                    Vec::new(),
+                )
             }
         }
     };
@@ -318,7 +325,16 @@ fn pack_from_db(
         .into_iter()
         .map(|row| playlist_from_db(row, with_covers))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(codec::encode(version, &songs, &playlists)?)
+    let deleted: Vec<DeletedPlaylist> = deleted.into_iter().map(deleted_from_db).collect();
+    Ok(codec::encode_with(version, &songs, &playlists, &deleted)?)
+}
+
+/// db deletion mark -> packet entry.
+pub(crate) fn deleted_from_db(row: DeletedPlaylistRow) -> DeletedPlaylist {
+    DeletedPlaylist {
+        name: row.name,
+        deleted_at: row.deleted_at,
+    }
 }
 
 /// db row -> packet song.

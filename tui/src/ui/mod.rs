@@ -77,8 +77,12 @@ pub enum TabEvent {
     /// move a track within the playing list (temporarily, not written to the db).
     MovePlaying { from: usize, to: usize },
     /// remove track `index` from the playing list; `from_db` — also from the
-    /// playlist in the db.
+    /// playlist in the db (in the "ALL SONGS" pool: delete the song from the
+    /// device).
     RemovePlaying { index: usize, from_db: bool },
+    /// delete these songs from the device: their files and library rows
+    /// (after a y/N confirmation).
+    DeleteFromDevice(Vec<TrackMeta>),
     /// save a playlist: name + track ids (new or edited).
     SavePlaylist { name: String, ids: Vec<i64> },
     /// apply a track metadata edit.

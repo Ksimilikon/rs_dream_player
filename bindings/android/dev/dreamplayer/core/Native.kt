@@ -16,7 +16,8 @@
 //   (`ParcelFileDescriptor.fd`). The descriptor is borrowed — the caller
 //   closes it after the call.
 // - `init` returns `InitStatus`, `engine*` — `EngineStatus`, `idx*` —
-//   `IdxStatus`, `cdc*` — `CdcStatus` codes.
+//   `IdxStatus`, `cdc*` — `CdcStatus`, `con*` — `ConStatus`, `sync*` —
+//   `SyncStatus` codes.
 
 package dev.dreamplayer.core
 
@@ -100,6 +101,12 @@ object Native {
     @JvmStatic external fun idxGetPlaylists(): CoreResult<List<PlaylistInfo>>
     @JvmStatic external fun idxGetTracks(): CoreResult<List<TrackMeta>>
 
+    /** songs that are in no playlist (cleanup candidates), by title; [filter] — [OrphanFilter]. */
+    @JvmStatic external fun idxGetOrphanTracks(filter: Int): CoreResult<List<TrackMeta>>
+
+    /** the mark "ignore orphanhood": the song is kept though it is in no playlist. */
+    @JvmStatic external fun idxSetTrackIgnoreOrphan(id: Long, ignore: Boolean): Int
+
     /** one track by id, or by [path] if it is not null (`NOT_FOUND` — none). */
     @JvmStatic external fun idxGetTrack(id: Long, path: String?): CoreResult<TrackMeta>
 
@@ -148,6 +155,11 @@ object Native {
      */
     @JvmStatic external fun idxSavePlaylist(name: String, trackIds: LongArray, cover: String?): Int
 
+    /**
+     * deletes a playlist softly: it disappears, its deletion mark syncs to
+     * other devices (and goes into library packets); saving the name again
+     * brings it back.
+     */
     @JvmStatic external fun idxRemovePlaylist(name: String): Int
 
     // ── packets (cdc_*), `CdcStatus` codes ──
@@ -210,4 +222,102 @@ object Native {
 
     /** cancels the import and frees the session (0 is ignored). */
     @JvmStatic external fun cdcImportCancel(session: Long)
+
+    // ── devices (con_*), `ConStatus` codes ──
+    //
+    // a connection entry lives while the core runs (`id`); a paired device
+    // also has a db id that survives restarts. Pairing and encryption happen
+    // inside a sync session.
+
+    /** public key of this device (32 bytes, X25519) — show its fingerprint. */
+    @JvmStatic external fun conGetPubKey(): CoreResult<ByteArray>
+
+    /** a new entry for an unknown device (`ConState.UNCONNECTED`); `value` — its id. */
+    @JvmStatic external fun conAdd(): CoreResult<Long>
+
+    /** the transport is up: `UNCONNECTED` -> `CONNECTED`. */
+    @JvmStatic external fun conConnect(id: Long): Int
+
+    /** the transport is down: any -> `UNCONNECTED`, a running transfer is dropped. */
+    @JvmStatic external fun conDisconnect(id: Long): Int
+
+    /** drops an entry in any state. */
+    @JvmStatic external fun conRemove(id: Long): Int
+
+    /** every entry with its state, ordered by id. */
+    @JvmStatic external fun conGetDevices(): CoreResult<List<ConDevice>>
+
+    /** every device this one has paired with (from the db), for viewing. */
+    @JvmStatic external fun conGetPaired(): CoreResult<List<PairedDevice>>
+
+    /** names a paired device (for viewing only). */
+    @JvmStatic external fun conRename(pairedId: Long, name: String): Int
+
+    /** forgets a paired device; `WRONG_STATE` while it is paired over an entry. */
+    @JvmStatic external fun conForget(pairedId: Long): Int
+
+    // ── library sync (sync_*), `SyncStatus` codes ──
+    //
+    // the core runs the protocol, Kotlin carries the bytes over any transport
+    // (the side that listened is the host). Per connection: `conAdd` +
+    // `conConnect`, a `syncNew*` session, then until `syncFinished`:
+    // `syncWriteOutput` into the transport, handle `syncPollEvent` (on
+    // `SyncEventKind.IMPORT`: `syncImportFiles` -> `syncImportWriteFile` for
+    // each -> `syncImportDone`), `syncFeed` what was received (a closed stream
+    // — `syncCancel`). Then `syncFree`, `conDisconnect` + `conRemove`.
+
+    /** a two-way library sync over a `CONNECTED` entry; `value` — the session handle. */
+    @JvmStatic external fun syncNew(con: Long, host: Boolean): CoreResult<Long>
+
+    /**
+     * a one-way send of a selection with the export flags ([SyncWhat]; [names]
+     * for playlists, [ids] for tracks); the other side runs [syncNewReceive].
+     * `NOT_FOUND` — some playlist / track is not in the db.
+     */
+    @JvmStatic external fun syncNewSend(
+        con: Long,
+        host: Boolean,
+        what: Int,
+        names: Array<String>?,
+        ids: LongArray?,
+        withAudio: Boolean,
+        withNames: Boolean,
+        withCovers: Boolean,
+    ): CoreResult<Long>
+
+    /** a one-way receive; [force] — accept playlists older than the local ones. */
+    @JvmStatic external fun syncNewReceive(con: Long, host: Boolean, force: Boolean): CoreResult<Long>
+
+    /** frees the session (0 is ignored); cancel an unfinished one first. */
+    @JvmStatic external fun syncFree(session: Long)
+
+    /** bytes received from the peer: `data[0 until len]`. */
+    @JvmStatic external fun syncFeed(session: Long, data: ByteArray, len: Int): Int
+
+    /**
+     * writes everything to send into [fd] (the transport socket); `IO_FAILED`
+     * — it couldn't be written.
+     */
+    @JvmStatic external fun syncWriteOutput(session: Long, fd: Int): Int
+
+    /** the next event, null — none now. */
+    @JvmStatic external fun syncPollEvent(session: Long): SyncEvent?
+
+    /** `true` — the session is over (done or failed). */
+    @JvmStatic external fun syncFinished(session: Long): Boolean
+
+    /** the files of the waiting import (after `IMPORT`); `WRONG_STATE` — none is waiting. */
+    @JvmStatic external fun syncImportFiles(session: Long): CoreResult<List<SyncFile>>
+
+    /** writes import file [index] into [fd]; `IO_FAILED` — it couldn't be written. */
+    @JvmStatic external fun syncImportWriteFile(session: Long, index: Int, fd: Int): Int
+
+    /**
+     * the import files are written: `paths[i]` — the final path of file `i`
+     * (null — not written). The portion is saved and the peer answered.
+     */
+    @JvmStatic external fun syncImportDone(session: Long, paths: Array<String?>): Int
+
+    /** breaks the session off; the `Abort` for the peer goes out with [syncWriteOutput]. */
+    @JvmStatic external fun syncCancel(session: Long): Int
 }

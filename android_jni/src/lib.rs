@@ -30,12 +30,15 @@
 //!   (`ParcelFileDescriptor.fd`). The descriptor is borrowed — Kotlin closes it.
 //! - codes are the same numbers as the C ABI enums: `api::FFIInitStatus`,
 //!   `api::player::FFIEngineStatus`, `api::idx::FFIIdxStatus`,
-//!   `api::cdc::FFICdcStatus` (`InitStatus`, `EngineStatus`, `IdxStatus`,
-//!   `CdcStatus` in Kotlin).
+//!   `api::cdc::FFICdcStatus`, `api::con::FFIConStatus`,
+//!   `api::sync::FFISyncStatus` (`InitStatus`, `EngineStatus`, `IdxStatus`,
+//!   `CdcStatus`, `ConStatus`, `SyncStatus` in Kotlin).
 
 #![cfg(target_os = "android")]
 
 mod cdc;
+mod con;
 mod engine;
 mod idx;
+mod sync;
 mod util;

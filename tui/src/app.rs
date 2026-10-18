@@ -19,8 +19,8 @@ use crate::ui::{
     MetaEdit, Model, Playing, PlaylistView, Tab, TabEvent,
     layouts::{Hint, TextField, hints_line, progress_bar},
     tabs::{
-        ExportTab, HelpTab, ImportTab, PlaylistEditor, PlaylistsTab, SettingsTab, SongEditor,
-        SongTab, SyncTab,
+        ExportTab, HelpTab, ImportTab, OrphansTab, PlaylistEditor, PlaylistsTab, SettingsTab,
+        SongEditor, SongTab, SyncTab,
     },
 };
 
@@ -51,6 +51,7 @@ enum Status {
 enum Pending {
     DeletePlaylist(usize),
     RemovePlayingDb(usize),
+    DeleteFromDevice(Vec<TrackMeta>),
 }
 
 pub struct App {
@@ -462,11 +463,34 @@ impl App {
             // removal from the playlist in the db — with confirmation.
             TabEvent::RemovePlaying { index, from_db: false } => self.remove_playing(index, false),
             TabEvent::RemovePlaying { index, from_db: true } => {
-                self.confirm = Some((
-                    "remove track from playlist (db)? (y/N)".to_string(),
-                    Pending::RemovePlayingDb(index),
-                ));
+                // the pool is the whole library: there it means the device.
+                let in_pool = self.model.playing.as_ref().is_some_and(|p| {
+                    self.model.playlists.iter().any(|x| x.pool && x.name == p.name)
+                });
+                let track = self.model.playing.as_ref().and_then(|p| p.tracks.get(index)).cloned();
+                match (in_pool, track) {
+                    (true, Some(t)) => self.handle_tab_event(TabEvent::DeleteFromDevice(vec![t])),
+                    _ => {
+                        self.confirm = Some((
+                            "remove track from playlist (db)? (y/N)".to_string(),
+                            Pending::RemovePlayingDb(index),
+                        ))
+                    }
+                }
             }
+            TabEvent::DeleteFromDevice(tracks) if !tracks.is_empty() => {
+                let msg = match tracks.as_slice() {
+                    // (y/N) before the path: a long path is cut by the screen.
+                    [t] => format!(
+                        "delete '{}' from the device? (y/N) file: {}",
+                        t.title,
+                        t.path.as_deref().unwrap_or("(no path)")
+                    ),
+                    many => format!("delete {} songs from the device (their files)? (y/N)", many.len()),
+                };
+                self.confirm = Some((msg, Pending::DeleteFromDevice(tracks)));
+            }
+            TabEvent::DeleteFromDevice(_) => {}
             TabEvent::SavePlaylist { name, ids } => {
                 if ffi::db::save_playlist(&name, &ids, None) {
                     self.close_current();
@@ -663,6 +687,38 @@ impl App {
         match pending {
             Pending::DeletePlaylist(index) => self.delete_playlist(index),
             Pending::RemovePlayingDb(index) => self.remove_playing(index, true),
+            Pending::DeleteFromDevice(tracks) => self.delete_from_device(&tracks),
+        }
+    }
+
+    /// deletes songs from the device (files + library rows); a playing one
+    /// stops first.
+    fn delete_from_device(&mut self, tracks: &[TrackMeta]) {
+        let playing = self
+            .model
+            .playing
+            .as_ref()
+            .and_then(|p| p.tracks.get(p.current))
+            .map(ident);
+        if tracks.iter().any(|t| Some(ident(t)) == playing) {
+            ffi::engine::stop();
+        }
+        let errors: Vec<String> = tracks
+            .iter()
+            .filter_map(|t| ffi::db::delete_from_device(t).err())
+            .collect();
+        self.reload_library();
+        self.refresh_playing();
+        for t in self.screens.iter_mut() {
+            t.on_tracks_changed();
+        }
+        match errors.as_slice() {
+            [] if tracks.len() == 1 => self.set_status("song deleted from the device", Status::Info),
+            [] => self.set_status(format!("deleted from the device: {}", tracks.len()), Status::Info),
+            [first, ..] => self.set_status(
+                format!("not deleted: {} ({first})", errors.len()),
+                Status::Error,
+            ),
         }
     }
 
@@ -705,6 +761,7 @@ impl App {
                 self.push_transient(Box::new(SettingsTab::default()))
             }
             "export" => self.push_transient(Box::new(ExportTab::new(self.music_dir.clone()))),
+            "orphans" | "gc" => self.push_transient(Box::new(OrphansTab::new())),
             "import" => {
                 let tab = ImportTab::new(&self.music_dir);
                 self.push_transient(Box::new(tab))

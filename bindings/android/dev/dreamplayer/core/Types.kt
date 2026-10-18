@@ -4,8 +4,11 @@
 
 package dev.dreamplayer.core
 
-/** packet format version written by default (`codec::Version::V0_1`). */
-const val PACKET_VERSION: Int = 1
+/**
+ * packet format version written by default (`codec::Version::V0_11`: v0.1 +
+ * deleted playlists). `1` — v0.1, without them.
+ */
+const val PACKET_VERSION: Int = 2
 
 /**
  * result of a call that returns a value: [value] is set only when [status] is
@@ -46,6 +49,8 @@ data class TrackMeta(
     val color: String?,
     /** free-form user label. */
     val label: String?,
+    /** kept on purpose though in no playlist: the orphan collector skips it by default. */
+    val ignoreOrphan: Boolean,
 )
 
 /** playlist (`FFIPlaylist`). The name is its identifier. */
@@ -195,4 +200,186 @@ object IdxStatus {
     const val INDEX_FAILED = 8
     /** the core panicked; see [Native.coreLastPanic]. */
     const val PANIC = 9
+    /** an argument is out of range (e.g. an unknown [OrphanFilter]). */
+    const val INVALID_ARGUMENT = 10
+}
+
+/** which songs in no playlist [Native.idxGetOrphanTracks] lists (`api::idx::FFIOrphanFilter`). */
+object OrphanFilter {
+    /** not marked "ignore orphanhood" (the collector's default). */
+    const val NOT_IGNORED = 0
+    /** only the marked ones. */
+    const val IGNORED = 1
+    const val ALL = 2
+}
+
+// ── devices (con_*) ──
+
+/** a connection entry (`FFIConDevice`). */
+data class ConDevice(
+    val id: Long,
+    /** [ConState]. */
+    val state: Int,
+    /** [PairFailure], `NONE` unless `state` is `PAIR_FAILED`. */
+    val failure: Int,
+    /** [ConProcess]. */
+    val process: Int,
+    /** db id once paired. */
+    val pairedId: Long?,
+    /** 32 bytes, known after pairing. */
+    val pubKey: ByteArray?,
+    /** `Unknown` until known. */
+    val name: String,
+)
+
+/** a device this one has paired with (`FFIConPaired`). */
+data class PairedDevice(
+    val id: Long,
+    val pubKey: ByteArray,
+    /** user-given, for viewing only. */
+    val name: String,
+)
+
+object ConState {
+    const val UNCONNECTED = 0
+    const val CONNECTED = 1
+    /** keys are exchanged; ready to receive / send. */
+    const val PAIRED = 2
+    const val PAIR_FAILED = 3
+}
+
+object PairFailure {
+    const val NONE = 0
+    const val REJECTED = 1
+    const val TIMEOUT = 2
+    const val ERROR = 3
+    /** the key differs from the one saved for this device. */
+    const val KEY_MISMATCH = 4
+    /** this device is already paired over another entry. */
+    const val ALREADY_PAIRED = 5
+}
+
+object ConProcess {
+    const val FREE = 0
+    const val RECEIVING = 1
+    const val SENDING = 2
+}
+
+/** status codes of the `con*` functions (`api::con::FFIConStatus`). */
+object ConStatus {
+    const val OK = 0
+    const val NOT_INITIALIZED = 1
+    const val NULL_POINTER = 2
+    const val INVALID_UTF8 = 3
+    const val INVALID_ARGUMENT = 4
+    const val NO_DATABASE = 5
+    /** the key pair of this device can't be loaded / created. */
+    const val KEYS_FAILED = 6
+    const val UNKNOWN_DEVICE = 7
+    const val UNKNOWN_PAIRED_DEVICE = 8
+    /** the transition is not allowed in the current state. */
+    const val WRONG_STATE = 9
+    /** the device is already receiving or sending. */
+    const val BUSY = 10
+    const val DB_FAILED = 11
+    /** the core panicked; see [Native.coreLastPanic]. */
+    const val PANIC = 12
+    const val INVALID_PACKET = 13
+    const val WEAK_KEY = 14
+    const val DECRYPT_FAILED = 15
+    const val TOO_LONG = 16
+}
+
+// ── library sync (sync_*) ──
+
+/** what [Native.syncNewSend] sends. */
+object SyncWhat {
+    const val LIBRARY = 0
+    const val PLAYLISTS = 1
+    const val TRACKS = 2
+}
+
+/** a session event (`FFISyncEvent`). */
+data class SyncEvent(
+    /** [SyncEventKind]. */
+    val kind: Int,
+    /** [WireStatus] (`PEER_REJECTED`, `FAILED`). */
+    val status: Int,
+    /** the failure came from the peer. */
+    val byPeer: Boolean,
+    /** `PAIRED`: the db id of the peer. */
+    val pairedId: Long,
+    /** `SENT` / `RECEIVED`: the size of the data portion. */
+    val songs: Int,
+    val playlists: Int,
+)
+
+object SyncEventKind {
+    const val NONE = 0
+    /** keys are exchanged ([SyncEvent.pairedId]). */
+    const val PAIRED = 1
+    /** files to write: [Native.syncImportFiles] -> [Native.syncImportDone]. */
+    const val IMPORT = 2
+    /** the peer accepted a data portion. */
+    const val SENT = 3
+    /** a received data portion is saved. */
+    const val RECEIVED = 4
+    /** the peer didn't accept a portion; the session goes on. */
+    const val PEER_REJECTED = 5
+    const val DONE = 6
+    /** the session is over with an error. */
+    const val FAILED = 7
+}
+
+/** a file of a received data portion; the bytes go with [Native.syncImportWriteFile]. */
+data class SyncFile(
+    /** [ImportFileKind]. */
+    val kind: Int,
+    /** suggested name: safe on any OS, with an extension; not unique. */
+    val name: String,
+    val size: Long,
+    /** a local song with the same file name to write over (null — write anywhere). */
+    val replace: String?,
+)
+
+/** status codes of the `sync*` functions (`api::sync::FFISyncStatus`). */
+object SyncStatus {
+    const val OK = 0
+    const val NOT_INITIALIZED = 1
+    const val NULL_POINTER = 2
+    /** e.g. the number of import paths differs from the number of files. */
+    const val INVALID_ARGUMENT = 3
+    const val NO_DATABASE = 4
+    const val KEYS_FAILED = 5
+    const val UNKNOWN_DEVICE = 6
+    /** the entry is not `CONNECTED`, or no import is waiting. */
+    const val WRONG_STATE = 7
+    const val INVALID_UTF8 = 8
+    /** the core panicked; see [Native.coreLastPanic]. */
+    const val PANIC = 9
+    /** some playlist / track of a send selection is not in the db. */
+    const val NOT_FOUND = 10
+    const val DB_FAILED = 11
+
+    /** JNI only: the descriptor passed from Kotlin couldn't be written. */
+    const val IO_FAILED = -1
+}
+
+/** protocol statuses carried by `Ack` / `Abort` (`api::sync::frame::WireStatus`). */
+object WireStatus {
+    const val OK = 0
+    const val INVALID_PACKET = 1
+    const val UNEXPECTED = 2
+    /** not from / not for this pair of devices. */
+    const val DECRYPT_FAILED = 3
+    /** e.g. the key differs from the saved one. */
+    const val PAIR_FAILED = 4
+    /** a data portion was not accepted (its playlists are older). */
+    const val REJECTED = 5
+    const val WRITE_FAILED = 6
+    const val BUSY = 7
+    const val CANCELLED = 8
+    const val INTERNAL = 9
+    /** the two sides run different modes (sync / send / receive). */
+    const val MODE_MISMATCH = 10
 }

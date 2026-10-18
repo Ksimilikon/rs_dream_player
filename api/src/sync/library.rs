@@ -9,22 +9,28 @@
 //!
 //! only songs that are in some playlist are synced. A playlist is wanted if
 //! it is missing locally or the remote one is newer (`updated_at`, an unset
-//! date counts as 0). A song is wanted if a wanted remote playlist or a local
-//! playlist refers to it, the remote side has it and the local side doesn't.
+//! date counts as 0) than the local one — or than its local deletion. A
+//! remote deletion is wanted if the local playlist changed at or before it, an
+//! older local deletion or no local playlist at all (it travels on). A song is
+//! wanted if a wanted remote playlist or a local playlist refers to it, the
+//! remote side has it and the local side doesn't.
 
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
 };
 
-use codec::{Playlist, Song, Version};
-use storage::{Db, db::PlaylistHashRow};
+use codec::{DeletedPlaylist, Playlist, Song, Version};
+use storage::{
+    Db,
+    db::{DeletedPlaylistRow, PlaylistHashRow},
+};
 
 use super::frame::WireStatus;
-use crate::cdc::{hex, parse_hash, read_cover};
+use crate::cdc::{deleted_from_db, hex, parse_hash, read_cover};
 
 /// the codec version of every sync payload.
-const VERSION: Version = Version::V0_1;
+const VERSION: Version = Version::V0_11;
 /// a data portion is cut once its files reach this size (one song is never
 /// split, so a single larger song makes a larger portion).
 pub const PORTION_BYTES: u64 = 16 << 20;
@@ -67,7 +73,13 @@ pub fn index(db: &Db) -> Result<Vec<u8>, WireStatus> {
             ..Playlist::default()
         })
         .collect::<Vec<_>>();
-    codec::encode(VERSION, &songs, &playlists).map_err(internal)
+    let deleted: Vec<DeletedPlaylist> = db
+        .get_deleted_playlists(None)
+        .map_err(internal)?
+        .into_iter()
+        .map(deleted_from_db)
+        .collect();
+    codec::encode_with(VERSION, &songs, &playlists, &deleted).map_err(internal)
 }
 
 /// what the local side lacks compared to a remote index.
@@ -121,9 +133,16 @@ pub fn want(db: &Db, remote_index: &[u8]) -> Result<Want, WireStatus> {
         .iter()
         .filter_map(|(_, hash, _)| parse_hash(hash))
         .collect();
+    let local_deleted = db.get_deleted_playlists(None).map_err(internal)?;
+    // the time of the last local change: an update or the deletion.
     let local_dates: HashMap<&str, u64> = local_playlists
         .iter()
         .map(|p| (p.name.as_str(), p.updated_at.unwrap_or(0)))
+        .chain(local_deleted.iter().map(|d| (d.name.as_str(), d.deleted_at)))
+        .collect();
+    let deleted_here: HashMap<&str, u64> = local_deleted
+        .iter()
+        .map(|d| (d.name.as_str(), d.deleted_at))
         .collect();
 
     let wanted: Vec<&Playlist> = remote
@@ -135,6 +154,18 @@ pub fn want(db: &Db, remote_index: &[u8]) -> Result<Want, WireStatus> {
             Some(&local) => p.updated_at.unwrap_or(0) > local,
         })
         .collect();
+    // remote deletions this side hasn't applied: the local playlist changed
+    // at or before it, an older local deletion, or nothing here at all.
+    let wanted_deletions = remote
+        .deleted
+        .iter()
+        .filter(|d| !d.name.is_empty())
+        .filter(|d| match (deleted_here.get(d.name.as_str()), local_dates.get(d.name.as_str())) {
+            (Some(&at), _) => d.deleted_at > at,
+            (None, Some(&changed)) => changed <= d.deleted_at,
+            (None, None) => true,
+        })
+        .map(|d| d.name.clone());
 
     let remote_songs: HashSet<u128> = remote.songs.iter().map(|s| s.hash).collect();
     let local_refs = local_playlists
@@ -151,7 +182,11 @@ pub fn want(db: &Db, remote_index: &[u8]) -> Result<Want, WireStatus> {
 
     Ok(Want {
         songs,
-        playlists: wanted.into_iter().map(|p| p.name.clone()).collect(),
+        playlists: wanted
+            .into_iter()
+            .map(|p| p.name.clone())
+            .chain(wanted_deletions)
+            .collect(),
     })
 }
 
@@ -206,16 +241,24 @@ pub struct Plan {
     songs: Vec<(u128, PathBuf)>,
     next: usize,
     playlists: Vec<PlaylistHashRow>,
+    /// deleted playlists, sent with the playlists.
+    deleted: Vec<DeletedPlaylistRow>,
     playlists_sent: bool,
     flags: Flags,
 }
 
 impl Plan {
-    fn with(songs: Vec<(u128, PathBuf)>, playlists: Vec<PlaylistHashRow>, flags: Flags) -> Self {
+    fn with(
+        songs: Vec<(u128, PathBuf)>,
+        playlists: Vec<PlaylistHashRow>,
+        deleted: Vec<DeletedPlaylistRow>,
+        flags: Flags,
+    ) -> Self {
         Self {
             songs,
             next: 0,
             playlists,
+            deleted,
             playlists_sent: false,
             flags,
         }
@@ -226,19 +269,25 @@ impl Plan {
     pub fn new(db: &Db, want: &Want) -> Result<Self, WireStatus> {
         let hashes: Vec<String> = want.songs.iter().map(|&h| hex(h)).collect();
         let songs = songs_of(&db.get_track_hashes_by_hash(&hashes).map_err(internal)?);
+        // a wanted name is a playlist here or a deletion here.
         let playlists = db
             .get_playlist_hashes(Some(&want.playlists))
             .map_err(internal)?;
-        Ok(Self::with(songs, playlists, Flags::ALL))
+        let deleted = db
+            .get_deleted_playlists(Some(&want.playlists))
+            .map_err(internal)?;
+        Ok(Self::with(songs, playlists, deleted, Flags::ALL))
     }
 
     /// a selection to send one way (like an export).
     pub fn selection(db: &Db, what: &Selection, flags: Flags) -> Result<Self, PlanError> {
         let db_err = |_| PlanError::Db;
-        let (songs, playlists) = match what {
+        let (songs, playlists, deleted) = match what {
+            // the whole library carries its deletions too.
             Selection::Library => (
                 db.get_track_hashes(None).map_err(db_err)?,
                 db.get_playlist_hashes(None).map_err(db_err)?,
+                db.get_deleted_playlists(None).map_err(db_err)?,
             ),
             Selection::Playlists(names) => {
                 let playlists = db.get_playlist_hashes(Some(names)).map_err(db_err)?;
@@ -255,6 +304,7 @@ impl Plan {
                 (
                     db.get_track_hashes_by_hash(&hashes).map_err(db_err)?,
                     playlists,
+                    Vec::new(),
                 )
             }
             Selection::Tracks(ids) => {
@@ -262,7 +312,7 @@ impl Plan {
                 if tracks.len() != ids.len() {
                     return Err(PlanError::NotFound);
                 }
-                (tracks, Vec::new())
+                (tracks, Vec::new(), Vec::new())
             }
         };
         // a song without its file is skipped by the receiver anyway.
@@ -270,7 +320,7 @@ impl Plan {
             true => songs_of(&songs),
             false => Vec::new(),
         };
-        Ok(Self::with(songs, playlists, flags))
+        Ok(Self::with(songs, playlists, deleted, flags))
     }
 
     /// the next data portion; `None` — everything is sent. Reads files, so it
@@ -312,7 +362,7 @@ impl Plan {
                 );
             }
         }
-        if self.playlists_sent || self.playlists.is_empty() {
+        if self.playlists_sent || (self.playlists.is_empty() && self.deleted.is_empty()) {
             return None;
         }
         self.playlists_sent = true;
@@ -334,12 +384,13 @@ impl Plan {
                 }
             })
             .collect();
+        let deleted: Vec<DeletedPlaylist> = self.deleted.iter().cloned().map(deleted_from_db).collect();
         let stats = PortionStats {
             songs: 0,
-            playlists: playlists.len() as u32,
+            playlists: (playlists.len() + deleted.len()) as u32,
         };
         Some(
-            codec::encode(VERSION, &[], &playlists)
+            codec::encode_with(VERSION, &[], &playlists, &deleted)
                 .map(|p| (p, stats))
                 .map_err(internal),
         )

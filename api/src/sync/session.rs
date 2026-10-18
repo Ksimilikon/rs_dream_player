@@ -386,7 +386,7 @@ impl SyncSession {
             .count();
         let stats = PortionStats {
             songs: songs as u32,
-            playlists: session.playlists.len() as u32,
+            playlists: (session.playlists.len() + session.deleted.len()) as u32,
         };
         match cdc::commit(env.store(), session, paths) {
             Ok(()) => {

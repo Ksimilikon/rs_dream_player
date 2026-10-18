@@ -498,3 +498,71 @@ fn unknown_selection_is_not_found() {
     let missing = Plan::selection(&a.db, &Selection::Tracks(vec![42]), Flags::ALL);
     assert!(matches!(missing, Err(PlanError::NotFound)));
 }
+
+/// a new pair of sessions over the same devices (a second sync).
+fn again(host: &Device, client: &Device) -> (SyncSession, SyncSession) {
+    for d in [host, client] {
+        d.mgr.borrow_mut().disconnect(d.con).unwrap();
+        d.mgr.borrow_mut().connect(d.con).unwrap();
+    }
+    sessions(host, client)
+}
+
+fn deleted_names(d: &Device) -> Vec<String> {
+    d.db.get_deleted_playlists(None).unwrap().into_iter().map(|p| p.name).collect()
+}
+
+#[test]
+fn a_deletion_reaches_the_other_device() {
+    let host = Device::new();
+    let client = Device::new();
+    host.playlist("mix", 10, &[("a.mp3", "2.mp3")]);
+    let (mut hs, mut cs) = sessions(&host, &client);
+    pump(&host, &mut hs, &client, &mut cs);
+    assert_eq!(client.playlists().len(), 1);
+
+    host.db.remove_playlist("mix").unwrap();
+    let (mut hs, mut cs) = again(&host, &client);
+    let (he, ce) = pump(&host, &mut hs, &client, &mut cs);
+    assert_eq!(he.last(), Some(&Event::Done), "{he:?}");
+    assert_eq!(ce.last(), Some(&Event::Done), "{ce:?}");
+
+    assert!(client.playlists().is_empty(), "deleted on the client too");
+    assert_eq!(deleted_names(&client), vec!["mix".to_string()]);
+    // the song stays (songs are deleted physically, by hand).
+    assert_eq!(client.hashes().len(), 1);
+
+    // nothing left to move afterwards.
+    let (mut hs, mut cs) = again(&host, &client);
+    let (_, ce) = pump(&host, &mut hs, &client, &mut cs);
+    assert!(!ce.iter().any(|e| matches!(e, Event::Received(_))), "{ce:?}");
+}
+
+#[test]
+fn a_later_change_beats_a_deletion() {
+    let host = Device::new();
+    let client = Device::new();
+    host.playlist("mix", 10, &[("a.mp3", "2.mp3")]);
+    // deleted on the host at 100, changed on the client at 500.
+    host.db
+        .save_import(
+            &[],
+            &[],
+            &[storage::db::DeletedPlaylistRow {
+                name: "mix".into(),
+                deleted_at: 100,
+            }],
+        )
+        .unwrap();
+    client.playlist("mix", 500, &[("b.mp3", "was_wallen_wir_trinken.mp3")]);
+
+    let (mut hs, mut cs) = sessions(&host, &client);
+    let (he, _) = pump(&host, &mut hs, &client, &mut cs);
+    assert_eq!(he.last(), Some(&Event::Done), "{he:?}");
+
+    // the client's version came back on the host; nobody keeps the deletion.
+    assert_eq!(host.playlists(), client.playlists());
+    assert_eq!(host.playlists().len(), 1);
+    assert!(deleted_names(&host).is_empty());
+    assert!(deleted_names(&client).is_empty());
+}

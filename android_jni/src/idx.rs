@@ -57,7 +57,7 @@ fn track_meta<'l>(env: &mut Env<'l>, m: &idx::FFITrackMetadata) -> Result<JObjec
         jni_sig!(
             "(Ljava/lang/Long;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;\
              Ljava/lang/String;Ljava/util/List;JIIJLjava/lang/String;\
-             FZLjava/lang/String;Ljava/lang/String;)V"
+             FZLjava/lang/String;Ljava/lang/String;Z)V"
         ),
         &[
             JValue::Object(&id),
@@ -75,6 +75,7 @@ fn track_meta<'l>(env: &mut Env<'l>, m: &idx::FFITrackMetadata) -> Result<JObjec
             JValue::Bool(m.invalid),
             JValue::Object(&color),
             JValue::Object(&label),
+            JValue::Bool(m.ignore_orphan),
         ],
     )
 }
@@ -109,7 +110,7 @@ fn tracks_result<'l>(
 }
 
 /// Java `String[]` -> `Vec<CString>` (null array -> empty).
-fn c_string_array(env: &mut Env, arr: &JObjectArray<JString>) -> Result<Vec<CString>> {
+pub(crate) fn c_string_array(env: &mut Env, arr: &JObjectArray<JString>) -> Result<Vec<CString>> {
     if arr.is_null() {
         return Ok(Vec::new());
     }
@@ -123,7 +124,7 @@ fn c_string_array(env: &mut Env, arr: &JObjectArray<JString>) -> Result<Vec<CStr
 }
 
 /// `LongArray` -> `Vec<i64>` (null -> empty).
-fn long_array(env: &mut Env, arr: &JLongArray) -> Result<Vec<i64>> {
+pub(crate) fn long_array(env: &mut Env, arr: &JLongArray) -> Result<Vec<i64>> {
     if arr.is_null() {
         return Ok(Vec::new());
     }
@@ -195,6 +196,30 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxGetTracks<'c>(
     _class: JClass<'c>,
 ) -> JObject<'c> {
     run(&mut env, |env| tracks_result(env, |out| unsafe { idx::idx_get_tracks(out) }))
+}
+
+/// songs that are in no playlist (`filter` — `api::idx::FFIOrphanFilter`)
+/// -> `CoreResult<List<TrackMeta>>`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dreamplayer_core_Native_idxGetOrphanTracks<'c>(
+    mut env: EnvUnowned<'c>,
+    _class: JClass<'c>,
+    filter: i32,
+) -> JObject<'c> {
+    run(&mut env, |env| {
+        tracks_result(env, |out| unsafe { idx::idx_get_orphan_tracks(filter as u32, out) })
+    })
+}
+
+/// the mark "ignore orphanhood" of a track.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSetTrackIgnoreOrphan<'c>(
+    mut env: EnvUnowned<'c>,
+    _class: JClass<'c>,
+    id: i64,
+    ignore: bool,
+) -> i32 {
+    run(&mut env, |_| Ok(code(idx::idx_set_track_ignore_orphan(id, ignore))))
 }
 
 /// one track by id or path (the path wins if not null) ->

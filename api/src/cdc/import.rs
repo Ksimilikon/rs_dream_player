@@ -21,8 +21,11 @@
 //!   file wasn't written), the local values are kept.
 //! - dates (without `force`): the whole packet is rejected (`Outdated`) if at
 //!   least one playlist has a local `updated_at` and the packet one is either
-//!   unset or smaller. Without a local date there is nothing to compare —
-//!   accept.
+//!   unset or smaller, or was deleted here at or after the packet one changed.
+//!   Without a local date there is nothing to compare — accept.
+//! - deleted playlists (v0.11+): a local playlist changed at or before the
+//!   deletion is soft-deleted, one changed later is kept; an unknown name is
+//!   remembered as deleted. They never make a packet `Outdated`.
 
 use std::{
     collections::HashMap,
@@ -32,8 +35,12 @@ use std::{
 };
 
 use audio_structs::{track::Track, track_virtual::TrackVirtual};
-use codec::{Playlist, Song};
-use storage::{Db, db::PlaylistHashRow, traits::indexator::Indexator};
+use codec::{DeletedPlaylist, Playlist, Song};
+use storage::{
+    Db,
+    db::{DeletedPlaylistRow, PlaylistHashRow},
+    traits::indexator::Indexator,
+};
 
 use super::{FFICdcStatus, raw_slice};
 
@@ -81,6 +88,8 @@ pub struct ImportSession {
     /// only new songs (with audio, hash not in the db).
     pub(crate) songs: Vec<Song>,
     pub(crate) playlists: Vec<Playlist>,
+    /// playlists deleted on the other side (v0.11+).
+    pub(crate) deleted: Vec<DeletedPlaylist>,
     plan: Vec<Planned>,
     /// owns the strings `files[i].name` points to.
     _names: Vec<CString>,
@@ -251,6 +260,11 @@ pub(crate) fn prepare(
         .into_iter()
         .filter(|p| !p.name.is_empty())
         .collect();
+    let deleted: Vec<DeletedPlaylist> = packet
+        .deleted
+        .into_iter()
+        .filter(|d| !d.name.is_empty())
+        .collect();
 
     let mut plan = Vec::new();
     let mut names = Vec::new();
@@ -291,6 +305,7 @@ pub(crate) fn prepare(
         force,
         songs,
         playlists,
+        deleted,
         plan,
         _names: names,
         files,
@@ -347,7 +362,15 @@ pub(crate) fn commit(
             .into_iter()
             .filter(|(_, hash)| !db.hash_exist(hash.clone()))
             .collect();
-        db.save_import(&tracks, &playlists)
+        let deleted: Vec<DeletedPlaylistRow> = session
+            .deleted
+            .iter()
+            .map(|d| DeletedPlaylistRow {
+                name: d.name.clone(),
+                deleted_at: d.deleted_at,
+            })
+            .collect();
+        db.save_import(&tracks, &playlists, &deleted)
             .map_err(|_| FFICdcStatus::WriteFailed)
     })
 }
@@ -364,12 +387,24 @@ fn check_dates(db: &Db, playlists: &[Playlist], force: bool) -> Result<(), FFICd
         .into_iter()
         .map(|p| (p.name, p.updated_at))
         .collect();
+    let deleted: HashMap<String, u64> = db
+        .get_deleted_playlists(None)
+        .map_err(|_| FFICdcStatus::ReadFailed)?
+        .into_iter()
+        .map(|d| (d.name, d.deleted_at))
+        .collect();
     for p in playlists {
         if let Some(Some(local)) = local.get(&p.name) {
             match p.updated_at {
                 Some(remote) if remote >= *local => {}
                 _ => return Err(FFICdcStatus::Outdated),
             }
+        }
+        // deleted here after (or when) the packet one changed.
+        if let Some(&at) = deleted.get(&p.name)
+            && p.updated_at.unwrap_or(0) <= at
+        {
+            return Err(FFICdcStatus::Outdated);
         }
     }
     Ok(())
@@ -467,11 +502,23 @@ mod tests {
         }
 
         fn local_playlist(&self, name: &str, updated: Option<u64>) {
+            let Some(t) = updated else {
+                // an undated row (from before saves were dated): only an
+                // import leaves the date unset.
+                let row = PlaylistHashRow {
+                    id: 0,
+                    name: name.into(),
+                    cover_art: None,
+                    created_at: None,
+                    updated_at: None,
+                    hashes: Vec::new(),
+                };
+                self.db.save_import(&[], &[row], &[]).unwrap();
+                return;
+            };
             let mut p = DbPlaylist::from_tracks(vec![]);
             p.set_name(name.into());
-            if let Some(t) = updated {
-                p.set_updated_at(t);
-            }
+            p.set_updated_at(t);
             self.db.save_playlist(p).unwrap();
         }
 
@@ -662,6 +709,42 @@ mod tests {
         assert_eq!(commit(&l, &session, &paths), Ok(()));
         let pls = l.db.get_playlist_hashes(None).unwrap();
         assert_eq!(pls[0].updated_at, Some(1));
+    }
+
+    /// a v0.11 packet with deleted playlists only.
+    fn deletions(gone: &[(&str, u64)]) -> Vec<u8> {
+        let deleted: Vec<DeletedPlaylist> = gone
+            .iter()
+            .map(|&(name, deleted_at)| DeletedPlaylist {
+                name: name.into(),
+                deleted_at,
+            })
+            .collect();
+        codec::encode_with(Version::V0_11, &[], &[], &deleted).unwrap()
+    }
+
+    #[test]
+    fn imported_deletion_soft_deletes_an_older_playlist() {
+        let l = Local::new("deletion");
+        l.local_playlist("old", Some(10));
+        l.local_playlist("fresh", Some(500));
+        let session = prepare(&l, &deletions(&[("old", 100), ("fresh", 100)]), false).unwrap();
+        assert_eq!(commit(&l, &session, &[]), Ok(()));
+        let live: Vec<String> = l.db.get_playlist_hashes(None).unwrap().into_iter().map(|p| p.name).collect();
+        assert_eq!(live, vec!["fresh".to_string()]);
+        let gone = l.db.get_deleted_playlists(None).unwrap();
+        assert_eq!((gone[0].name.as_str(), gone[0].deleted_at), ("old", 100));
+    }
+
+    #[test]
+    fn a_playlist_deleted_later_here_is_outdated() {
+        let l = Local::new("deleted-later");
+        l.local_playlist("mix", Some(10));
+        l.db.remove_playlist("mix").unwrap();
+        assert_eq!(
+            prepare(&l, &packet(vec![playlist("mix", Some(20))]), false).err(),
+            Some(FFICdcStatus::Outdated)
+        );
     }
 
     #[test]

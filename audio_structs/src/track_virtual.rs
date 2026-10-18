@@ -22,6 +22,9 @@ pub struct TrackVirtual {
     pub color: Option<String>,
     /// DB-only free-form user text label.
     pub user_label: Option<String>,
+    /// DB-only: the track is kept on purpose though it is in no playlist
+    /// (the orphan collector doesn't list it by default).
+    pub ignore_orphan: bool,
 }
 
 #[derive(Debug)]
@@ -78,6 +81,7 @@ impl TrackVirtual {
             invalid: false,
             color: None,
             user_label: None,
+            ignore_orphan: false,
         }
     }
 
@@ -94,6 +98,7 @@ impl TrackVirtual {
                 invalid: false,
                 color: None,
                 user_label: None,
+                ignore_orphan: false,
             })
         } else {
             if !Track::is_music_file(&path)? {
@@ -108,6 +113,7 @@ impl TrackVirtual {
                 invalid: false,
                 color: None,
                 user_label: None,
+                ignore_orphan: false,
             })
         }
     }

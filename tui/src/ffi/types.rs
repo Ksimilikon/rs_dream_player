@@ -23,6 +23,8 @@ pub struct TrackMeta {
     pub invalid: bool,
     pub color: Option<String>,
     pub label: Option<String>,
+    /// kept on purpose though in no playlist (the orphan collector skips it).
+    pub ignore_orphan: bool,
 }
 
 /// playlist (an owning copy of `FFIPlaylist`): name, track id order, cover.
@@ -92,6 +94,7 @@ impl TrackMeta {
             invalid: m.invalid,
             color: unsafe { opt_string(m.color) },
             label: unsafe { opt_string(m.user_label) },
+            ignore_orphan: m.ignore_orphan,
         }
     }
 

@@ -9,8 +9,9 @@ use std::ptr;
 use api::cdc::{self, FFICdcStatus, FFIImportFileKind, FFIImportFiles, ImportSession};
 use api::mem;
 
-/// packet format version the frontend writes (`codec::Version::V0_1`).
-const PACKET_VERSION: u32 = 1;
+/// packet format version the frontend writes (`codec::Version::V0_11`:
+/// v0.1 + deleted playlists).
+const PACKET_VERSION: u32 = 2;
 
 /// what to put into the packet.
 #[derive(Debug, Clone, Copy)]

@@ -12,6 +12,8 @@ pub enum SectionTag {
     Playlists = 2,
     /// playlist covers; always the last section.
     Covers = 3,
+    /// deleted playlists: names and deletion times (v0.11+).
+    Deleted = 4,
 }
 
 impl From<SectionTag> for u8 {
@@ -29,6 +31,7 @@ impl TryFrom<u8> for SectionTag {
             1 => Ok(SectionTag::Songs),
             2 => Ok(SectionTag::Playlists),
             3 => Ok(SectionTag::Covers),
+            4 => Ok(SectionTag::Deleted),
             _ => Err(n),
         }
     }

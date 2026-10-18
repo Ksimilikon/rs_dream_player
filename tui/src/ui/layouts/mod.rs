@@ -14,7 +14,7 @@ pub use form::{Form, FormField};
 pub use hints::{Hint, hints_line};
 pub use log::MessageLog;
 pub use list::{ListLine, ListView, SortDir, SortKey};
-pub use progress::progress_bar;
+pub use progress::{fmt_time, progress_bar};
 pub use search::{Search, SearchInput};
 pub use text::TextField;
 

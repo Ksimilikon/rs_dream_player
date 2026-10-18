@@ -124,6 +124,7 @@ impl Db {
         track.invalid = row.invalid;
         track.color = row.color;
         track.user_label = row.user_label;
+        track.ignore_orphan = row.ignore_orphan;
         Ok(track)
     }
 
@@ -176,7 +177,8 @@ impl Db {
     ) -> Result<Vec<Playlist>, Box<dyn Error>> {
         let mut sql =
             String::from("SELECT id, name, cover_art, created_at, updated_at FROM playlists");
-        let mut conds: Vec<&str> = Vec::new();
+        // a deleted playlist is only a mark for sync.
+        let mut conds: Vec<&str> = vec!["deleted_at IS NULL"];
         let mut vals: Vec<Value> = Vec::new();
         if let Some(n) = &name {
             conds.push("name LIKE ?");
@@ -186,10 +188,8 @@ impl Db {
             conds.push("id = ?");
             vals.push(Value::Integer(i));
         }
-        if !conds.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&conds.join(" AND "));
-        }
+        sql.push_str(" WHERE ");
+        sql.push_str(&conds.join(" AND "));
         sql.push_str(" ORDER BY name");
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -210,6 +210,26 @@ impl Db {
             out.push(self.build_playlist(pid, pname, cover, created, updated)?);
         }
         Ok(out)
+    }
+
+    /// songs that are in no playlist (the library's garbage candidates), by
+    /// title; [`OrphanFilter`] — with / without the ones kept on purpose.
+    pub fn get_orphan_tracks(&self, filter: OrphanFilter) -> Result<Vec<TrackVirtual>, Box<dyn Error>> {
+        let kept = match filter {
+            OrphanFilter::NotIgnored => " AND t.ignore_orphan = 0",
+            OrphanFilter::Ignored => " AND t.ignore_orphan = 1",
+            OrphanFilter::All => "",
+        };
+        let sql = format!(
+            "SELECT {TRACK_COLUMNS} FROM tracks t \
+             WHERE NOT EXISTS (SELECT 1 FROM playlist_tracks pt WHERE pt.song_hash = t.hash){kept} \
+             ORDER BY t.title"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map([], TrackRow::from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter().map(|row| self.build_track(row)).collect()
     }
 
     /// selects songs from the shared pool by parameters. `name` and `artist`
@@ -346,11 +366,53 @@ impl Db {
         Ok(())
     }
 
-    /// removes a playlist by name. Track bindings (`playlist_tracks`) go away
-    /// by FK cascade; the tracks themselves stay in the library.
+    /// soft-deletes a playlist by name: the row stays with `deleted_at` (now),
+    /// so the deletion reaches other devices on sync; its track list is
+    /// dropped, the tracks themselves stay in the library. An already deleted
+    /// / unknown name is a no-op.
     pub fn remove_playlist(&self, name: &str) -> Result<(), Box<dyn Error>> {
-        self.conn
-            .execute("DELETE FROM playlists WHERE name = ?1", [name])?;
+        let tx = self.conn.unchecked_transaction()?;
+        soft_delete(&tx, name, unix_now())?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// deleted playlists (name, deletion time). `names` == `None` -> all of
+    /// them; otherwise only these names (unknown / live ones are skipped).
+    pub fn get_deleted_playlists(
+        &self,
+        names: Option<&[String]>,
+    ) -> Result<Vec<DeletedPlaylistRow>, Box<dyn Error>> {
+        let row = |r: &rusqlite::Row<'_>| {
+            Ok(DeletedPlaylistRow {
+                name: r.get(0)?,
+                deleted_at: r.get::<_, i64>(1)? as u64,
+            })
+        };
+        let Some(names) = names else {
+            let mut stmt = self.conn.prepare(
+                "SELECT name, deleted_at FROM playlists WHERE deleted_at IS NOT NULL ORDER BY id",
+            )?;
+            return Ok(stmt.query_map([], row)?.collect::<Result<Vec<_>, _>>()?);
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT name, deleted_at FROM playlists WHERE name = ?1 AND deleted_at IS NOT NULL",
+        )?;
+        let mut out = Vec::new();
+        for name in names {
+            if let Some(found) = stmt.query_map([name], row)?.next() {
+                out.push(found?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// the mark "kept on purpose though in no playlist" (orphan collector).
+    pub fn set_track_ignore_orphan(&self, id: i64, ignore: bool) -> Result<(), Box<dyn Error>> {
+        self.conn.execute(
+            "UPDATE tracks SET ignore_orphan = ?2 WHERE id = ?1",
+            params![id, ignore as i64],
+        )?;
         Ok(())
     }
 
@@ -611,11 +673,13 @@ impl Db {
         let mut metas = match names {
             None => self
                 .conn
-                .prepare(&format!("{COLUMNS} ORDER BY id"))?
+                .prepare(&format!("{COLUMNS} WHERE deleted_at IS NULL ORDER BY id"))?
                 .query_map([], meta)?
                 .collect::<Result<Vec<_>, _>>()?,
             Some(names) => {
-                let mut stmt = self.conn.prepare(&format!("{COLUMNS} WHERE name = ?1"))?;
+                let mut stmt = self
+                    .conn
+                    .prepare(&format!("{COLUMNS} WHERE name = ?1 AND deleted_at IS NULL"))?;
                 let mut out = Vec::with_capacity(names.len());
                 for name in names {
                     if let Some(found) = stmt.query_map([name], meta)?.next() {
@@ -645,10 +709,16 @@ impl Db {
     /// - `playlists` — playlists by name (`id` is ignored): created or
     ///   rewritten entirely with the `hashes` list. `None` cover / dates don't
     ///   overwrite an already saved value.
+    ///
+    /// a deleted local playlist comes back with an imported one; `deleted` —
+    /// playlists deleted on the other side: a local playlist changed at or
+    /// before the deletion is soft-deleted (a later local change wins), an
+    /// unknown name is remembered as deleted so the deletion travels on.
     pub fn save_import(
         &self,
         tracks: &[(TrackVirtual, String)],
         playlists: &[PlaylistHashRow],
+        deleted: &[DeletedPlaylistRow],
     ) -> Result<(), Box<dyn Error>> {
         let tx = self.conn.unchecked_transaction()?;
         for (track, hash) in tracks {
@@ -662,7 +732,8 @@ impl Db {
                  ON CONFLICT(name) DO UPDATE SET \
                     cover_art = COALESCE(excluded.cover_art, cover_art), \
                     created_at = COALESCE(excluded.created_at, created_at), \
-                    updated_at = COALESCE(excluded.updated_at, updated_at)",
+                    updated_at = COALESCE(excluded.updated_at, updated_at), \
+                    deleted_at = NULL",
                 params![
                     pl.name,
                     pl.cover_art.as_ref().map(|p| p.to_string_lossy().into_owned()),
@@ -685,6 +756,9 @@ impl Db {
                     params![playlist_id, hash, pos as i64],
                 )?;
             }
+        }
+        for d in deleted {
+            apply_deletion(&tx, &d.name, d.deleted_at)?;
         }
         tx.commit()?;
         Ok(())
@@ -796,22 +870,28 @@ impl Indexator for Db {
         let cover = playlist
             .get_cover_art()
             .map(|p| p.to_string_lossy().into_owned());
+        // a local save is a change: dated now unless the playlist carries its
+        // own dates (sync compares them); an existing creation date is kept. A
+        // deleted playlist with this name comes back.
+        let now = unix_now();
         let created = playlist.get_created_at();
-        let updated = playlist.get_updated_at();
+        let updated = playlist.get_updated_at().unwrap_or(now);
 
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO playlists (name, cover_art, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4) \
+             VALUES (?1, ?2, COALESCE(?3, ?5), ?4) \
              ON CONFLICT(name) DO UPDATE SET \
                 cover_art = excluded.cover_art, \
-                created_at = excluded.created_at, \
-                updated_at = excluded.updated_at",
+                created_at = COALESCE(?3, created_at, ?5), \
+                updated_at = excluded.updated_at, \
+                deleted_at = NULL",
             params![
                 name,
                 cover,
                 created.map(|t| t as i64),
-                updated.map(|t| t as i64)
+                updated as i64,
+                now as i64
             ],
         )?;
         let playlist_id: i64 =
@@ -841,7 +921,8 @@ impl Indexator for Db {
     fn get_playlist(&self, name: String) -> Result<Playlist, Box<dyn Error>> {
         let (id, cover, created, updated): (i64, Option<String>, Option<i64>, Option<i64>) =
             self.conn.query_row(
-                "SELECT id, cover_art, created_at, updated_at FROM playlists WHERE name = ?1",
+                "SELECT id, cover_art, created_at, updated_at FROM playlists \
+                 WHERE name = ?1 AND deleted_at IS NULL",
                 [&name],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )?;
@@ -872,6 +953,81 @@ impl Indexator for Db {
 
 /// (id, hash, path) of a track — see [`Db::get_track_hashes`].
 pub type TrackHashRow = (i64, String, PathBuf);
+
+/// which songs in no playlist [`Db::get_orphan_tracks`] lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrphanFilter {
+    /// the ones not marked "kept on purpose" (the collector's default).
+    NotIgnored,
+    /// only the ones marked "kept on purpose".
+    Ignored,
+    /// both.
+    All,
+}
+
+/// a soft-deleted playlist: its name (the identifier) and when.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletedPlaylistRow {
+    pub name: String,
+    pub deleted_at: u64,
+}
+
+/// unix seconds now.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// soft-deletes `name` at `at`: the row keeps its name and dates, gets
+/// `deleted_at`, loses its track list. Unknown / already deleted — no-op.
+fn soft_delete(conn: &Connection, name: &str, at: u64) -> Result<(), Box<dyn Error>> {
+    let changed = conn.execute(
+        "UPDATE playlists SET deleted_at = ?2 WHERE name = ?1 AND deleted_at IS NULL",
+        params![name, at as i64],
+    )?;
+    if changed > 0 {
+        conn.execute(
+            "DELETE FROM playlist_tracks \
+             WHERE playlist_id = (SELECT id FROM playlists WHERE name = ?1)",
+            [name],
+        )?;
+    }
+    Ok(())
+}
+
+/// a deletion that came from another device (import / sync): the later of
+/// the local change and the deletion wins; at the same second — the deletion.
+fn apply_deletion(conn: &Connection, name: &str, at: u64) -> Result<(), Box<dyn Error>> {
+    let local: Option<(Option<i64>, Option<i64>)> = conn
+        .query_row(
+            "SELECT updated_at, deleted_at FROM playlists WHERE name = ?1",
+            [name],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match local {
+        // unknown here: remember the deletion so it travels on.
+        None => {
+            conn.execute(
+                "INSERT INTO playlists (name, deleted_at) VALUES (?1, ?2)",
+                params![name, at as i64],
+            )?;
+        }
+        // live, changed at or before the deletion.
+        Some((updated, None)) if updated.unwrap_or(0) as u64 <= at => soft_delete(conn, name, at)?,
+        // live and changed later: the local change wins.
+        Some((_, None)) => {}
+        // already deleted: keep the later deletion time.
+        Some((_, Some(_))) => {
+            conn.execute(
+                "UPDATE playlists SET deleted_at = MAX(deleted_at, ?2) WHERE name = ?1",
+                params![name, at as i64],
+            )?;
+        }
+    }
+    Ok(())
+}
 
 /// playlist with song hashes — see [`Db::get_playlist_hashes`].
 pub struct PlaylistHashRow {
@@ -928,12 +1084,14 @@ struct TrackRow {
     color: Option<String>,
     user_label: Option<String>,
     invalid: bool,
+    ignore_orphan: bool,
 }
 
 /// track column list (with the `t` alias) for SELECTs returning [`TrackRow`].
 /// The album is pulled in by a correlated subquery on `album_id`.
 const TRACK_COLUMNS: &str = "t.id, t.title, t.duration, t.cover_art, t.path, t.volume, \
-     (SELECT name FROM albums WHERE id = t.album_id), t.color, t.user_label, t.invalid";
+     (SELECT name FROM albums WHERE id = t.album_id), t.color, t.user_label, t.invalid, \
+     t.ignore_orphan";
 
 impl TrackRow {
     fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
@@ -948,6 +1106,7 @@ impl TrackRow {
             color: r.get(7)?,
             user_label: r.get(8)?,
             invalid: r.get(9)?,
+            ignore_orphan: r.get(10)?,
         })
     }
 }
@@ -1181,6 +1340,156 @@ mod tests {
         TrackVirtual::new(0, path, metadata)
     }
 
+    /// a playlist `name` of the given tracks with an explicit update time.
+    fn save_named(db: &Db, name: &str, tracks: Vec<TrackVirtual>, updated: u64) {
+        let mut pl = Playlist::from_tracks(tracks);
+        pl.set_name(name.into());
+        pl.set_updated_at(updated);
+        db.save_playlist(pl).unwrap();
+    }
+
+    fn live_names(db: &Db) -> Vec<String> {
+        db.get_playlist_hashes(None).unwrap().into_iter().map(|p| p.name).collect()
+    }
+
+    fn deleted(db: &Db) -> Vec<(String, u64)> {
+        db.get_deleted_playlists(None)
+            .unwrap()
+            .into_iter()
+            .map(|d| (d.name, d.deleted_at))
+            .collect()
+    }
+
+    #[test]
+    fn removing_a_playlist_soft_deletes_it() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        save_named(&db, "mix", vec![fixture_track(dir.path(), "a.mp3", "A", "X")], 100);
+        db.remove_playlist("mix").unwrap();
+
+        assert!(live_names(&db).is_empty());
+        assert!(db.get_playlists(None, None).unwrap().is_empty());
+        let gone = deleted(&db);
+        assert_eq!(gone.len(), 1);
+        assert_eq!(gone[0].0, "mix");
+        // its song is now in no playlist.
+        assert_eq!(db.get_orphan_tracks(OrphanFilter::All).unwrap().len(), 1);
+
+        // the same name saved again comes back.
+        save_named(&db, "mix", vec![], 0);
+        assert_eq!(live_names(&db), vec!["mix".to_string()]);
+        assert!(deleted(&db).is_empty());
+    }
+
+    #[test]
+    fn a_local_save_is_dated() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        let mut pl = Playlist::from_tracks(vec![]);
+        pl.set_name("undated".into());
+        db.save_playlist(pl).unwrap();
+        let row = db.get_playlist_hashes(None).unwrap().remove(0);
+        assert!(row.updated_at.unwrap() > 1_600_000_000);
+        assert!(row.created_at.is_some());
+    }
+
+    #[test]
+    fn imported_deletions_follow_the_later_change() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        save_named(&db, "older", vec![], 100);
+        save_named(&db, "newer", vec![], 500);
+        save_named(&db, "already", vec![], 10);
+        db.remove_playlist("already").unwrap();
+        let already_at = deleted(&db)[0].1;
+        let gone = |name: &str, at: u64| DeletedPlaylistRow {
+            name: name.into(),
+            deleted_at: at,
+        };
+        db.save_import(
+            &[],
+            &[],
+            &[gone("older", 300), gone("newer", 300), gone("unknown", 42), gone("already", 1)],
+        )
+        .unwrap();
+
+        // changed before the deletion — deleted; after it — kept.
+        assert_eq!(live_names(&db), vec!["newer".to_string()]);
+        let mut got = deleted(&db);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("already".to_string(), already_at),
+                ("older".to_string(), 300),
+                ("unknown".to_string(), 42),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_imported_playlist_brings_a_deleted_one_back() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        save_named(&db, "mix", vec![], 100);
+        db.remove_playlist("mix").unwrap();
+        let pl = PlaylistHashRow {
+            id: 0,
+            name: "mix".into(),
+            cover_art: None,
+            created_at: Some(1),
+            updated_at: Some(u64::from(u32::MAX)),
+            hashes: Vec::new(),
+        };
+        db.save_import(&[], &[pl], &[]).unwrap();
+        assert_eq!(live_names(&db), vec!["mix".to_string()]);
+        assert!(deleted(&db).is_empty());
+    }
+
+    #[test]
+    fn orphans_kept_on_purpose_are_filtered() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        db.save_track(fixture_track(dir.path(), "a.mp3", "Alpha", "X")).unwrap();
+        db.save_track(fixture_track(dir.path(), "b.mp3", "Beta", "X")).unwrap();
+        let beta = db.get_tracks(Some("Beta".into()), None, None, None).unwrap();
+        let beta_id = beta[0].index_id().unwrap();
+        db.set_track_ignore_orphan(beta_id, true).unwrap();
+
+        let titles = |f| -> Vec<String> {
+            db.get_orphan_tracks(f)
+                .unwrap()
+                .iter()
+                .map(|t| t.get_metadata().unwrap().title.clone())
+                .collect()
+        };
+        assert_eq!(titles(OrphanFilter::NotIgnored), vec!["Alpha".to_string()]);
+        assert_eq!(titles(OrphanFilter::Ignored), vec!["Beta".to_string()]);
+        assert_eq!(titles(OrphanFilter::All), vec!["Alpha".to_string(), "Beta".to_string()]);
+        assert!(db.get_tracks(Some("Beta".into()), None, None, None).unwrap()[0].ignore_orphan);
+    }
+
+    #[test]
+    fn orphan_tracks_are_the_ones_in_no_playlist() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        db.save_track(fixture_track(dir.path(), "a.mp3", "Alpha", "X")).unwrap();
+        db.save_track(fixture_track(dir.path(), "b.mp3", "Beta", "X")).unwrap();
+        let alpha = db
+            .get_tracks(None, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|t| t.get_metadata().unwrap().title == "Alpha")
+            .unwrap();
+        let mut pl = Playlist::from_tracks(vec![alpha]);
+        pl.set_name("only alpha".into());
+        db.save_playlist(pl).unwrap();
+
+        let orphans = db.get_orphan_tracks(OrphanFilter::NotIgnored).unwrap();
+        let titles: Vec<String> = orphans.iter().map(|t| t.get_metadata().unwrap().title.clone()).collect();
+        assert_eq!(titles, vec!["Beta".to_string()]);
+    }
+
     #[test]
     fn add_tracks_skips_non_music_and_marks_invalid_in_batch() {
         let dir = tempdir().unwrap();
@@ -1235,15 +1544,24 @@ mod tests {
         let db = Db::init(path.clone()).unwrap();
         db.save_track(fixture_track(dir.path(), "a.mp3", "Hello", "World"))
             .unwrap();
+        save_named(&db, "mix", vec![], 100);
         // roll back to the pre-migration db of older app versions.
         db.conn
-            .execute_batch("DROP TABLE paired_devices; PRAGMA user_version = 0;")
+            .execute_batch(
+                "DROP TABLE paired_devices; \
+                 ALTER TABLE playlists DROP COLUMN deleted_at; \
+                 ALTER TABLE tracks DROP COLUMN ignore_orphan; \
+                 PRAGMA user_version = 0;",
+            )
             .unwrap();
         drop(db);
 
         let db = Db::init(path.clone()).unwrap();
         assert!(!path.with_file_name(format!("{DB_FILE_NAME}_bak")).exists());
         assert_eq!(db.get_tracks(None, None, None, None).unwrap().len(), 1);
+        // migration 2: the playlist is live, the new marks have their defaults.
+        assert_eq!(live_names(&db), vec!["mix".to_string()]);
+        assert!(!db.get_tracks(None, None, None, None).unwrap()[0].ignore_orphan);
         let id = db.save_paired_device(&[7; 32]).unwrap();
         assert_eq!(db.get_paired_device_id(&[7; 32]).unwrap(), Some(id));
     }
@@ -1391,11 +1709,11 @@ mod tests {
         // timestamps come with the playlist too.
         assert_eq!(found[0].get_created_at(), Some(1_000));
         assert_eq!(found[0].get_updated_at(), Some(2_000));
-        // jazz has no cover and no timestamps.
+        // jazz has no cover; saved without timestamps, it is dated by the save.
         let jazz = &db.get_playlists(Some("jazz".into()), None).unwrap()[0];
         assert!(jazz.get_cover_art().is_none());
-        assert!(jazz.get_created_at().is_none());
-        assert!(jazz.get_updated_at().is_none());
+        assert!(jazz.get_created_at().is_some());
+        assert!(jazz.get_updated_at().is_some());
     }
 
     #[test]
@@ -1434,7 +1752,8 @@ mod tests {
         assert_eq!(pls[0].name, "mix");
         assert_eq!(pls[0].cover_art, Some(dir.path().join("mix.png")));
         assert_eq!((pls[0].created_at, pls[0].updated_at), (Some(100), Some(200)));
-        assert!(pls[1].hashes.is_empty() && pls[1].created_at.is_none());
+        // a playlist saved without dates is dated by the save.
+        assert!(pls[1].hashes.is_empty() && pls[1].created_at.is_some());
 
         // by name: request order, names not found are skipped.
         let picked = db
@@ -1481,7 +1800,7 @@ mod tests {
             updated_at: Some(20),
             hashes: vec![hash.clone(), "ffffffffffffffffffffffffffffffff".into()],
         };
-        db.save_import(&[(track, hash.clone())], &[pl]).unwrap();
+        db.save_import(&[(track, hash.clone())], &[pl], &[]).unwrap();
 
         // the track is saved with the hash from the packet.
         assert!(db.hash_exist(hash.clone()));
@@ -1506,7 +1825,7 @@ mod tests {
         // the imported file was written over the local one.
         let track = fixture_track(dir.path(), "song.mp3", "Song", "A");
         let new = "0123456789abcdef0123456789abcdef".to_string();
-        db.save_import(&[(track, new.clone())], &[]).unwrap();
+        db.save_import(&[(track, new.clone())], &[], &[]).unwrap();
 
         let tracks = db.get_track_hashes(None).unwrap();
         assert_eq!(tracks.len(), 1, "replaced, not duplicated");

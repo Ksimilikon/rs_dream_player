@@ -8,13 +8,21 @@ use crate::CodecError;
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Version {
-    /// v0.1: layout described in the crate docs.
+    /// v0.1: layout described in the crate docs, without the deleted
+    /// playlists section.
     V0_1 = 1,
+    /// v0.11: v0.1 + the deleted playlists section (soft deletion).
+    V0_11 = 2,
 }
 
 impl Version {
     /// the newest version, used for new packets.
-    pub const LATEST: Version = Version::V0_1;
+    pub const LATEST: Version = Version::V0_11;
+
+    /// the version carries the deleted playlists section.
+    pub fn has_deleted(self) -> bool {
+        self != Version::V0_1
+    }
 }
 
 impl From<Version> for u32 {
@@ -29,6 +37,7 @@ impl TryFrom<u32> for Version {
     fn try_from(n: u32) -> Result<Self, Self::Error> {
         match n {
             1 => Ok(Version::V0_1),
+            2 => Ok(Version::V0_11),
             _ => Err(CodecError::UnsupportedVersion),
         }
     }

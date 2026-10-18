@@ -10,6 +10,7 @@ use std::ptr;
 use audio_structs::{
     playlist::Playlist, track_metadata::TrackMetadata, track_virtual::TrackVirtual,
 };
+use storage::db::OrphanFilter;
 use storage::traits::indexator::Indexator;
 
 use crate::panic::Status;
@@ -40,6 +41,8 @@ pub struct FFITrackMetadata {
     pub invalid: bool,
     pub color: *mut c_char,      // maybe null
     pub user_label: *mut c_char, // maybe null
+    /// kept on purpose though in no playlist (the orphan collector skips it).
+    pub ignore_orphan: bool,
 }
 
 #[repr(C)]
@@ -144,6 +147,7 @@ fn empty_metadata(has_id: bool, id: i64, path: *mut c_char) -> FFITrackMetadata 
         invalid: false,
         color: ptr::null_mut(),
         user_label: ptr::null_mut(),
+        ignore_orphan: false,
     }
 }
 
@@ -159,6 +163,7 @@ pub(crate) fn track_to_ffi(track: &TrackVirtual) -> FFITrackMetadata {
             invalid: track.invalid,
             color: opt_to_c(track.color.as_deref()),
             user_label: opt_to_c(track.user_label.as_deref()),
+            ignore_orphan: track.ignore_orphan,
             ..empty_metadata(has_id, id, path)
         };
     };
@@ -197,6 +202,7 @@ pub(crate) fn track_to_ffi(track: &TrackVirtual) -> FFITrackMetadata {
         invalid: track.invalid,
         color: opt_to_c(track.color.as_deref()),
         user_label: opt_to_c(track.user_label.as_deref()),
+        ignore_orphan: track.ignore_orphan,
     }
 }
 
@@ -226,6 +232,8 @@ pub enum FFIIdxStatus {
     IndexFailed = 8,
     /// the core panicked (see `core_last_panic`).
     Panic = 9,
+    /// an argument is out of range (e.g. an unknown orphan filter).
+    InvalidArgument = 10,
 }
 
 impl Status for FFIIdxStatus {
@@ -344,6 +352,45 @@ pub unsafe extern "C" fn idx_get_tracks(out: *mut FFITracksList) -> FFIIdxStatus
     crate::panic::guard(|| {
         unsafe { out_tracks(out, |db| db.get_tracks(None, None, None, None).map_err(read_err)) }
     })
+}
+
+/// which songs in no playlist `idx_get_orphan_tracks` lists. `repr(u32)`:
+/// never renumber, only append.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FFIOrphanFilter {
+    /// the ones not marked "ignore orphanhood" (the collector's default).
+    NotIgnored = 0,
+    /// only the marked ones.
+    Ignored = 1,
+    /// both.
+    All = 2,
+}
+
+/// songs that are in no playlist into `out` (by title) — candidates for
+/// cleanup; `filter` — an [`FFIOrphanFilter`] number (unknown ->
+/// `InvalidArgument`). Free with `idx_free_tracks_list`.
+///
+/// # Safety
+/// `out` is a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn idx_get_orphan_tracks(filter: u32, out: *mut FFITracksList) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        let filter = match filter {
+            f if f == FFIOrphanFilter::NotIgnored as u32 => OrphanFilter::NotIgnored,
+            f if f == FFIOrphanFilter::Ignored as u32 => OrphanFilter::Ignored,
+            f if f == FFIOrphanFilter::All as u32 => OrphanFilter::All,
+            _ => return FFIIdxStatus::InvalidArgument,
+        };
+        unsafe { out_tracks(out, |db| db.get_orphan_tracks(filter).map_err(read_err)) }
+    })
+}
+
+/// the mark "ignore orphanhood": the song stays though it is in no playlist,
+/// and the orphan collector doesn't list it by default.
+#[unsafe(no_mangle)]
+pub extern "C" fn idx_set_track_ignore_orphan(id: i64, ignore: bool) -> FFIIdxStatus {
+    crate::panic::guard(|| write(|db| db.set_track_ignore_orphan(id, ignore)))
 }
 
 /// tracks of a playlist by its id into `out`. `NotFound` — no such playlist.
@@ -814,7 +861,10 @@ pub unsafe extern "C" fn idx_save_playlist(
     })
 }
 
-/// removes a playlist by name.
+/// deletes a playlist by name — softly: it disappears from the playlists,
+/// its mark with the deletion time stays and reaches other devices on sync /
+/// in a library packet (v0.11+). Saving a playlist with this name again
+/// brings it back.
 ///
 /// # Safety
 /// `name` is a valid C string (not null).

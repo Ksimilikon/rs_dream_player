@@ -1,5 +1,5 @@
 //! library sync between devices: the transports (TCP by address, ADB over
-//! USB, Bluetooth RFCOMM on Linux) and the worker thread that moves bytes
+//! USB, USB without adb (AOA), Bluetooth RFCOMM on Linux) and the worker thread that moves bytes
 //! between a transport and the core's sync session (`sync_*`). The protocol
 //! itself — pairing, comparing libraries, confirmations — lives in the core;
 //! the worker only carries bytes and writes the received files.
@@ -10,6 +10,7 @@
 #[cfg(target_os = "linux")]
 mod bt;
 mod net;
+mod usb;
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -50,6 +51,10 @@ pub enum Target {
     BtListen,
     /// connect to a Bluetooth device `AA:BB:CC:DD:EE:FF` (client).
     BtConnect(String),
+    /// USB cable without adb: switch the phone to an accessory of ours
+    /// (Android Open Accessory); the phone is the host. `VID:PID` picks the
+    /// phone, otherwise it is found.
+    Usb(usb::Filter),
 }
 
 impl Target {
@@ -68,9 +73,11 @@ impl Target {
             }
             ["adb", rest @ ..] if rest.len() <= 1 => Ok(Self::AdbConnect(port(rest.first())?)),
             ["bt", "listen"] => Ok(Self::BtListen),
+            ["usb"] => Ok(Self::Usb(None)),
+            ["usb", id] => Ok(Self::Usb(Some(usb::parse_filter(id)?))),
             ["bt", addr] => Ok(Self::BtConnect(addr.to_string())),
             _ => Err(
-                "usage: :sync listen [port] | tcp <ip[:port]> | adb [listen] [port] | bt listen | bt <MAC>"
+                "usage: :sync listen [port] | tcp <ip[:port]> | usb [VID:PID] | adb [listen] [port] | bt listen | bt <MAC>"
                     .into(),
             ),
         }
@@ -240,6 +247,11 @@ fn establish(
             let (s, _) = net::accept(local(*port), cancel)?;
             info("phone connected".into());
             Ok((Box::new(s), true, None))
+        }
+        Target::Usb(filter) => {
+            let link = usb::connect(*filter, cancel, &info)?;
+            info("connected over USB".into());
+            Ok((Box::new(link), false, None))
         }
         #[cfg(target_os = "linux")]
         Target::BtListen => {
@@ -433,6 +445,8 @@ mod tests {
             Ok(Target::AdbListen(6000))
         );
         assert_eq!(Target::parse("bt listen"), Ok(Target::BtListen));
+        assert_eq!(Target::parse("usb"), Ok(Target::Usb(None)));
+        assert_eq!(Target::parse("usb 0e8d:2008"), Ok(Target::Usb(Some((0x0e8d, 0x2008)))));
         assert_eq!(
             Target::parse("bt AA:BB:CC:DD:EE:FF"),
             Ok(Target::BtConnect("AA:BB:CC:DD:EE:FF".into()))

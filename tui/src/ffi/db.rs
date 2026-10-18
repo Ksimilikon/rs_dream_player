@@ -58,6 +58,41 @@ pub fn get_tracks() -> Vec<TrackMeta> {
     collect_tracks(|out| unsafe { idx::idx_get_tracks(out) })
 }
 
+/// which songs in no playlist [`get_orphan_tracks`] lists.
+pub use api::idx::FFIOrphanFilter as OrphanFilter;
+
+/// songs that are in no playlist (`None` — error).
+pub fn get_orphan_tracks(filter: OrphanFilter) -> Option<Vec<TrackMeta>> {
+    let mut failed = false;
+    let tracks = collect_tracks(|out| {
+        let st = unsafe { idx::idx_get_orphan_tracks(filter as u32, out) };
+        failed = st != FFIIdxStatus::Ok;
+        st
+    });
+    (!failed).then_some(tracks)
+}
+
+/// the mark "ignore orphanhood" (the orphan collector skips the song).
+pub fn set_track_ignore_orphan(id: i64, ignore: bool) -> bool {
+    ok(idx::idx_set_track_ignore_orphan(id, ignore))
+}
+
+/// deletes a song from the device: its file (already gone is fine), then its
+/// library row. The error — what failed, for the status line.
+pub fn delete_from_device(track: &TrackMeta) -> Result<(), String> {
+    if let Some(path) = &track.path {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{path}: {e}")),
+        }
+    }
+    match track.id {
+        Some(id) if !remove_track(id) => Err(format!("{}: file deleted, library row kept", track.title)),
+        _ => Ok(()),
+    }
+}
+
 /// tracks of a playlist by its id, in playlist order (empty on error).
 pub fn get_playlist_tracks(id: i64) -> Vec<TrackMeta> {
     collect_tracks(|out| unsafe { idx::idx_get_playlist_tracks(id, out) })

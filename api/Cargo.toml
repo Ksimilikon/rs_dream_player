@@ -3,7 +3,7 @@ name = "api"
 version = "0.1.0"
 edition = "2024"
 
-# the core as a dynamic library (C ABI, `idx_*`/`engine_*` symbols), plus an
+# the core as a dynamic library (C ABI, `idx_*`/`engine_*`/`cdc_*`/`con_*`/`sync_*` symbols), plus an
 # rlib — so the crate can be linked from tests / other crates.
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -14,5 +14,9 @@ audio = { workspace = true }
 audio_structs = { workspace = true }
 storage = { workspace = true }
 codec = { workspace = true }
+vpair = { workspace = true }
 
 libloading = "0.9.0"
+
+[dev-dependencies]
+tempfile = "3.24.0"

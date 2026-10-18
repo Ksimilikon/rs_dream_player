@@ -79,8 +79,8 @@ enum Planned {
 pub struct ImportSession {
     force: bool,
     /// only new songs (with audio, hash not in the db).
-    songs: Vec<Song>,
-    playlists: Vec<Playlist>,
+    pub(crate) songs: Vec<Song>,
+    pub(crate) playlists: Vec<Playlist>,
     plan: Vec<Planned>,
     /// owns the strings `files[i].name` points to.
     _names: Vec<CString>,
@@ -200,15 +200,29 @@ pub unsafe extern "C" fn cdc_import_cancel(session: *mut ImportSession) {
     })
 }
 
+impl ImportSession {
+    /// the files to write, in the order `commit` expects: kind, suggested
+    /// name and bytes.
+    pub(crate) fn planned(&self) -> impl Iterator<Item = (FFIImportFileKind, &str, &[u8])> {
+        self.plan.iter().zip(&self._names).map(|(&planned, name)| {
+            let (kind, data) = match planned {
+                Planned::Song(i) => (FFIImportFileKind::Song, &self.songs[i].data),
+                Planned::Cover(i) => (FFIImportFileKind::Cover, &self.playlists[i].cover),
+            };
+            (kind, name.to_str().unwrap_or_default(), data.as_slice())
+        })
+    }
+}
+
 // ─────────────────────────────── logic ───────────────────────────────
 
 /// db access under the lock (replaced in tests).
-trait Store {
+pub(crate) trait Store {
     fn with<R>(&self, f: impl FnOnce(&Db) -> Result<R, FFICdcStatus>) -> Result<R, FFICdcStatus>;
 }
 
 /// the global core.
-struct Global;
+pub(crate) struct Global;
 
 impl Store for Global {
     fn with<R>(&self, f: impl FnOnce(&Db) -> Result<R, FFICdcStatus>) -> Result<R, FFICdcStatus> {
@@ -217,7 +231,11 @@ impl Store for Global {
     }
 }
 
-fn prepare(store: &impl Store, bytes: &[u8], force: bool) -> Result<ImportSession, FFICdcStatus> {
+pub(crate) fn prepare(
+    store: &impl Store,
+    bytes: &[u8],
+    force: bool,
+) -> Result<ImportSession, FFICdcStatus> {
     let packet = codec::decode(bytes)?;
 
     let songs: Vec<Song> = store.with(|db| {
@@ -279,7 +297,7 @@ fn prepare(store: &impl Store, bytes: &[u8], force: bool) -> Result<ImportSessio
     })
 }
 
-fn commit(
+pub(crate) fn commit(
     store: &impl Store,
     session: &ImportSession,
     paths: &[Option<PathBuf>],
@@ -358,7 +376,7 @@ fn check_dates(db: &Db, playlists: &[Playlist], force: bool) -> Result<(), FFICd
 }
 
 /// hash -> hex string in the db format.
-fn hex(hash: u128) -> String {
+pub(crate) fn hex(hash: u128) -> String {
     format!("{hash:032x}")
 }
 

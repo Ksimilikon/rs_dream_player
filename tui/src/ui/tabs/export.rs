@@ -5,6 +5,11 @@
 //! if the path is a directory, the file is created in it as
 //! `dream_player_<unix-time>.dplr`. An existing file is never overwritten.
 //! Run — Shift+W.
+//!
+//! the same selection and flags can be sent straight to another device
+//! instead (Shift+S): SEND TO takes the connection like `:sync` (`listen`,
+//! `tcp <ip>`, `adb`, `bt <MAC>`, ...); the other side receives on its IMPORT
+//! tab.
 
 use std::collections::HashSet;
 use std::fs::OpenOptions;
@@ -18,6 +23,7 @@ use ratatui::{
 };
 
 use crate::ffi::cdc::{self, Export, Flags};
+use crate::sync::{Mode, Msg, Selection, Target, Worker};
 use crate::ui::{
     Model, Tab, TabEvent,
     layouts::{Form, FormField, Hint, ListLine, ListView, MessageLog, two_pane},
@@ -29,6 +35,7 @@ const F_WHAT: usize = 1;
 const F_AUDIO: usize = 2;
 const F_NAMES: usize = 3;
 const F_COVERS: usize = 4;
+const F_SEND_TO: usize = 5;
 
 /// a selection list item: a playlist — by name (its identifier), a track — by id.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -45,10 +52,13 @@ pub struct ExportTab {
     /// marked items (playlists or tracks — depending on the mode).
     checked: HashSet<Item>,
     log: MessageLog,
+    /// a running send to another device.
+    worker: Option<Worker>,
+    music_dir: PathBuf,
 }
 
 impl ExportTab {
-    pub fn new() -> Self {
+    pub fn new(music_dir: PathBuf) -> Self {
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
@@ -58,15 +68,19 @@ impl ExportTab {
             FormField::toggle("AUDIO", true),
             FormField::toggle("FILE NAMES", true),
             FormField::toggle("COVERS", true),
+            FormField::text("SEND TO", "listen"),
         ]);
         let mut log = MessageLog::default();
         log.info("set the path and options, then Shift+W to export");
+        log.info("or Shift+S to send to a device (SEND TO: listen | tcp <ip> | adb | bt <MAC>)");
         Self {
             form,
             list: ListView::default(),
             in_list: false,
             checked: HashSet::new(),
             log,
+            worker: None,
+            music_dir,
         }
     }
 
@@ -123,11 +137,8 @@ impl ExportTab {
         Ok(path)
     }
 
-    fn run(&mut self, model: &Model) {
-        let path = match self.target() {
-            Ok(p) => p,
-            Err(e) => return self.log.error(e),
-        };
+    /// the marked selection and the flags; `None` — nothing marked (logged).
+    fn picked(&mut self, model: &Model) -> Option<(Selection, Flags)> {
         // marked items — in list order.
         let picked: Vec<Item> = self
             .items(model)
@@ -149,30 +160,69 @@ impl ExportTab {
                 Item::Playlist(_) => None,
             })
             .collect();
-        let what = match self.what() {
-            0 => Export::Library,
-            1 => Export::Playlists(&names),
-            _ => Export::Tracks(&ids),
-        };
         if self.what() != 0 && picked.is_empty() {
-            return self.log.warn("nothing selected: mark items in the list with Enter");
+            self.log.warn("nothing selected: mark items in the list with Enter");
+            return None;
         }
+        let what = match self.what() {
+            0 => Selection::Library,
+            1 => Selection::Playlists(names),
+            _ => Selection::Tracks(ids),
+        };
         let flags = Flags {
             audio: self.form.toggle(F_AUDIO),
             names: self.form.toggle(F_NAMES),
-            covers: self.form.toggle(F_COVERS),
+            // no playlists — no covers (the field is disabled then).
+            covers: self.form.toggle(F_COVERS) && self.what() != 2,
         };
-        self.log.info(format!(
-            "packing {} (audio: {}, names: {}, covers: {})...",
-            match self.what() {
-                0 => "the whole library".to_string(),
-                n => format!("{} {}", picked.len(), WHAT[n]),
-            },
-            flags.audio,
-            flags.names,
-            flags.covers
-        ));
-        let bytes = match cdc::pack(what, flags) {
+        Some((what, flags))
+    }
+
+    /// "the whole library" / "3 playlists" + the flags, for the log.
+    fn describe(what: &Selection, flags: Flags) -> String {
+        let what = match what {
+            Selection::Library => "the whole library".to_string(),
+            Selection::Playlists(n) => format!("{} playlists", n.len()),
+            Selection::Tracks(n) => format!("{} tracks", n.len()),
+        };
+        format!(
+            "{what} (audio: {}, names: {}, covers: {})",
+            flags.audio, flags.names, flags.covers
+        )
+    }
+
+    /// sends the selection to another device.
+    fn send(&mut self, model: &Model) {
+        if self.worker.as_ref().is_some_and(Worker::running) {
+            return self.log.warn("a send is already running");
+        }
+        let target = match Target::parse(self.form.text(F_SEND_TO).trim()) {
+            Ok(t) => t,
+            Err(e) => return self.log.error(e),
+        };
+        let Some((what, flags)) = self.picked(model) else {
+            return;
+        };
+        self.log.info(format!("sending {}...", Self::describe(&what, flags)));
+        let mode = Mode::Send { what, flags };
+        self.worker = Some(Worker::start(target, mode, self.music_dir.clone()));
+    }
+
+    fn run(&mut self, model: &Model) {
+        let path = match self.target() {
+            Ok(p) => p,
+            Err(e) => return self.log.error(e),
+        };
+        let Some((what, flags)) = self.picked(model) else {
+            return;
+        };
+        self.log.info(format!("packing {}...", Self::describe(&what, flags)));
+        let export = match &what {
+            Selection::Library => Export::Library,
+            Selection::Playlists(names) => Export::Playlists(names),
+            Selection::Tracks(ids) => Export::Tracks(ids),
+        };
+        let bytes = match cdc::pack(export, flags) {
             Ok(b) => b,
             Err(st) => return self.log.error(format!("export failed: {}", cdc::describe(st))),
         };
@@ -206,7 +256,7 @@ impl Tab for ExportTab {
 
     fn render(&mut self, frame: &mut Frame, area: Rect, model: &Model) {
         let [top, bottom] =
-            Layout::vertical([Constraint::Min(7), Constraint::Length(8)]).areas(area);
+            Layout::vertical([Constraint::Min(8), Constraint::Length(8)]).areas(area);
         let (left, right) = two_pane(top, 50);
         self.form.render(frame, left, "export", !self.in_list);
 
@@ -233,6 +283,12 @@ impl Tab for ExportTab {
         }
         match key.code {
             KeyCode::Char('W') => self.run(model),
+            KeyCode::Char('S') => self.send(model),
+            KeyCode::Char('c') => {
+                if let Some(w) = &self.worker {
+                    w.cancel();
+                }
+            }
             KeyCode::Tab => self.in_list = !self.in_list && self.what() != 0,
             KeyCode::Char('l') | KeyCode::Right if self.what() != 0 => self.in_list = true,
             KeyCode::Char('h') | KeyCode::Left => self.in_list = false,
@@ -269,9 +325,31 @@ impl Tab for ExportTab {
 
     fn hints(&self) -> Vec<Hint> {
         match self.in_list {
-            true => vec![("jk", "nav"), ("Ent", "mark"), ("a", "all"), ("h", "form"), ("W", "export")],
-            false => vec![("jk", "fld"), ("Ent", "edit"), ("l", "list"), ("W", "export")],
+            true => vec![
+                ("jk", "nav"),
+                ("Ent", "mark"),
+                ("a", "all"),
+                ("h", "form"),
+                ("W", "export"),
+                ("S", "send"),
+            ],
+            false => vec![("jk", "fld"), ("Ent", "edit"), ("l", "list"), ("W", "export"), ("S", "send")],
         }
+    }
+
+    fn poll(&mut self) -> TabEvent {
+        if let Some(w) = &self.worker {
+            for msg in w.poll() {
+                match msg {
+                    Msg::Info(s) => self.log.info(s),
+                    Msg::Ok(s) => self.log.ok(s),
+                    Msg::Warn(s) => self.log.warn(s),
+                    Msg::Error(s) => self.log.error(s),
+                    Msg::LibraryChanged | Msg::Finished { .. } => {}
+                }
+            }
+        }
+        TabEvent::None
     }
 
     fn wants_input(&self) -> bool {

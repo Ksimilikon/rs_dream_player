@@ -14,7 +14,11 @@ mod app;
 mod ffi;
 mod images;
 mod integration;
+mod sync;
 mod ui;
+
+pub use ffi::cdc::Flags;
+pub use sync::{Mode, Selection};
 
 /// directories the core needs for initialization (passed to FFI `init`).
 pub struct Dirs<'a> {
@@ -46,6 +50,31 @@ pub fn run(dirs: Dirs) -> std::io::Result<()> {
     let res = app.run(&mut terminal);
     ratatui::restore();
     res
+}
+
+/// headless sync / send / receive (`--sync` / `--send` / `--receive`; the
+/// connection takes the same arguments as `:sync`): brings the core up, runs
+/// one session and prints its log to stdout. `Ok(true)` — complete.
+pub fn sync_headless(dirs: Dirs, args: &str, mode: Mode) -> std::io::Result<bool> {
+    let target = sync::Target::parse(args).map_err(std::io::Error::other)?;
+    ffi::engine::init(dirs.cache, dirs.config, dirs.data, dirs.music, true)
+        .map_err(|st| std::io::Error::other(format!("core init: {}", ffi::engine::describe_init(st))))?;
+    ffi::db::index_dir(None);
+
+    let worker = sync::Worker::start(target, mode, dirs.music.to_path_buf());
+    loop {
+        for msg in worker.poll() {
+            match msg {
+                sync::Msg::Info(s) => println!("{s}"),
+                sync::Msg::Ok(s) => println!("ok: {s}"),
+                sync::Msg::Warn(s) => println!("warning: {s}"),
+                sync::Msg::Error(s) => println!("error: {s}"),
+                sync::Msg::LibraryChanged => {}
+                sync::Msg::Finished { complete } => return Ok(complete),
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 /// wraps the current panic handler: first restores the terminal (raw / alt

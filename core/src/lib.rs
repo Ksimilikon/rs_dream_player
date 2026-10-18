@@ -2,10 +2,11 @@ pub mod config;
 pub mod dirs;
 pub mod event_loop;
 
-use std::fmt;
+use std::{fmt, io};
 
 use audio::AudioEngine;
 use storage::Db;
+use vpair::DeviceManager;
 
 use crate::{config::Config, dirs::Dirs};
 
@@ -14,6 +15,8 @@ use crate::{config::Config, dirs::Dirs};
 /// up).
 pub const FILE_NAME_DB: &str = storage::DB_FILE_NAME;
 pub const FILE_NAME_CONFIG: &str = "config.toml";
+/// directory (inside `data`) with the key pair of the current device.
+pub const DIR_KEYS: &str = "keys";
 
 /// what can go wrong while bringing the core up ([`Core::new`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +55,8 @@ pub struct Core {
     db: Option<Db>,
     dirs: Dirs,
     engine: AudioEngine,
+    /// device pairing; created on first use (see [`Core::get_vpair`]).
+    vpair: Option<DeviceManager>,
 }
 impl Core {
     pub fn new(dirs: Dirs, need_db: bool) -> Result<Self, InitError> {
@@ -74,6 +79,7 @@ impl Core {
             db,
             dirs,
             engine,
+            vpair: None,
         })
     }
 
@@ -104,5 +110,16 @@ impl Core {
     }
     pub fn get_engine_mut(&mut self) -> &mut AudioEngine {
         &mut self.engine
+    }
+    /// the device pairing state machine together with the db (`None` — the
+    /// core runs without one). Created on the first call: the key pair is
+    /// loaded from `<data>/keys`, or generated there. Lazy, so broken key files
+    /// don't stop the player from starting.
+    pub fn get_vpair(&mut self) -> io::Result<(&mut DeviceManager, Option<&Db>)> {
+        let mgr = match &mut self.vpair {
+            Some(mgr) => mgr,
+            vpair @ None => vpair.insert(DeviceManager::new(&self.dirs.data.join(DIR_KEYS))?),
+        };
+        Ok((mgr, self.db.as_ref()))
     }
 }

@@ -3,7 +3,9 @@
 //! - [`FFIInitStatus`] — `init`;
 //! - [`player::FFIEngineStatus`] — `engine_*`;
 //! - [`idx::FFIIdxStatus`] — `idx_*`;
-//! - [`cdc::FFICdcStatus`] — `cdc_*`.
+//! - [`cdc::FFICdcStatus`] — `cdc_*`;
+//! - [`con::FFIConStatus`] — `con_*`;
+//! - [`sync::FFISyncStatus`] — `sync_*`.
 //!
 //! no exported function lets a panic escape: every failure becomes a status
 //! code, a panic — the `Panic` status (see [`panic`]). Status enums are
@@ -18,10 +20,12 @@ use std::{
 };
 
 pub mod cdc;
+pub mod con;
 pub mod idx;
 pub mod mem;
 pub mod panic;
 pub mod player;
+pub mod sync;
 
 use panic::Status;
 

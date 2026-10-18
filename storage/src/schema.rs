@@ -45,6 +45,8 @@ const REQUIRED_SCHEMA: &[(&str, &[&str])] = &[
         &["id", "name", "cover_art", "created_at", "updated_at"],
     ),
     ("playlist_tracks", &["playlist_id", "song_hash", "position"]),
+    // added by migration 1.
+    ("paired_devices", &["id", "pub_key", "name"]),
 ];
 
 /// the whole db structure. Every statement is idempotent (`IF NOT EXISTS`),
@@ -110,6 +112,22 @@ CREATE TABLE IF NOT EXISTS playlist_tracks (
 );
 ";
 
+/// schema migrations on top of [`SCHEMA_SQL`]. Migration `i` lifts the db
+/// from `PRAGMA user_version = i` to `i + 1`; the db created by older versions
+/// of the app has `user_version = 0`. Only append to the end: an applied
+/// migration is never re-run, so editing it doesn't reach existing dbs.
+const MIGRATIONS: &[&str] = &[
+    // 1: public keys of paired devices (vpair). `id` is a counter that is never
+    // reused after a removal; `name` is set by the user for viewing only.
+    "\
+CREATE TABLE IF NOT EXISTS paired_devices (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    pub_key BLOB NOT NULL UNIQUE,
+    name    TEXT NOT NULL DEFAULT 'Unknown'
+);
+",
+];
+
 /// the db exists but its structure fails verification (a broken file or
 /// missing tables).
 #[derive(Debug)]
@@ -127,6 +145,20 @@ impl Error for InvalidStructure {}
 pub fn deploy(conn: &Connection) -> Result<(), Box<dyn Error>> {
     conn.pragma_update(None, "foreign_keys", true)?;
     conn.execute_batch(SCHEMA_SQL)?;
+    migrate(conn)
+}
+
+/// applies the not yet applied [`MIGRATIONS`], each in its own transaction
+/// together with the `user_version` bump. A db from a newer app version
+/// (`user_version` past the list) is left as is.
+pub fn migrate(conn: &Connection) -> Result<(), Box<dyn Error>> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    for (i, sql) in MIGRATIONS.iter().enumerate().skip(version.max(0) as usize) {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(sql)?;
+        tx.pragma_update(None, "user_version", (i + 1) as i64)?;
+        tx.commit()?;
+    }
     Ok(())
 }
 

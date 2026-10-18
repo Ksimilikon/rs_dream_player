@@ -20,7 +20,7 @@ use crate::ui::{
     layouts::{Hint, TextField, hints_line, progress_bar},
     tabs::{
         ExportTab, HelpTab, ImportTab, PlaylistEditor, PlaylistsTab, SettingsTab, SongEditor,
-        SongTab,
+        SongTab, SyncTab,
     },
 };
 
@@ -137,6 +137,11 @@ impl App {
                 self.handle_media(cmd);
             }
             self.model.pos = ffi::engine::position();
+            // background work of tabs (a running sync).
+            let events: Vec<TabEvent> = self.screens.iter_mut().map(|t| t.poll()).collect();
+            for ev in events {
+                self.handle_tab_event(ev);
+            }
 
             terminal.draw(|frame| self.draw(frame))?;
 
@@ -699,10 +704,16 @@ impl App {
             "settings" | "device" | "dev" => {
                 self.push_transient(Box::new(SettingsTab::default()))
             }
-            "export" => self.push_transient(Box::new(ExportTab::new())),
+            "export" => self.push_transient(Box::new(ExportTab::new(self.music_dir.clone()))),
             "import" => {
                 let tab = ImportTab::new(&self.music_dir);
                 self.push_transient(Box::new(tab))
+            }
+            "sync" => {
+                self.push_transient(Box::new(SyncTab::new(self.music_dir.clone())));
+                if let Err(e) = self.screens[self.current].command(arg) {
+                    self.set_status(e, Status::Warn);
+                }
             }
             "seek" => match arg.parse::<u64>() {
                 Ok(secs) => {

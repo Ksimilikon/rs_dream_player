@@ -36,6 +36,7 @@ use crate::idx::{to_c, vec_to_raw};
 
 mod import;
 
+pub(crate) use import::{Global, Store, commit, hex, prepare};
 pub use import::{
     FFIImportFile, FFIImportFileKind, FFIImportFiles, ImportSession, cdc_import_cancel,
     cdc_import_commit, cdc_import_prepare,
@@ -230,7 +231,7 @@ unsafe fn c_to_name(p: *const c_char) -> Result<String, FFICdcStatus> {
 }
 
 /// hex hash from the db -> `u128`.
-fn parse_hash(hex: &str) -> Option<u128> {
+pub(crate) fn parse_hash(hex: &str) -> Option<u128> {
     (hex.len() == 32)
         .then(|| u128::from_str_radix(hex, 16).ok())
         .flatten()
@@ -246,7 +247,7 @@ fn file_name(path: &Path) -> String {
 /// cover by OS path: `(file name, bytes)`. A missing cover file is not an
 /// error (a cover is decorative, and a broken link in the db must not block
 /// the export): there is simply no cover then.
-fn read_cover(path: Option<&Path>) -> (String, Vec<u8>) {
+pub(crate) fn read_cover(path: Option<&Path>) -> (String, Vec<u8>) {
     path.and_then(|p| Some((file_name(p), std::fs::read(p).ok()?)))
         .unwrap_or_default()
 }

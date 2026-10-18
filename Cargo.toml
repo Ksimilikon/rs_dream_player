@@ -11,7 +11,7 @@ members = [
   "storage",
   "tui",
   "notify_hub",
-  "core", "codec", "android_jni",
+  "core", "codec", "android_jni", "vpair",
 ]
 resolver = "2"
 
@@ -24,6 +24,7 @@ tui = { path = "tui" }
 core = { path = "core" }
 codec = { path = "codec" }
 android_jni = { path = "android_jni" }
+vpair = { path = "vpair" }
 
 [lib]
 crate-type = ["cdylib", "staticlib"]

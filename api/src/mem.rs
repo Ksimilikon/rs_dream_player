@@ -1,10 +1,11 @@
 //! freeing memory handed out via FFI. Each owning type has its own
-//! `idx_free_*`. Every function is idempotent for null and takes ownership of
-//! the passed buffer (a second call is UB).
+//! `idx_free_*` / `cdc_free_*` / `con_free_*`. Every function is idempotent
+//! for null and takes ownership of the passed buffer (a second call is UB).
 
 use std::ffi::{CString, c_char};
 
 use crate::cdc::FFIPacket;
+use crate::con::{FFIConDevice, FFIConDevicesList, FFIConPairedList};
 use crate::idx::{
     FFIPlaylist, FFIPlaylistsList, FFIStringList, FFITrackMetadata, FFITracksList,
 };
@@ -181,4 +182,68 @@ pub unsafe extern "C" fn cdc_free_packet(packet: FFIPacket) {
             }
         }
     })
+}
+
+/// frees one device entry (from `con_get_device`).
+///
+/// # Safety
+/// `device` comes from `con_*` and wasn't freed yet.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn con_free_device(device: FFIConDevice) {
+    crate::panic::guard_unit(|| {
+        unsafe { idx_free_string(device.name) };
+    })
+}
+
+/// frees a device entry list (from `con_get_devices`).
+///
+/// # Safety
+/// `list` comes from `con_*` and wasn't freed yet.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn con_free_devices_list(list: FFIConDevicesList) {
+    crate::panic::guard_unit(|| {
+        if list.ptr.is_null() {
+            return;
+        }
+        let slice = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(list.ptr, list.len)) };
+        for dev in slice.iter() {
+            unsafe { idx_free_string(dev.name) };
+        }
+    })
+}
+
+/// frees a paired device list (from `con_get_paired`).
+///
+/// # Safety
+/// `list` comes from `con_*` and wasn't freed yet.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn con_free_paired_list(list: FFIConPairedList) {
+    crate::panic::guard_unit(|| {
+        if list.ptr.is_null() {
+            return;
+        }
+        let slice = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(list.ptr, list.len)) };
+        for dev in slice.iter() {
+            unsafe { idx_free_string(dev.name) };
+        }
+    })
+}
+
+/// frees bytes handed out by `con_*` (`con_encrypt` / `con_decrypt`). Null is
+/// ignored.
+///
+/// # Safety
+/// `ptr`/`len` come from `con_*` and weren't freed yet.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn con_free_bytes(ptr: *mut u8, len: usize) {
+    unsafe { cdc_free_bytes(ptr, len) }
+}
+
+/// frees bytes handed out by `sync_take_output`. Null is ignored.
+///
+/// # Safety
+/// `ptr`/`len` come from `sync_*` and weren't freed yet.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sync_free_bytes(ptr: *mut u8, len: usize) {
+    unsafe { cdc_free_bytes(ptr, len) }
 }

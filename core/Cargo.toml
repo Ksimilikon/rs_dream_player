@@ -7,6 +7,7 @@ edition = "2024"
 storage = { workspace = true }
 audio = { workspace = true }
 audio_structs = { workspace = true }
+vpair = { workspace = true }
 
 serde = { version = "1", features = ["derive"] }
 toml = "1"

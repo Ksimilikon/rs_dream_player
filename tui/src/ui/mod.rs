@@ -131,4 +131,14 @@ pub trait Tab {
     }
     /// the track list changed — reset cursors.
     fn on_tracks_changed(&mut self) {}
+    /// a tab-specific command (`:<tab> <args>`, e.g. `:sync listen`); the
+    /// error goes to the status line.
+    fn command(&mut self, _args: &str) -> Result<(), String> {
+        Ok(())
+    }
+    /// called every loop tick: background work of the tab (a running sync)
+    /// may ask the application for something.
+    fn poll(&mut self) -> TabEvent {
+        TabEvent::None
+    }
 }

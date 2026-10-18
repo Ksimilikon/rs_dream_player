@@ -22,9 +22,9 @@ use audio_structs::{
     track_metadata::{TrackMetadata, TrackMetadataParams},
     track_virtual::TrackVirtual,
 };
-use rusqlite::{Connection, params, params_from_iter, types::Value};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
 
-use crate::schema::{backup_path, deploy, verify_structure};
+use crate::schema::{InvalidStructure, backup_path, deploy, migrate, verify_structure};
 use crate::traits::indexator::Indexator;
 
 /// sqlite db storing music and playlists. Owns a single connection; every
@@ -35,9 +35,10 @@ pub struct Db {
 }
 impl Db {
     /// opens the db at `path`. If the file is missing, creates it together
-    /// with the whole structure. If the structure of an existing file is
-    /// invalid, the current file is moved aside (the `_bak` suffix is appended
-    /// to its name) and a fresh db is deployed in its place.
+    /// with the whole structure. An existing file is migrated first; if that
+    /// fails or the structure is invalid, the current file is moved aside (the
+    /// `_bak` suffix is appended to its name) and a fresh db is deployed in its
+    /// place.
     pub fn init(path: PathBuf) -> Result<Self, Box<dyn Error>> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
@@ -55,9 +56,12 @@ impl Db {
         let conn = Connection::open(&path)?;
         conn.pragma_update(None, "foreign_keys", true)?;
 
-        match verify_structure(&conn) {
+        let checked = migrate(&conn)
+            .map_err(|e| InvalidStructure(format!("migration failed: {e}")))
+            .and_then(|()| verify_structure(&conn));
+        match checked {
             Ok(()) => Ok(Self { conn, path }),
-            // invalid structure: rename the current db to `*_bak`
+            // failed migration / invalid structure: rename the current db to `*_bak`
             // and bring up a fresh one in its place.
             Err(_) => {
                 drop(conn);
@@ -635,7 +639,9 @@ impl Db {
 
     /// saves a packet import in one transaction (all or nothing):
     /// - `tracks` — new tracks (the file already lies at `get_path()`) with
-    ///   hashes from the packet;
+    ///   hashes from the packet. A file written over a known track (same
+    ///   path) replaces it: the track takes the packet hash, and local
+    ///   playlists referring to the old hash follow it;
     /// - `playlists` — playlists by name (`id` is ignored): created or
     ///   rewritten entirely with the `hashes` list. `None` cover / dates don't
     ///   overwrite an already saved value.
@@ -646,6 +652,7 @@ impl Db {
     ) -> Result<(), Box<dyn Error>> {
         let tx = self.conn.unchecked_transaction()?;
         for (track, hash) in tracks {
+            adopt_hash(&tx, track, hash)?;
             upsert_track(&tx, track, Some(hash))?;
         }
         for pl in playlists {
@@ -697,6 +704,74 @@ impl Db {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+}
+
+/// paired devices (vpair): public keys of the devices this one has paired
+/// with. The list lives only on the current device and is never shared.
+impl Db {
+    /// every paired device, in pairing order.
+    pub fn get_paired_devices(&self) -> Result<Vec<PairedDeviceRow>, Box<dyn Error>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, pub_key, name FROM paired_devices ORDER BY id")?;
+        let rows = stmt
+            .query_map([], PairedDeviceRow::from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// one paired device by its id; `None` — no such device.
+    pub fn get_paired_device(&self, id: i64) -> Result<Option<PairedDeviceRow>, Box<dyn Error>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, pub_key, name FROM paired_devices WHERE id = ?1",
+                [id],
+                PairedDeviceRow::from_row,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// id of the paired device with this public key; `None` — the key is unknown.
+    pub fn get_paired_device_id(&self, pub_key: &[u8; 32]) -> Result<Option<i64>, Box<dyn Error>> {
+        let id = self
+            .conn
+            .query_row(
+                "SELECT id FROM paired_devices WHERE pub_key = ?1",
+                [&pub_key[..]],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(id)
+    }
+
+    /// saves the public key of a newly paired device (named `Unknown` until the
+    /// user renames it) and returns its id. A known key keeps its id and name.
+    pub fn save_paired_device(&self, pub_key: &[u8; 32]) -> Result<i64, Box<dyn Error>> {
+        self.conn.execute(
+            "INSERT INTO paired_devices (pub_key) VALUES (?1) ON CONFLICT(pub_key) DO NOTHING",
+            [&pub_key[..]],
+        )?;
+        self.get_paired_device_id(pub_key)?
+            .ok_or_else(|| "paired device vanished right after saving".into())
+    }
+
+    /// the user-given device name; for viewing only.
+    pub fn set_paired_device_name(&self, id: i64, name: &str) -> Result<(), Box<dyn Error>> {
+        self.conn.execute(
+            "UPDATE paired_devices SET name = ?1 WHERE id = ?2",
+            params![name, id],
+        )?;
+        Ok(())
+    }
+
+    /// forgets a paired device; its id is never handed out again.
+    pub fn remove_paired_device(&self, id: i64) -> Result<(), Box<dyn Error>> {
+        self.conn
+            .execute("DELETE FROM paired_devices WHERE id = ?1", [id])?;
+        Ok(())
     }
 }
 
@@ -809,6 +884,35 @@ pub struct PlaylistHashRow {
     pub updated_at: Option<u64>,
     /// song hashes in playlist order.
     pub hashes: Vec<String>,
+}
+
+/// a `paired_devices` row — see [`Db::get_paired_devices`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairedDeviceRow {
+    /// counter id, never reused.
+    pub id: i64,
+    /// public X25519 key of the device.
+    pub pub_key: [u8; 32],
+    /// user-given name, for viewing only.
+    pub name: String,
+}
+
+impl PairedDeviceRow {
+    fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        let key: Vec<u8> = r.get(1)?;
+        let pub_key = key.try_into().map_err(|key: Vec<u8>| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Blob,
+                format!("public key of {} bytes instead of 32", key.len()).into(),
+            )
+        })?;
+        Ok(Self {
+            id: r.get(0)?,
+            pub_key,
+            name: r.get(2)?,
+        })
+    }
 }
 
 /// raw `tracks` columns shared by every query that returns tracks.
@@ -935,6 +1039,30 @@ fn upsert_track(
     write_track_genres(conn, id, &meta.genres)?;
 
     Ok(hash)
+}
+
+/// a track already stored at the path of `track` takes `hash` (its file was
+/// replaced by an imported one), and playlist references move from the old
+/// hash to the new one. Nothing happens for a new path.
+fn adopt_hash(conn: &Connection, track: &TrackVirtual, hash: &str) -> Result<(), Box<dyn Error>> {
+    let Some(path) = track.get_path() else {
+        return Ok(());
+    };
+    let old: Option<String> = conn
+        .query_row(
+            "SELECT hash FROM tracks WHERE path = ?1",
+            [path.to_string_lossy()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(old) = old.filter(|old| old != hash) {
+        conn.execute("UPDATE tracks SET hash = ?1 WHERE hash = ?2", [hash, &old])?;
+        conn.execute(
+            "UPDATE playlist_tracks SET song_hash = ?1 WHERE song_hash = ?2",
+            [hash, &old],
+        )?;
+    }
+    Ok(())
 }
 
 /// upserts an album name, returns its id (or `None` if the album is empty).
@@ -1098,6 +1226,38 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 1, "table `{table}` missing");
         }
+    }
+
+    #[test]
+    fn migrates_old_db_keeping_data() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(DB_FILE_NAME);
+        let db = Db::init(path.clone()).unwrap();
+        db.save_track(fixture_track(dir.path(), "a.mp3", "Hello", "World"))
+            .unwrap();
+        // roll back to the pre-migration db of older app versions.
+        db.conn
+            .execute_batch("DROP TABLE paired_devices; PRAGMA user_version = 0;")
+            .unwrap();
+        drop(db);
+
+        let db = Db::init(path.clone()).unwrap();
+        assert!(!path.with_file_name(format!("{DB_FILE_NAME}_bak")).exists());
+        assert_eq!(db.get_tracks(None, None, None, None).unwrap().len(), 1);
+        let id = db.save_paired_device(&[7; 32]).unwrap();
+        assert_eq!(db.get_paired_device_id(&[7; 32]).unwrap(), Some(id));
+    }
+
+    #[test]
+    fn paired_device_ids_are_not_reused() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        let a = db.save_paired_device(&[1; 32]).unwrap();
+        // saving a known key keeps its id.
+        assert_eq!(db.save_paired_device(&[1; 32]).unwrap(), a);
+        db.remove_paired_device(a).unwrap();
+        let b = db.save_paired_device(&[2; 32]).unwrap();
+        assert!(b > a);
     }
 
     #[test]
@@ -1331,6 +1491,29 @@ mod tests {
         assert_eq!(pls[0].hashes.len(), 2);
         assert_eq!(pls[0].cover_art, Some(dir.path().join("old.png")));
         assert_eq!((pls[0].created_at, pls[0].updated_at), (Some(10), Some(20)));
+    }
+
+    #[test]
+    fn import_over_known_path_takes_packet_hash() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        let track = fixture_track(dir.path(), "song.mp3", "Song", "A");
+        let mut local = Playlist::from_tracks(vec![track]);
+        local.set_name("local".into());
+        db.save_playlist(local).unwrap();
+        let old = db.get_track_hashes(None).unwrap()[0].1.clone();
+
+        // the imported file was written over the local one.
+        let track = fixture_track(dir.path(), "song.mp3", "Song", "A");
+        let new = "0123456789abcdef0123456789abcdef".to_string();
+        db.save_import(&[(track, new.clone())], &[]).unwrap();
+
+        let tracks = db.get_track_hashes(None).unwrap();
+        assert_eq!(tracks.len(), 1, "replaced, not duplicated");
+        assert_eq!(tracks[0].1, new);
+        assert!(!db.hash_exist(old));
+        let pls = db.get_playlist_hashes(None).unwrap();
+        assert_eq!(pls[0].hashes, vec![new]);
     }
 
     #[test]

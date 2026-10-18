@@ -26,7 +26,12 @@ ratatui-image = { version = "11.0.6", default-features = false, features = [
 # helper threads (the global async-io reactor, the blocking pool, a separate
 # zbus executor). Result: all async lives on one extra thread.
 zbus = { version = "5.16.0", default-features = false, features = ["tokio"] }
-tokio = { version = "1", features = ["rt", "net", "time"] }
+tokio = { version = "1", features = ["rt", "net", "time", "macros"] }
+# Bluetooth RFCOMM sync transport via BlueZ (D-Bus): the sync service is a
+# BlueZ profile with its own UUID. Runs on a tokio runtime of the sync worker
+# thread only while the connection is being set up.
+bluer = { version = "0.17", features = ["bluetoothd", "rfcomm"] }
+futures = "0.3"
 
 # Windows: the system media transport (SMTC) via souvlaki + our own hidden
 # anchor window (windows-crate). It used to live in the `dbus` crate under the

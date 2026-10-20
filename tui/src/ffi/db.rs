@@ -175,6 +175,12 @@ pub fn set_track_cover(id: i64, cover_path: Option<&str>) -> bool {
     ok(unsafe { idx::idx_set_track_cover(id, as_ptr(&c)) })
 }
 
+/// embeds the picture at `image_path` into the track's audio file tags.
+pub fn embed_track_cover(id: i64, image_path: &str) -> bool {
+    let c = cstr(image_path);
+    ok(unsafe { idx::idx_embed_track_cover(id, c.as_ptr()) })
+}
+
 /// color label (None -> clear).
 pub fn set_track_color(id: i64, color: Option<&str>) -> bool {
     let c = opt_cstr(color);

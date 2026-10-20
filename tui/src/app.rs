@@ -502,11 +502,14 @@ impl App {
                 }
             }
             TabEvent::SaveMeta(edit) => {
-                self.apply_meta(edit);
+                let res = self.apply_meta(edit);
                 self.close_current();
                 self.reload_library();
                 self.refresh_playing();
-                self.set_status("metadata saved", Status::Info);
+                match res {
+                    Ok(()) => self.set_status("metadata saved", Status::Info),
+                    Err(e) => self.set_status(e, Status::Error),
+                }
             }
             TabEvent::SetOutputDevice(name) => self.switch_device(name),
             TabEvent::LibraryChanged => {
@@ -553,8 +556,10 @@ impl App {
     }
 
     /// applies metadata edits via FFI (a `None` field is left alone; empty
-    /// album / genres are cleared).
-    fn apply_meta(&self, e: MetaEdit) {
+    /// album / genres are cleared). The cover path is made absolute (`~` is
+    /// expanded) and must point to an existing file; with `embed_cover` the
+    /// picture is also written into the audio file tags. Err — what failed.
+    fn apply_meta(&self, e: MetaEdit) -> Result<(), String> {
         ffi::db::set_track_meta(e.id, e.title.as_deref(), e.artists.as_deref());
         if let Some(a) = &e.album {
             ffi::db::set_track_album(e.id, (!a.is_empty()).then_some(a.as_str()));
@@ -562,17 +567,30 @@ impl App {
         if let Some(g) = &e.genres {
             ffi::db::set_track_genres(e.id, g);
         }
-        if let Some(c) = &e.cover
-            && !c.is_empty()
-        {
-            ffi::db::set_track_cover(e.id, Some(c));
-        }
         if let Some(c) = &e.color {
             ffi::db::set_track_color(e.id, (!c.is_empty()).then_some(c.as_str()));
         }
         if let Some(l) = &e.label {
             ffi::db::set_track_label(e.id, (!l.is_empty()).then_some(l.as_str()));
         }
+        let Some(c) = e.cover.as_deref().filter(|c| !c.is_empty()) else {
+            return match e.embed_cover {
+                true => Err("embed: cover path is empty".into()),
+                false => Ok(()),
+            };
+        };
+        let path = absolute_path(c);
+        if !path.is_file() {
+            return Err(format!("cover not found: {}", path.display()));
+        }
+        let path = path.to_string_lossy();
+        if !ffi::db::set_track_cover(e.id, Some(&path)) {
+            return Err("failed to save cover".into());
+        }
+        if e.embed_cover && !ffi::db::embed_track_cover(e.id, &path) {
+            return Err("failed to embed cover (png/jpg only; gif/webp — path only)".into());
+        }
+        Ok(())
     }
 
     /// moves a track within the playing list (temporarily): keeps the playing
@@ -924,4 +942,18 @@ fn parse_percent(s: &str, max: f32) -> Option<f32> {
 /// stable track identity for lookup after a move.
 fn ident(t: &TrackMeta) -> (Option<i64>, Option<String>, String) {
     (t.id, t.path.clone(), t.title.clone())
+}
+
+/// `~` / `~/...` -> the home directory, a relative path -> from the current
+/// directory (the db keeps only absolute cover paths).
+fn absolute_path(p: &str) -> std::path::PathBuf {
+    let home = || std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    let path = match p.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\']) => match home() {
+            Some(h) => std::path::PathBuf::from(h).join(rest.trim_start_matches(['/', '\\'])),
+            None => std::path::PathBuf::from(p),
+        },
+        _ => std::path::PathBuf::from(p),
+    };
+    std::path::absolute(&path).unwrap_or(path)
 }

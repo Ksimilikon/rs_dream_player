@@ -1146,7 +1146,8 @@ fn upsert_track(
     // hash is left alone. color/user_label/invalid/volume are user state and
     // are NOT overwritten on a rescan (ON CONFLICT) (otherwise a re-index on
     // every start would reset the volume to the 1.0 default of the freshly
-    // read file).
+    // read file). The cover path is kept too when the tags give none (the tag
+    // reader never extracts one), so a rescan doesn't wipe a cover set by hand.
     let new_hash = hash.map_or_else(random_hash, str::to_owned);
     conn.execute(
         "INSERT INTO tracks \
@@ -1154,7 +1155,7 @@ fn upsert_track(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
          ON CONFLICT(path) DO UPDATE SET \
             title = excluded.title, duration = excluded.duration, \
-            cover_art = excluded.cover_art, source_type = excluded.source_type, \
+            cover_art = COALESCE(excluded.cover_art, cover_art), source_type = excluded.source_type, \
             album_id = excluded.album_id",
         params![
             new_hash,
@@ -1938,6 +1939,28 @@ mod tests {
             })
             .unwrap();
         assert!(cleared.is_none());
+    }
+
+    #[test]
+    fn rescan_keeps_cover_set_by_hand() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        db.save_track(fixture_track(dir.path(), "a.mp3", "T", "A"))
+            .unwrap();
+        let id = only_track_id(&db);
+        let cover = dir.path().join("cover.png");
+        db.set_track_cover(id, Some(&cover)).unwrap();
+
+        // a rescan of the same file: the tags give no cover path.
+        db.save_track(fixture_track(dir.path(), "a.mp3", "T", "A"))
+            .unwrap();
+        let stored: Option<String> = db
+            .conn
+            .query_row("SELECT cover_art FROM tracks WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some(cover.to_string_lossy().as_ref()));
     }
 
     #[test]

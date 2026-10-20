@@ -680,6 +680,46 @@ pub unsafe extern "C" fn idx_set_track_cover(id: i64, cover_path: *const c_char)
     })
 }
 
+/// embeds the picture at `image_path` (png / jpg only) as the front cover
+/// into the tags of the audio file of track `id`; the db is not changed.
+/// An unknown `id` or a track without a file -> `NotFound`; an unreadable
+/// file or a picture of another format (gif / webp too) -> `InvalidArgument`; a failed tag
+/// write -> `WriteFailed`. The file is read and written without the db lock.
+///
+/// # Safety
+/// `image_path` is a C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn idx_embed_track_cover(
+    id: i64,
+    image_path: *const c_char,
+) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        let image = match crate::ptr_to_path(image_path) {
+            Ok(p) => p,
+            Err(e) => return e.into(),
+        };
+        let audio = match find_track(id, None) {
+            Ok(Some(t)) => match t.get_path() {
+                Some(p) => p.to_path_buf(),
+                None => return FFIIdxStatus::NotFound,
+            },
+            Ok(None) => return FFIIdxStatus::NotFound,
+            Err(e) => return e,
+        };
+        let Ok(bytes) = std::fs::read(&image) else {
+            return FFIIdxStatus::InvalidArgument;
+        };
+        match audio_structs::cover_art::detect_image_format(&bytes) {
+            Ok(f) if f.embeddable() => {}
+            _ => return FFIIdxStatus::InvalidArgument,
+        }
+        match TrackMetadata::write_cover(&audio, &bytes) {
+            Ok(()) => FFIIdxStatus::Ok,
+            Err(_) => FFIIdxStatus::WriteFailed,
+        }
+    })
+}
+
 /// track color label (null -> clear).
 ///
 /// # Safety

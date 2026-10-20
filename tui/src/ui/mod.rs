@@ -104,6 +104,8 @@ pub struct MetaEdit {
     pub album: Option<String>,
     pub genres: Option<Vec<String>>,
     pub cover: Option<String>,
+    /// also embed `cover` into the audio file tags.
+    pub embed_cover: bool,
     pub color: Option<String>,
     pub label: Option<String>,
 }

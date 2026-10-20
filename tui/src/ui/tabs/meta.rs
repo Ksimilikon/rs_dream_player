@@ -1,6 +1,7 @@
 //! MOD_SONG_<...> tab: editing the metadata of the selected track. Only tags
 //! can be changed (title, artists, album, genres, cover, color, label);
 //! technical fields (bitrate, etc.) are shown but not editable.
+//! E toggles embedding the cover into the audio file on save.
 //! Confirm — W, cancel — Esc.
 
 use ratatui::{
@@ -32,6 +33,8 @@ pub struct SongEditor {
     readonly: Vec<(String, String)>,
     sel: usize,
     editing: bool,
+    /// embed the COVER picture into the file tags on save.
+    embed_cover: bool,
 }
 
 impl SongEditor {
@@ -64,6 +67,7 @@ impl SongEditor {
             readonly,
             sel: 0,
             editing: false,
+            embed_cover: false,
         }
     }
 
@@ -86,6 +90,7 @@ impl SongEditor {
             album: Some(get(2)),
             genres: Some(split(get(3))),
             cover: non_empty(get(4)),
+            embed_cover: self.embed_cover,
             color: non_empty(get(5)),
             label: non_empty(get(6)),
         }
@@ -135,6 +140,11 @@ impl Tab for SongEditor {
                 Span::raw(f.value.text()),
             ]));
         }
+        let embed = if self.embed_cover { "[x]" } else { "[ ]" };
+        lines.push(Line::from(Span::styled(
+            format!("  {:<width$}{embed} embed cover into file (E)", "", width = LABEL_W),
+            Style::default().fg(Color::DarkGray),
+        )));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "read-only:",
@@ -167,6 +177,10 @@ impl Tab for SongEditor {
         match key.code {
             KeyCode::Esc => TabEvent::Close,
             KeyCode::Char('W') => TabEvent::SaveMeta(self.to_edit()),
+            KeyCode::Char('E') => {
+                self.embed_cover = !self.embed_cover;
+                TabEvent::None
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 self.sel = (self.sel + 1).min(self.fields.len() - 1);
                 TabEvent::None
@@ -184,7 +198,7 @@ impl Tab for SongEditor {
     }
 
     fn hints(&self) -> Vec<Hint> {
-        vec![("jk", "fld"), ("Ent", "edit"), ("W", "save"), ("Esc", "cxl")]
+        vec![("jk", "fld"), ("Ent", "edit"), ("E", "embed"), ("W", "save"), ("Esc", "cxl")]
     }
 
     /// all input is captured only while a field is being edited.

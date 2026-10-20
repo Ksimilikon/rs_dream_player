@@ -141,11 +141,14 @@ impl TrackMetadata {
     }
 
     /// embeds `image_bytes` as the front cover picture in the file's tags at
-    /// `path`. Accepts only png/jpg/gif (validated via
-    /// [`crate::cover_art::detect_image_format`]).
+    /// `path`. Accepts only png/jpg (validated via
+    /// [`crate::cover_art::detect_image_format`]; gif / webp are rejected, see
+    /// [`crate::cover_art::CoverArt::embeddable`]).
     pub fn write_cover(path: &Path, image_bytes: &[u8]) -> Result<(), Box<dyn Error>> {
-        // reject anything that isn't png/jpg/gif before touching the file.
-        detect_image_format(image_bytes)?;
+        // reject anything that isn't png/jpg before touching the file.
+        if !detect_image_format(image_bytes)?.embeddable() {
+            return Err("only png and jpg covers can be embedded".into());
+        }
 
         let mut picture = Picture::from_reader(&mut Cursor::new(image_bytes))?;
         picture.set_pic_type(PictureType::CoverFront);
@@ -269,8 +272,24 @@ mod tests {
         let path = dir.path().join("copy.mp3");
         fs::copy(&src, &path).unwrap();
 
-        // not png/jpg/gif — must return an error before writing to the file.
+        // not png/jpg — must return an error before writing to the file.
         let err = TrackMetadata::write_cover(&path, b"not an image at all");
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn write_cover_rejects_gif_and_webp() {
+        let src = fixture();
+        if !src.exists() {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("copy.mp3");
+        fs::copy(&src, &path).unwrap();
+
+        // valid cover files, but path-only: never embedded.
+        assert!(TrackMetadata::write_cover(&path, b"GIF89a\x01\x00\x01\x00").is_err());
+        assert!(TrackMetadata::write_cover(&path, b"RIFF\x00\x00\x00\x00WEBPVP8 ").is_err());
+        assert!(TrackMetadata::read_cover(&path).is_none());
     }
 }

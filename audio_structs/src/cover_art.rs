@@ -4,12 +4,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// image formats accepted for cover art stored on disk
+/// image formats accepted for cover art stored on disk. Only png/jpg can
+/// also be embedded into the audio file tags (see [`CoverArt::embeddable`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoverArt {
     Png,
     Jpeg,
     Gif,
+    Webp,
 }
 
 impl CoverArt {
@@ -18,7 +20,15 @@ impl CoverArt {
             CoverArt::Png => "png",
             CoverArt::Jpeg => "jpg",
             CoverArt::Gif => "gif",
+            CoverArt::Webp => "webp",
         }
+    }
+
+    /// whether the format can be embedded into the audio file tags. gif and
+    /// webp are cover files only: MP4 `covr` doesn't allow them, and players
+    /// rarely show them from ID3 / FLAC pictures.
+    pub fn embeddable(&self) -> bool {
+        matches!(self, CoverArt::Png | CoverArt::Jpeg)
     }
 }
 
@@ -36,7 +46,7 @@ const JPEG_SIGNATURE: [u8; 3] = [0xFF, 0xD8, 0xFF];
 const GIF87A: &[u8; 6] = b"GIF87a";
 const GIF89A: &[u8; 6] = b"GIF89a";
 
-/// detects image format by magic bytes, only png/jpg/gif are accepted as cover art
+/// detects image format by magic bytes, only png/jpg/gif/webp are accepted as cover art
 pub fn detect_image_format(bytes: &[u8]) -> Result<CoverArt, ErrorInvalidImageType> {
     if bytes.starts_with(&PNG_SIGNATURE) {
         Ok(CoverArt::Png)
@@ -44,14 +54,16 @@ pub fn detect_image_format(bytes: &[u8]) -> Result<CoverArt, ErrorInvalidImageTy
         Ok(CoverArt::Jpeg)
     } else if bytes.starts_with(GIF87A) || bytes.starts_with(GIF89A) {
         Ok(CoverArt::Gif)
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Ok(CoverArt::Webp)
     } else {
         Err(ErrorInvalidImageType(
-            "cover art type mismatch: only png, jpg and gif are supported".into(),
+            "cover art type mismatch: only png, jpg, gif and webp are supported".into(),
         ))
     }
 }
 
-/// validates `bytes` are png/jpg/gif and writes them to `dest_dir/<stem>.<ext>`,
+/// validates `bytes` are png/jpg/gif/webp and writes them to `dest_dir/<stem>.<ext>`,
 /// returning the resulting path. Returns `ErrorInvalidImageType` for any other format.
 pub fn save_cover_art(
     bytes: &[u8],
@@ -63,4 +75,21 @@ pub fn save_cover_art(
     let path = dest_dir.join(format!("{stem}.{}", format.extension()));
     fs::write(&path, bytes)?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_webp_as_path_only() {
+        let f = detect_image_format(b"RIFF\x10\x00\x00\x00WEBPVP8 ").unwrap();
+        assert_eq!(f, CoverArt::Webp);
+        assert_eq!(f.extension(), "webp");
+        assert!(!f.embeddable());
+        assert!(!detect_image_format(b"GIF89a").unwrap().embeddable());
+        assert!(detect_image_format(&[0xFF, 0xD8, 0xFF, 0xE0]).unwrap().embeddable());
+        // RIFF but not webp (e.g. wav).
+        assert!(detect_image_format(b"RIFF\x10\x00\x00\x00WAVEfmt ").is_err());
+    }
 }

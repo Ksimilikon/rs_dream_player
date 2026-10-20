@@ -7,7 +7,7 @@ edition = "2024"
 # the player core — we work ONLY through its FFI surface (`init`/`idx_*`/
 # `engine_*`), demonstrating the `api` crate as a dynamic library.
 api = { workspace = true }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # extracting the embedded cover from audio file tags lives in audio_structs
 # (TrackMetadata::read_cover) — reuse it instead of duplicating lofty here.
 audio_structs = { workspace = true }

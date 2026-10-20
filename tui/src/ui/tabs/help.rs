@@ -57,6 +57,7 @@ const HELP: &[(&str, &str)] = &[
     ("", "METADATA EDITOR (MOD_SONG_...)"),
     ("j / k", "select field"),
     ("Enter / i", "edit field"),
+    ("Shift+E", "toggle: embed COVER into the audio file on save"),
     ("Shift+W", "SAVE the track metadata (to db)"),
     ("Esc", "cancel / leave field"),
     ("", ""),

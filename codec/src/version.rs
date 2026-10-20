@@ -13,15 +13,23 @@ pub enum Version {
     V0_1 = 1,
     /// v0.11: v0.1 + the deleted playlists section (soft deletion).
     V0_11 = 2,
+    /// v0.12: v0.11 + the song info section (change dates and db metadata
+    /// of the songs).
+    V0_12 = 3,
 }
 
 impl Version {
     /// the newest version, used for new packets.
-    pub const LATEST: Version = Version::V0_11;
+    pub const LATEST: Version = Version::V0_12;
 
     /// the version carries the deleted playlists section.
     pub fn has_deleted(self) -> bool {
         self != Version::V0_1
+    }
+
+    /// the version carries the song info section.
+    pub fn has_song_info(self) -> bool {
+        self as u32 >= Version::V0_12 as u32
     }
 }
 
@@ -38,6 +46,7 @@ impl TryFrom<u32> for Version {
         match n {
             1 => Ok(Version::V0_1),
             2 => Ok(Version::V0_11),
+            3 => Ok(Version::V0_12),
             _ => Err(CodecError::UnsupportedVersion),
         }
     }

@@ -681,7 +681,8 @@ pub unsafe extern "C" fn idx_set_track_cover(id: i64, cover_path: *const c_char)
 }
 
 /// embeds the picture at `image_path` (png / jpg only) as the front cover
-/// into the tags of the audio file of track `id`; the db is not changed.
+/// into the tags of the audio file of track `id`; in the db only the file is
+/// dated as changed (see `idx_set_track_file_changed`).
 /// An unknown `id` or a track without a file -> `NotFound`; an unreadable
 /// file or a picture of another format (gif / webp too) -> `InvalidArgument`; a failed tag
 /// write -> `WriteFailed`. The file is read and written without the db lock.
@@ -714,9 +715,20 @@ pub unsafe extern "C" fn idx_embed_track_cover(
             _ => return FFIIdxStatus::InvalidArgument,
         }
         match TrackMetadata::write_cover(&audio, &bytes) {
-            Ok(()) => FFIIdxStatus::Ok,
+            Ok(()) => write(|db| db.set_track_file_changed(id)),
             Err(_) => FFIIdxStatus::WriteFailed,
         }
+    })
+}
+
+/// dates a change of the audio file of track `id` itself (tags, embedded
+/// cover, ...): on sync the file goes to the other devices again and is
+/// written over their copy. `idx_embed_track_cover` does it by itself; a
+/// frontend that changes a file with its own means calls this after.
+#[unsafe(no_mangle)]
+pub extern "C" fn idx_set_track_file_changed(id: i64) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        write(|db| db.set_track_file_changed(id))
     })
 }
 
@@ -897,6 +909,39 @@ pub unsafe extern "C" fn idx_save_playlist(
             playlist.set_cover_art(cover.map(Into::into));
             db.save_playlist(playlist)
                 .map_err(|_| FFIIdxStatus::WriteFailed)
+        }))
+    })
+}
+
+/// cover path of playlist `name` (null -> clear), without touching its
+/// tracks. It is a change of the playlist: the cover syncs. `NotFound` — no
+/// such playlist (or it is deleted).
+///
+/// # Safety
+/// `name` is a valid C string (not null); `cover` is null or a C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn idx_set_playlist_cover(
+    name: *const c_char,
+    cover: *const c_char,
+) -> FFIIdxStatus {
+    crate::panic::guard(|| {
+        let name = match unsafe { c_to_string(name) } {
+            Ok(n) => n,
+            Err(e) => return e.into(),
+        };
+        let cover = match cover.is_null() {
+            true => None,
+            false => match crate::ptr_to_path(cover) {
+                Ok(p) => Some(p),
+                Err(e) => return e.into(),
+            },
+        };
+        status(with_db(|db| {
+            match db.set_playlist_cover(&name, cover.as_deref()) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(FFIIdxStatus::NotFound),
+                Err(_) => Err(FFIIdxStatus::WriteFailed),
+            }
         }))
     })
 }

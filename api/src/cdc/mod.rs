@@ -1,8 +1,11 @@
 //! FFI over the `codec` crate. Prefix `cdc_` = packet pack / unpack.
 //!
 //! - the packet version is passed as a `u32` number (= `codec::Version`
-//!   discriminant: `1` = v0.1, `2` = v0.11); an unknown number ->
-//!   `UnsupportedVersion`.
+//!   discriminant: `1` = v0.1, `2` = v0.11, `3` = v0.12); an unknown number
+//!   -> `UnsupportedVersion`.
+//! - v0.12+ packs from the db carry the song change dates and the metadata
+//!   the db keeps (title, album, artists, genres, labels, volume); on import
+//!   the newer metadata of a known song is applied (see [`import`]).
 //! - deleted playlists (soft deletion, v0.11+) go into a library packet so
 //!   the receiver deletes them too; v0.1 can't carry them.
 //! - every function returns [`FFICdcStatus`] (`0` = ok), results go through
@@ -26,13 +29,14 @@
 //!   `cdc_import_cancel` (see [`import`]).
 
 use std::{
+    collections::HashMap,
     ffi::{CStr, c_char},
     path::Path,
     ptr, slice,
 };
 
-use codec::{CodecError, DeletedPlaylist, Playlist, Song, Version};
-use storage::db::{DeletedPlaylistRow, PlaylistHashRow};
+use codec::{CodecError, DeletedPlaylist, Playlist, Song, SongMeta, Version};
+use storage::db::{DeletedPlaylistRow, PlaylistHashRow, TrackMetaRow, TrackSyncRow};
 
 use crate::idx::{to_c, vec_to_raw};
 
@@ -276,11 +280,11 @@ fn pack_from_db(
 
     // only the db query runs under the lock; audio / covers are read without
     // it, so the core (player) isn't held while gigabytes are read from disk.
-    let (tracks, playlists, deleted) = {
+    let (tracks, infos, playlists, deleted) = {
         let guard = crate::core().ok_or(FFICdcStatus::NotInitialized)?;
         let db = guard.get_db().ok_or(FFICdcStatus::NoDatabase)?;
         let read = |_| FFICdcStatus::ReadFailed;
-        match selection {
+        let (tracks, playlists, deleted) = match selection {
             Selection::Library => (
                 db.get_track_hashes(None).map_err(read)?,
                 db.get_playlist_hashes(None).map_err(read)?,
@@ -314,13 +318,31 @@ fn pack_from_db(
                     Vec::new(),
                 )
             }
-        }
+        };
+        let infos: HashMap<String, TrackSyncRow> = match version.has_song_info() {
+            true => {
+                let hashes: Vec<String> = tracks.iter().map(|(_, h, _)| h.clone()).collect();
+                db.get_track_sync(&hashes)
+                    .map_err(read)?
+                    .into_iter()
+                    .map(|r| (r.hash.clone(), r))
+                    .collect()
+            }
+            false => HashMap::new(),
+        };
+        (tracks, infos, playlists, deleted)
     };
 
     let songs = tracks
         .into_iter()
-        .map(|(_, hash, path)| song_from_db(&hash, &path, with_audio, with_names))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|(_, hash, path)| {
+            let song = song_from_db(&hash, &path, with_audio, with_names)?;
+            Ok(match infos.get(&hash) {
+                Some(row) => with_info(song, row),
+                None => song,
+            })
+        })
+        .collect::<Result<Vec<_>, FFICdcStatus>>()?;
     let playlists = playlists
         .into_iter()
         .map(|row| playlist_from_db(row, with_covers))
@@ -334,6 +356,43 @@ pub(crate) fn deleted_from_db(row: DeletedPlaylistRow) -> DeletedPlaylist {
     DeletedPlaylist {
         name: row.name,
         deleted_at: row.deleted_at,
+    }
+}
+
+/// the change dates and metadata of `row` added to `song`.
+pub(crate) fn with_info(song: Song, row: &TrackSyncRow) -> Song {
+    Song {
+        updated_at: row.updated_at,
+        updated_at_file: row.updated_at_file,
+        meta: Some(meta_to_packet(&row.meta)),
+        ..song
+    }
+}
+
+/// db metadata -> packet metadata (a missing value is an empty string).
+pub(crate) fn meta_to_packet(m: &TrackMetaRow) -> SongMeta {
+    SongMeta {
+        title: m.title.clone(),
+        album: m.album.clone().unwrap_or_default(),
+        artists: m.artists.clone(),
+        genres: m.genres.clone(),
+        color: m.color.clone().unwrap_or_default(),
+        label: m.user_label.clone().unwrap_or_default(),
+        volume: m.volume,
+    }
+}
+
+/// packet metadata -> db metadata (an empty string is a missing value).
+pub(crate) fn meta_from_packet(m: &SongMeta) -> TrackMetaRow {
+    let opt = |s: &str| (!s.is_empty()).then(|| s.to_owned());
+    TrackMetaRow {
+        title: m.title.clone(),
+        album: opt(&m.album),
+        artists: m.artists.clone(),
+        genres: m.genres.clone(),
+        color: opt(&m.color),
+        user_label: opt(&m.label),
+        volume: m.volume,
     }
 }
 
@@ -353,7 +412,12 @@ fn song_from_db(
         true => std::fs::read(path).map_err(|_| FFICdcStatus::ReadFailed)?,
         false => Vec::new(),
     };
-    Ok(Song { hash, name, data })
+    Ok(Song {
+        hash,
+        name,
+        data,
+        ..Song::default()
+    })
 }
 
 /// db playlist -> packet playlist.
@@ -473,6 +537,7 @@ unsafe fn songs_from_c(
             hash: u128::from_be_bytes(*hash),
             name,
             data,
+            ..Song::default()
         });
     }
     Ok(songs)

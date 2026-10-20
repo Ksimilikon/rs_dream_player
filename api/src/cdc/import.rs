@@ -16,6 +16,13 @@
 //!   alone). A new song is saved in the db with the hash from the packet
 //!   (hashes become shared between devices). A song without audio or not
 //!   music -> skipped. A song without tags is not skipped: fields = "Unknown".
+//! - song metadata (v0.12+): the db metadata from the packet goes over the
+//!   tags of a new song; for a known song it is applied if the packet one
+//!   changed later (`updated_at`, an unset date counts as 0). Sync also
+//!   rewrites the file of a known song if the packet file changed later
+//!   (`updated_at_file`) — over the local file (`ImportSession::replaces`);
+//!   a packet import (`cdc_import_*`) leaves a known file alone. `force`
+//!   concerns playlists only.
 //! - playlists are matched by name; without a name -> skipped. The song list
 //!   is rewritten entirely. If the packet has no cover / dates (or the cover
 //!   file wasn't written), the local values are kept.
@@ -38,11 +45,11 @@ use audio_structs::{track::Track, track_virtual::TrackVirtual};
 use codec::{DeletedPlaylist, Playlist, Song};
 use storage::{
     Db,
-    db::{DeletedPlaylistRow, PlaylistHashRow},
+    db::{DeletedPlaylistRow, PlaylistHashRow, TrackSyncRow},
     traits::indexator::Indexator,
 };
 
-use super::{FFICdcStatus, raw_slice};
+use super::{FFICdcStatus, meta_from_packet, raw_slice};
 
 /// what kind of file has to be written. `repr(u32)`: never renumber.
 #[repr(u32)]
@@ -85,8 +92,14 @@ enum Planned {
 /// pointer; owns the data [`FFIImportFiles`] points to.
 pub struct ImportSession {
     force: bool,
-    /// only new songs (with audio, hash not in the db).
+    /// songs with a file to write: new ones (with audio, hash not in the
+    /// db) and known ones with a newer file (sync only).
     pub(crate) songs: Vec<Song>,
+    /// for every song of `songs`: the local file of the known song to write
+    /// over; `None` — a new song.
+    local: Vec<Option<PathBuf>>,
+    /// known songs that get only the newer metadata from the packet.
+    metas: Vec<TrackSyncRow>,
     pub(crate) playlists: Vec<Playlist>,
     /// playlists deleted on the other side (v0.11+).
     pub(crate) deleted: Vec<DeletedPlaylist>,
@@ -133,7 +146,7 @@ pub unsafe extern "C" fn cdc_import_prepare(
         let Some(bytes) = (unsafe { raw_slice(bytes, len) }) else {
             return FFICdcStatus::NullPointer;
         };
-        match prepare(&Global, bytes, force) {
+        match prepare(&Global, bytes, force, false) {
             Ok(session) => {
                 let session = Box::new(session);
                 unsafe {
@@ -221,6 +234,20 @@ impl ImportSession {
             (kind, name.to_str().unwrap_or_default(), data.as_slice())
         })
     }
+
+    /// for every file of [`Self::planned`]: the local file of the same song
+    /// to write over (its newer version); `None` — a new file.
+    pub(crate) fn replaces(&self) -> impl Iterator<Item = Option<&Path>> {
+        self.plan.iter().map(|&planned| match planned {
+            Planned::Song(i) => self.local[i].as_deref(),
+            Planned::Cover(_) => None,
+        })
+    }
+
+    /// known songs that get only metadata.
+    pub(crate) fn meta_updates(&self) -> usize {
+        self.metas.len()
+    }
 }
 
 // ─────────────────────────────── logic ───────────────────────────────
@@ -240,20 +267,26 @@ impl Store for Global {
     }
 }
 
+/// `rewrite_files` — a newer file of a known song is listed to be written
+/// over the local one (sync); otherwise only its metadata is taken.
 pub(crate) fn prepare(
     store: &impl Store,
     bytes: &[u8],
     force: bool,
+    rewrite_files: bool,
 ) -> Result<ImportSession, FFICdcStatus> {
     let packet = codec::decode(bytes)?;
 
-    let songs: Vec<Song> = store.with(|db| {
+    let (songs, local, metas) = store.with(|db| {
         check_dates(db, &packet.playlists, force)?;
-        Ok(packet
-            .songs
+        let hashes: Vec<String> = packet.songs.iter().map(|s| hex(s.hash)).collect();
+        let known: HashMap<String, TrackSyncRow> = db
+            .get_track_sync(&hashes)
+            .map_err(|_| FFICdcStatus::ReadFailed)?
             .into_iter()
-            .filter(|s| Track::is_music(&s.data) && !db.hash_exist(hex(s.hash)))
-            .collect())
+            .map(|r| (r.hash.clone(), r))
+            .collect();
+        Ok(sort_songs(packet.songs, &known, rewrite_files))
     })?;
     let playlists: Vec<Playlist> = packet
         .playlists
@@ -304,6 +337,8 @@ pub(crate) fn prepare(
     Ok(ImportSession {
         force,
         songs,
+        local,
+        metas,
         playlists,
         deleted,
         plan,
@@ -323,6 +358,7 @@ pub(crate) fn commit(
 
     // metadata is read from the written files — before taking the lock.
     let mut tracks = Vec::new();
+    let mut metas = session.metas.clone();
     let mut covers = HashMap::new();
     for (planned, path) in session.plan.iter().zip(paths) {
         let Some(path) = path else { continue };
@@ -330,8 +366,21 @@ pub(crate) fn commit(
             Planned::Song(i) => {
                 // an unreadable file (the header looks like music, garbage
                 // follows) doesn't get into the db.
-                if let Ok(track) = TrackVirtual::from_file(path.clone(), false) {
-                    tracks.push((track, hex(session.songs[i].hash)));
+                let Ok(track) = TrackVirtual::from_file(path.clone(), false) else {
+                    continue;
+                };
+                let song = &session.songs[i];
+                tracks.push((track, hex(song.hash), session.local[i].is_some()));
+                // the db metadata goes over the tags of the written file.
+                if let Some(meta) = &song.meta {
+                    metas.push(TrackSyncRow {
+                        id: 0,
+                        hash: hex(song.hash),
+                        path: path.clone(),
+                        updated_at: song.updated_at,
+                        updated_at_file: song.updated_at_file,
+                        meta: meta_from_packet(meta),
+                    });
                 }
             }
             Planned::Cover(i) => {
@@ -356,12 +405,14 @@ pub(crate) fn commit(
     store.with(|db| {
         // the db may have changed while the frontend was writing files.
         check_dates(db, &session.playlists, session.force)?;
-        // the song may have appeared meanwhile — there will be no second
-        // insert with the same hash.
-        let tracks: Vec<_> = tracks
+        // a new song may have appeared meanwhile — there will be no second
+        // insert with the same hash (nor its metadata over the local one).
+        let (tracks, late): (Vec<_>, Vec<_>) = tracks
             .into_iter()
-            .filter(|(_, hash)| !db.hash_exist(hash.clone()))
-            .collect();
+            .partition(|(_, hash, known)| *known || !db.hash_exist(hash.clone()));
+        let late: Vec<String> = late.into_iter().map(|(_, hash, _)| hash).collect();
+        metas.retain(|m| !late.contains(&m.hash));
+        let tracks: Vec<_> = tracks.into_iter().map(|(t, hash, _)| (t, hash)).collect();
         let deleted: Vec<DeletedPlaylistRow> = session
             .deleted
             .iter()
@@ -370,9 +421,56 @@ pub(crate) fn commit(
                 deleted_at: d.deleted_at,
             })
             .collect();
-        db.save_import(&tracks, &playlists, &deleted)
+        db.save_import(&tracks, &metas, &playlists, &deleted)
             .map_err(|_| FFICdcStatus::WriteFailed)
     })
+}
+
+/// packet songs against the known ones (by hex hash): `(songs with a file
+/// to write, the local file to write over for each, metadata-only updates)`
+/// — see the module rules.
+fn sort_songs(
+    songs: Vec<Song>,
+    known: &HashMap<String, TrackSyncRow>,
+    rewrite_files: bool,
+) -> (Vec<Song>, Vec<Option<PathBuf>>, Vec<TrackSyncRow>) {
+    let newer = |remote: Option<u64>, local: Option<u64>| remote.unwrap_or(0) > local.unwrap_or(0);
+    let (mut files, mut local, mut metas) = (Vec::new(), Vec::new(), Vec::new());
+    for song in songs {
+        let music = Track::is_music(&song.data);
+        match known.get(&hex(song.hash)) {
+            None if music => {
+                files.push(song);
+                local.push(None);
+            }
+            None => {}
+            // a newer file is taken only with its metadata: they are dated
+            // together, so the next sync doesn't want it again.
+            Some(row)
+                if rewrite_files
+                    && music
+                    && song.meta.is_some()
+                    && newer(song.updated_at_file, row.updated_at_file) =>
+            {
+                files.push(song);
+                local.push(Some(row.path.clone()));
+            }
+            Some(row) => {
+                if let Some(meta) = &song.meta
+                    && newer(song.updated_at, row.updated_at)
+                {
+                    metas.push(TrackSyncRow {
+                        updated_at: song.updated_at,
+                        // the local file stays.
+                        updated_at_file: None,
+                        meta: meta_from_packet(meta),
+                        ..row.clone()
+                    });
+                }
+            }
+        }
+    }
+    (files, local, metas)
 }
 
 /// `Outdated` if the packet is older than the local playlists (see the
@@ -513,7 +611,7 @@ mod tests {
                     updated_at: None,
                     hashes: Vec::new(),
                 };
-                self.db.save_import(&[], &[row], &[]).unwrap();
+                self.db.save_import(&[], &[], &[row], &[]).unwrap();
                 return;
             };
             let mut p = DbPlaylist::from_tracks(vec![]);
@@ -585,12 +683,14 @@ mod tests {
                 hash: 1,
                 name: "one.mp3".into(),
                 data: mp3(),
+                ..Song::default()
             },
             // no audio — skipped.
             Song {
                 hash: 2,
                 name: "two.mp3".into(),
                 data: vec![],
+                ..Song::default()
             },
         ];
         codec::encode(Version::V0_1, &songs, &playlists).unwrap()
@@ -622,7 +722,7 @@ mod tests {
     fn prepare_lists_files_and_commit_saves_paths() {
         let l = Local::new("ok");
         let bytes = packet(vec![playlist("mix", Some(5))]);
-        let session = prepare(&l, &bytes, false).unwrap();
+        let session = prepare(&l, &bytes, false, false).unwrap();
         assert_eq!(
             file_names(&session),
             [
@@ -646,7 +746,7 @@ mod tests {
         assert_eq!(pls[0].cover_art, Some(l.root.join("c.png")));
 
         // repeated import: the song already exists — only the cover is listed.
-        let session = prepare(&l, &bytes, false).unwrap();
+        let session = prepare(&l, &bytes, false, false).unwrap();
         assert_eq!(
             file_names(&session),
             [(FFIImportFileKind::Cover, "c.png".into())]
@@ -656,7 +756,7 @@ mod tests {
     #[test]
     fn unwritten_files_are_skipped() {
         let l = Local::new("skip");
-        let session = prepare(&l, &packet(vec![playlist("mix", None)]), false).unwrap();
+        let session = prepare(&l, &packet(vec![playlist("mix", None)]), false, false).unwrap();
         assert_eq!(commit(&l, &session, &[None, None]), Ok(()));
         assert!(!l.db.hash_exist(hex(1)));
         let pls = l.db.get_playlist_hashes(None).unwrap();
@@ -667,7 +767,7 @@ mod tests {
     #[test]
     fn paths_count_must_match() {
         let l = Local::new("count");
-        let session = prepare(&l, &packet(vec![]), false).unwrap();
+        let session = prepare(&l, &packet(vec![]), false, false).unwrap();
         assert_eq!(
             commit(&l, &session, &[]),
             Err(FFICdcStatus::InvalidArgument)
@@ -681,18 +781,18 @@ mod tests {
         for remote in [Some(9), None] {
             let bytes = packet(vec![playlist("mix", remote)]);
             assert_eq!(
-                prepare(&l, &bytes, false).err(),
+                prepare(&l, &bytes, false, false).err(),
                 Some(FFICdcStatus::Outdated)
             );
         }
         // an equal or newer date — ok.
-        assert!(prepare(&l, &packet(vec![playlist("mix", Some(10))]), false).is_ok());
+        assert!(prepare(&l, &packet(vec![playlist("mix", Some(10))]), false, false).is_ok());
     }
 
     #[test]
     fn outdated_is_rechecked_in_commit() {
         let l = Local::new("recheck");
-        let session = prepare(&l, &packet(vec![playlist("mix", Some(5))]), false).unwrap();
+        let session = prepare(&l, &packet(vec![playlist("mix", Some(5))]), false, false).unwrap();
         // the local playlist got updated while the frontend was writing files.
         l.local_playlist("mix", Some(10));
         let paths = l.write_all(&session);
@@ -704,7 +804,7 @@ mod tests {
     fn force_overrides_outdated() {
         let l = Local::new("force");
         l.local_playlist("mix", Some(10));
-        let session = prepare(&l, &packet(vec![playlist("mix", Some(1))]), true).unwrap();
+        let session = prepare(&l, &packet(vec![playlist("mix", Some(1))]), true, false).unwrap();
         let paths = l.write_all(&session);
         assert_eq!(commit(&l, &session, &paths), Ok(()));
         let pls = l.db.get_playlist_hashes(None).unwrap();
@@ -728,7 +828,7 @@ mod tests {
         let l = Local::new("deletion");
         l.local_playlist("old", Some(10));
         l.local_playlist("fresh", Some(500));
-        let session = prepare(&l, &deletions(&[("old", 100), ("fresh", 100)]), false).unwrap();
+        let session = prepare(&l, &deletions(&[("old", 100), ("fresh", 100)]), false, false).unwrap();
         assert_eq!(commit(&l, &session, &[]), Ok(()));
         let live: Vec<String> = l.db.get_playlist_hashes(None).unwrap().into_iter().map(|p| p.name).collect();
         assert_eq!(live, vec!["fresh".to_string()]);
@@ -742,7 +842,7 @@ mod tests {
         l.local_playlist("mix", Some(10));
         l.db.remove_playlist("mix").unwrap();
         assert_eq!(
-            prepare(&l, &packet(vec![playlist("mix", Some(20))]), false).err(),
+            prepare(&l, &packet(vec![playlist("mix", Some(20))]), false, false).err(),
             Some(FFICdcStatus::Outdated)
         );
     }
@@ -751,15 +851,15 @@ mod tests {
     fn local_without_date_accepts() {
         let l = Local::new("nodate");
         l.local_playlist("mix", None);
-        assert!(prepare(&l, &packet(vec![playlist("mix", None)]), false).is_ok());
+        assert!(prepare(&l, &packet(vec![playlist("mix", None)]), false, false).is_ok());
     }
 
     #[test]
     fn song_appeared_between_steps_is_not_duplicated() {
         let l = Local::new("race");
         let bytes = packet(vec![]);
-        let first = prepare(&l, &bytes, false).unwrap();
-        let second = prepare(&l, &bytes, false).unwrap();
+        let first = prepare(&l, &bytes, false, false).unwrap();
+        let second = prepare(&l, &bytes, false, false).unwrap();
         let paths = l.write_all(&first);
         assert_eq!(commit(&l, &first, &paths), Ok(()));
         // a second commit with the same song doesn't fail on UNIQUE(hash).
@@ -774,9 +874,10 @@ mod tests {
             hash: 3,
             name: "raw.wav".into(),
             data: tagless_wav(),
+            ..Song::default()
         }];
         let bytes = codec::encode(Version::V0_1, &songs, &[]).unwrap();
-        let session = prepare(&l, &bytes, false).unwrap();
+        let session = prepare(&l, &bytes, false, false).unwrap();
         let paths = l.write_all(&session);
         assert_eq!(commit(&l, &session, &paths), Ok(()));
         let tracks = l.db.get_tracks(None, None, None, Some(hex(3))).unwrap();
@@ -785,15 +886,99 @@ mod tests {
         assert_eq!(meta.artist, ["Unknown"]);
     }
 
+    fn meta(title: &str) -> codec::SongMeta {
+        codec::SongMeta {
+            title: title.into(),
+            artists: vec!["Artist".into()],
+            genres: vec!["rock".into()],
+            label: "fav".into(),
+            volume: 0.5,
+            ..codec::SongMeta::default()
+        }
+    }
+
+    /// song 1 (`one.mp3`) with dates and metadata in a v0.12 packet.
+    fn dated(title: &str, updated: u64, updated_file: u64, data: Vec<u8>) -> Vec<u8> {
+        let songs = [Song {
+            hash: 1,
+            name: "one.mp3".into(),
+            data,
+            updated_at: Some(updated),
+            updated_at_file: Some(updated_file),
+            meta: Some(meta(title)),
+        }];
+        codec::encode(Version::V0_12, &songs, &[]).unwrap()
+    }
+
+    fn title_of(l: &Local, hash: u128) -> (String, Option<u64>, Option<u64>) {
+        let row = &l.db.get_track_sync(&[hex(hash)]).unwrap()[0];
+        (row.meta.title.clone(), row.updated_at, row.updated_at_file)
+    }
+
+    #[test]
+    fn new_song_takes_packet_metadata_over_tags() {
+        let l = Local::new("new-meta");
+        let session = prepare(&l, &dated("From db", 5, 6, mp3()), false, false).unwrap();
+        let paths = l.write_all(&session);
+        assert_eq!(commit(&l, &session, &paths), Ok(()));
+        assert_eq!(title_of(&l, 1), ("From db".into(), Some(5), Some(6)));
+        let row = &l.db.get_track_sync(&[hex(1)]).unwrap()[0];
+        assert_eq!(row.meta.user_label.as_deref(), Some("fav"));
+        assert_eq!(row.meta.genres, ["rock"]);
+    }
+
+    #[test]
+    fn known_song_takes_newer_metadata_only() {
+        let l = Local::new("known-meta");
+        let session = prepare(&l, &dated("v1", 10, 10, mp3()), false, false).unwrap();
+        let paths = l.write_all(&session);
+        commit(&l, &session, &paths).unwrap();
+
+        // older metadata — nothing to do.
+        let session = prepare(&l, &dated("old", 9, 99, vec![]), false, false).unwrap();
+        assert_eq!(session.meta_updates(), 0);
+        // newer metadata: applied, the file stays (no files, the file date
+        // stays local), even with a newer file in a packet import.
+        let session = prepare(&l, &dated("v2", 20, 99, mp3()), false, false).unwrap();
+        assert!(session.files.is_empty());
+        assert_eq!(commit(&l, &session, &[]), Ok(()));
+        assert_eq!(title_of(&l, 1), ("v2".into(), Some(20), Some(10)));
+    }
+
+    #[test]
+    fn sync_rewrites_a_newer_file_over_the_local_one() {
+        let l = Local::new("rewrite");
+        let session = prepare(&l, &dated("v1", 10, 10, mp3()), false, true).unwrap();
+        let paths = l.write_all(&session);
+        commit(&l, &session, &paths).unwrap();
+        let local = l.root.join("one.mp3");
+
+        // the same file date: no rewrite.
+        let session = prepare(&l, &dated("v1", 10, 10, mp3()), false, true).unwrap();
+        assert!(session.files.is_empty());
+
+        let session = prepare(&l, &dated("v2", 30, 30, mp3()), false, true).unwrap();
+        assert_eq!(file_names(&session), [(FFIImportFileKind::Song, "one.mp3".into())]);
+        assert_eq!(session.replaces().collect::<Vec<_>>(), [Some(local.as_path())]);
+        // the frontend chose another place for it: the track follows.
+        let moved = l.root.join("moved.mp3");
+        fs::write(&moved, mp3()).unwrap();
+        assert_eq!(commit(&l, &session, &[Some(moved.clone())]), Ok(()));
+        let tracks = l.db.get_track_hashes(None).unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!((tracks[0].1.clone(), tracks[0].2.clone()), (hex(1), moved));
+        assert_eq!(title_of(&l, 1), ("v2".into(), Some(30), Some(30)));
+    }
+
     #[test]
     fn decode_error_passes_through() {
         let l = Local::new("decode");
         assert_eq!(
-            prepare(&l, b"DPL", false).err(),
+            prepare(&l, b"DPL", false, false).err(),
             Some(FFICdcStatus::UnexpectedEof)
         );
         assert_eq!(
-            prepare(&l, b"junk", false).err(),
+            prepare(&l, b"junk", false, false).err(),
             Some(FFICdcStatus::BadStartWord)
         );
     }

@@ -351,14 +351,15 @@ impl SyncSession {
             Ok(p) => p,
             Err(st) => return self.reject_fatal(env, st),
         };
-        let session = match cdc::prepare(env.store(), &packet, self.force) {
+        let session = match cdc::prepare(env.store(), &packet, self.force, true) {
             Ok(s) => s,
             Err(st) => return self.ack_import(env, import_status(st)),
         };
         if session.planned().next().is_none() {
             return self.commit(env, &session, &[]);
         }
-        // a song with the same file name is replaced by the received one.
+        // a newer version of a known song goes over its file; a new song
+        // with the same file name as a local one replaces it.
         let local = env
             .run(|_, db| db.get_track_paths().map_err(|_| WireStatus::Internal))
             .unwrap_or_default();
@@ -368,9 +369,11 @@ impl SyncSession {
             .collect();
         let replace = session
             .planned()
-            .map(|(kind, name, _)| match kind {
-                FFIImportFileKind::Song => by_name.get(name).cloned(),
-                FFIImportFileKind::Cover => None,
+            .zip(session.replaces())
+            .map(|((kind, name, _), known)| match (kind, known) {
+                (_, Some(path)) => Some(path.to_path_buf()),
+                (FFIImportFileKind::Song, None) => by_name.get(name).cloned(),
+                (FFIImportFileKind::Cover, None) => None,
             })
             .collect();
         self.import = Some(PendingImport { session, replace });
@@ -385,7 +388,7 @@ impl SyncSession {
             .filter(|((kind, ..), path)| *kind == FFIImportFileKind::Song && path.is_some())
             .count();
         let stats = PortionStats {
-            songs: songs as u32,
+            songs: (songs + session.meta_updates()) as u32,
             playlists: (session.playlists.len() + session.deleted.len()) as u32,
         };
         match cdc::commit(env.store(), session, paths) {

@@ -548,6 +548,7 @@ fn a_later_change_beats_a_deletion() {
         .save_import(
             &[],
             &[],
+            &[],
             &[storage::db::DeletedPlaylistRow {
                 name: "mix".into(),
                 deleted_at: 100,
@@ -565,4 +566,93 @@ fn a_later_change_beats_a_deletion() {
     assert_eq!(host.playlists().len(), 1);
     assert!(deleted_names(&host).is_empty());
     assert!(deleted_names(&client).is_empty());
+}
+
+/// the sync row of the only song with the file `name` on `d`.
+fn song_row(d: &Device, name: &str) -> storage::db::TrackSyncRow {
+    let hashes: Vec<String> = d
+        .db
+        .get_track_hashes(None)
+        .unwrap()
+        .into_iter()
+        .filter(|(_, _, p)| p.file_name().unwrap() == name)
+        .map(|(_, h, _)| h)
+        .collect();
+    d.db.get_track_sync(&hashes).unwrap().remove(0)
+}
+
+#[test]
+fn changed_files_and_metadata_reach_the_other_side() {
+    let host = Device::new();
+    let client = Device::new();
+    host.playlist(
+        "mix",
+        10,
+        &[("a.mp3", "2.mp3"), ("b.mp3", "was_wallen_wir_trinken.mp3")],
+    );
+    let (mut hs, mut cs) = sessions(&host, &client);
+    let (he, _) = pump(&host, &mut hs, &client, &mut cs);
+    assert_eq!(he.last(), Some(&Event::Done), "{he:?}");
+    assert_eq!(client.hashes().len(), 2);
+
+    // on the host: the file of a.mp3 changes (e.g. an embedded cover), the
+    // db title of b.mp3 is edited.
+    let a = song_row(&host, "a.mp3");
+    let b = song_row(&host, "b.mp3");
+    fs::copy(host.music().join("b.mp3"), host.music().join("a.mp3")).unwrap();
+    host.db.set_track_file_changed(a.id).unwrap();
+    host.db.set_track_meta(b.id, Some("Edited"), None).unwrap();
+
+    let (mut hs, mut cs) = again(&host, &client);
+    let (he, ce) = pump(&host, &mut hs, &client, &mut cs);
+    assert_eq!(he.last(), Some(&Event::Done), "{he:?}");
+    // one file and one metadata update.
+    assert!(
+        ce.contains(&Event::Received(library::PortionStats {
+            songs: 1,
+            playlists: 0
+        })),
+        "{ce:?}"
+    );
+
+    // the client file of a.mp3 was written over, not duplicated.
+    let ca = song_row(&client, &a.path.file_name().unwrap().to_string_lossy());
+    assert_eq!(fs::read(&ca.path).unwrap(), fs::read(host.music().join("a.mp3")).unwrap());
+    assert_eq!(fs::read_dir(client.music()).unwrap().count(), 2);
+    assert_eq!(ca.updated_at_file, song_row(&host, "a.mp3").updated_at_file);
+    // the client got the edited title and its date.
+    let cb = song_row(&client, "b.mp3");
+    assert_eq!(cb.meta.title, "Edited");
+    assert_eq!(cb.updated_at, song_row(&host, "b.mp3").updated_at);
+
+    // both sides agree now: nothing moves in either direction.
+    let (mut hs, mut cs) = again(&host, &client);
+    let (he, ce) = pump(&host, &mut hs, &client, &mut cs);
+    assert_eq!(he.last(), Some(&Event::Done));
+    for events in [&he, &ce] {
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Received(_) | Event::Import)),
+            "{events:?}"
+        );
+    }
+}
+
+#[test]
+fn a_newer_playlist_cover_syncs() {
+    let host = Device::new();
+    let client = Device::new();
+    host.playlist("mix", 10, &[("a.mp3", "2.mp3")]);
+    let (mut hs, mut cs) = sessions(&host, &client);
+    pump(&host, &mut hs, &client, &mut cs);
+
+    let cover = host.music().join("mix.png");
+    fs::write(&cover, [0x89, b'P', b'N', b'G', 1, 2, 3]).unwrap();
+    assert!(host.db.set_playlist_cover("mix", Some(&cover)).unwrap());
+
+    let (mut hs, mut cs) = again(&host, &client);
+    let (he, _) = pump(&host, &mut hs, &client, &mut cs);
+    assert_eq!(he.last(), Some(&Event::Done), "{he:?}");
+    let got = client.db.get_playlist_hashes(None).unwrap().remove(0);
+    let got = got.cover_art.expect("the cover reached the client");
+    assert_eq!(fs::read(got).unwrap(), fs::read(&cover).unwrap());
 }

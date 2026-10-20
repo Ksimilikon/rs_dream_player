@@ -35,6 +35,9 @@ const REQUIRED_SCHEMA: &[(&str, &[&str])] = &[
             "invalid",
             // added by migration 2.
             "ignore_orphan",
+            // added by migration 3.
+            "updated_at",
+            "updated_at_file",
         ],
     ),
     ("artists", &["id", "name"]),
@@ -136,6 +139,13 @@ CREATE TABLE IF NOT EXISTS paired_devices (
     "\
 ALTER TABLE playlists ADD COLUMN deleted_at INTEGER;
 ALTER TABLE tracks ADD COLUMN ignore_orphan INTEGER NOT NULL DEFAULT 0;
+",
+    // 3: change dates of a song for sync (unix seconds, NULL — never
+    // changed): `updated_at` — the db record (metadata, labels, volume),
+    // `updated_at_file` — the file itself (tags, embedded cover, ...).
+    "\
+ALTER TABLE tracks ADD COLUMN updated_at INTEGER;
+ALTER TABLE tracks ADD COLUMN updated_at_file INTEGER;
 ",
 ];
 

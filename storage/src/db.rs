@@ -2,12 +2,14 @@
 //! get_*()    -> read: `get_tracks`/`get_playlists` query (many), trait
 //!               `get_track`/`get_playlist` fetch one by key (hash/name),
 //!               `get_pool`, `get_track_paths`, `get_track_hashes`,
-//!               `get_track_hashes_by_hash`, `get_playlist_hashes`,
-//!               `get_playlist_track_paths`.
+//!               `get_track_hashes_by_hash`, `get_track_sync`,
+//!               `get_playlist_hashes`, `get_playlist_track_paths`.
 //! save_*()   -> insert-or-update a whole entity (`save_track`, `save_playlist`,
 //!               `save_import` — a whole imported packet in one transaction).
 //! set_*()    -> update one field of an entity (`set_track_title`,
 //!               `set_track_meta`, `set_track_cover`, `set_track_path`, ...).
+//!               A change of synced track metadata dates the track
+//!               (`updated_at`), see [`Db::get_track_sync`].
 //! remove_*() -> delete (`remove_track`, `remove_invalid_tracks`).
 //! index_*()  -> filesystem scan into the index (`index_dir`).
 
@@ -351,8 +353,8 @@ impl Db {
             return Ok(());
         };
         self.conn.execute(
-            "UPDATE tracks SET volume = ?2 WHERE path = ?1",
-            params![path.to_string_lossy(), volume as f64],
+            "UPDATE tracks SET volume = ?2, updated_at = ?3 WHERE path = ?1",
+            params![path.to_string_lossy(), volume as f64, unix_now() as i64],
         )?;
         Ok(())
     }
@@ -360,8 +362,8 @@ impl Db {
     /// updates the saved track volume by its id.
     pub fn set_track_volume_id(&self, id: i64, volume: f32) -> Result<(), Box<dyn Error>> {
         self.conn.execute(
-            "UPDATE tracks SET volume = ?2 WHERE id = ?1",
-            params![id, volume as f64],
+            "UPDATE tracks SET volume = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, volume as f64, unix_now() as i64],
         )?;
         Ok(())
     }
@@ -375,6 +377,19 @@ impl Db {
         soft_delete(&tx, name, unix_now())?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// sets (or clears with `None`) the cover path of the live playlist
+    /// `name`; it is a change of the playlist (dated now), so the cover
+    /// syncs. `false` — no such live playlist.
+    pub fn set_playlist_cover(&self, name: &str, cover: Option<&Path>) -> Result<bool, Box<dyn Error>> {
+        let cover = cover.map(|p| p.to_string_lossy().into_owned());
+        let changed = self.conn.execute(
+            "UPDATE playlists SET cover_art = ?2, updated_at = ?3 \
+             WHERE name = ?1 AND deleted_at IS NULL",
+            params![name, cover, unix_now() as i64],
+        )?;
+        Ok(changed > 0)
     }
 
     /// deleted playlists (name, deletion time). `names` == `None` -> all of
@@ -436,21 +451,10 @@ impl Db {
             tx.execute("UPDATE tracks SET title = ?2 WHERE id = ?1", params![id, t])?;
         }
         if let Some(list) = artists {
-            tx.execute("DELETE FROM track_artists WHERE track_id = ?1", [id])?;
-            for name in list {
-                tx.execute(
-                    "INSERT INTO artists (name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
-                    [name],
-                )?;
-                let artist_id: i64 =
-                    tx.query_row("SELECT id FROM artists WHERE name = ?1", [name], |r| {
-                        r.get(0)
-                    })?;
-                tx.execute(
-                    "INSERT OR IGNORE INTO track_artists (track_id, artist_id) VALUES (?1, ?2)",
-                    params![id, artist_id],
-                )?;
-            }
+            write_track_artists(&tx, id, list)?;
+        }
+        if title.is_some() || artists.is_some() {
+            touch_track(&tx, id)?;
         }
         tx.commit()?;
         Ok(())
@@ -462,6 +466,18 @@ impl Db {
         self.conn.execute(
             "UPDATE tracks SET cover_art = ?2 WHERE id = ?1",
             params![id, cover],
+        )?;
+        Ok(())
+    }
+
+    /// dates a change of the track file itself (tags, embedded cover, ...)
+    /// by its id: on sync the file goes to the other devices again. The core
+    /// calls it for the files it changes; a frontend that changes a file
+    /// itself calls it too.
+    pub fn set_track_file_changed(&self, id: i64) -> Result<(), Box<dyn Error>> {
+        self.conn.execute(
+            "UPDATE tracks SET updated_at_file = ?2 WHERE id = ?1",
+            params![id, unix_now() as i64],
         )?;
         Ok(())
     }
@@ -497,8 +513,8 @@ impl Db {
     pub fn set_track_album(&self, id: i64, album: Option<&str>) -> Result<(), Box<dyn Error>> {
         let album_id = upsert_album(&self.conn, album)?;
         self.conn.execute(
-            "UPDATE tracks SET album_id = ?2 WHERE id = ?1",
-            params![id, album_id],
+            "UPDATE tracks SET album_id = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, album_id, unix_now() as i64],
         )?;
         Ok(())
     }
@@ -507,6 +523,7 @@ impl Db {
     pub fn set_track_genres(&self, id: i64, genres: &[String]) -> Result<(), Box<dyn Error>> {
         let tx = self.conn.unchecked_transaction()?;
         write_track_genres(&tx, id, genres)?;
+        touch_track(&tx, id)?;
         tx.commit()?;
         Ok(())
     }
@@ -514,8 +531,8 @@ impl Db {
     /// sets (or clears with `None`) the track color label.
     pub fn set_track_color(&self, id: i64, color: Option<&str>) -> Result<(), Box<dyn Error>> {
         self.conn.execute(
-            "UPDATE tracks SET color = ?2 WHERE id = ?1",
-            params![id, color],
+            "UPDATE tracks SET color = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, color, unix_now() as i64],
         )?;
         Ok(())
     }
@@ -523,8 +540,8 @@ impl Db {
     /// sets (or clears with `None`) the track text label.
     pub fn set_track_label(&self, id: i64, label: Option<&str>) -> Result<(), Box<dyn Error>> {
         self.conn.execute(
-            "UPDATE tracks SET user_label = ?2 WHERE id = ?1",
-            params![id, label],
+            "UPDATE tracks SET user_label = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, label, unix_now() as i64],
         )?;
         Ok(())
     }
@@ -651,6 +668,57 @@ impl Db {
         Ok(out)
     }
 
+    /// tracks by their hashes with what sync carries: change dates and the
+    /// metadata the db keeps, in `hashes` order; hashes not found are
+    /// skipped.
+    pub fn get_track_sync(&self, hashes: &[String]) -> Result<Vec<TrackSyncRow>, Box<dyn Error>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.hash, t.path, t.updated_at, t.updated_at_file, t.title, \
+                (SELECT name FROM albums WHERE id = t.album_id), t.color, t.user_label, t.volume \
+             FROM tracks t WHERE t.hash = ?1",
+        )?;
+        let mut artists = self.conn.prepare(
+            "SELECT a.name FROM artists a JOIN track_artists ta ON ta.artist_id = a.id \
+             WHERE ta.track_id = ?1 ORDER BY a.name",
+        )?;
+        let mut genres = self.conn.prepare(
+            "SELECT g.name FROM genres g JOIN track_genres tg ON tg.genre_id = g.id \
+             WHERE tg.track_id = ?1 ORDER BY g.name",
+        )?;
+        let mut out = Vec::with_capacity(hashes.len());
+        for hash in hashes {
+            let found = stmt
+                .query_row([hash], |r| {
+                    Ok(TrackSyncRow {
+                        id: r.get(0)?,
+                        hash: r.get(1)?,
+                        path: PathBuf::from(r.get::<_, String>(2)?),
+                        updated_at: r.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                        updated_at_file: r.get::<_, Option<i64>>(4)?.map(|v| v as u64),
+                        meta: TrackMetaRow {
+                            title: r.get(5)?,
+                            album: r.get(6)?,
+                            artists: Vec::new(),
+                            genres: Vec::new(),
+                            color: r.get(7)?,
+                            user_label: r.get(8)?,
+                            volume: r.get::<_, f64>(9)? as f32,
+                        },
+                    })
+                })
+                .optional()?;
+            let Some(mut row) = found else { continue };
+            row.meta.artists = artists
+                .query_map([row.id], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            row.meta.genres = genres
+                .query_map([row.id], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            out.push(row);
+        }
+        Ok(out)
+    }
+
     /// playlists with their song hashes in playlist order. `names` == `None`
     /// -> all of them (by ascending id); otherwise — in `names` order, names
     /// not found are skipped. The name is the playlist identifier (unique and
@@ -714,16 +782,27 @@ impl Db {
     /// playlists deleted on the other side: a local playlist changed at or
     /// before the deletion is soft-deleted (a later local change wins), an
     /// unknown name is remembered as deleted so the deletion travels on.
+    ///
+    /// a track of `tracks` whose hash is already known is its rewritten file:
+    /// the known track follows the new path (another track there is
+    /// replaced). `metas` — metadata and dates of known tracks (applied
+    /// after `tracks`, by hash; `id`/`path` are ignored, unknown hashes are
+    /// skipped). A `None` `updated_at_file` keeps the local one.
     pub fn save_import(
         &self,
         tracks: &[(TrackVirtual, String)],
+        metas: &[TrackSyncRow],
         playlists: &[PlaylistHashRow],
         deleted: &[DeletedPlaylistRow],
     ) -> Result<(), Box<dyn Error>> {
         let tx = self.conn.unchecked_transaction()?;
         for (track, hash) in tracks {
+            follow_hash(&tx, track, hash)?;
             adopt_hash(&tx, track, hash)?;
             upsert_track(&tx, track, Some(hash))?;
+        }
+        for meta in metas {
+            apply_track_meta(&tx, meta)?;
         }
         for pl in playlists {
             tx.execute(
@@ -1042,6 +1121,34 @@ pub struct PlaylistHashRow {
     pub hashes: Vec<String>,
 }
 
+/// track metadata the db keeps and sync carries (not the file tags: the
+/// db copy may be edited) — see [`Db::get_track_sync`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackMetaRow {
+    pub title: String,
+    pub album: Option<String>,
+    pub artists: Vec<String>,
+    pub genres: Vec<String>,
+    pub color: Option<String>,
+    pub user_label: Option<String>,
+    pub volume: f32,
+}
+
+/// a track as sync sees it — see [`Db::get_track_sync`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackSyncRow {
+    /// local id (ignored by `save_import`).
+    pub id: i64,
+    pub hash: String,
+    /// local file (ignored by `save_import`).
+    pub path: PathBuf,
+    /// last change of the db record (unix seconds).
+    pub updated_at: Option<u64>,
+    /// last change of the file itself (unix seconds).
+    pub updated_at_file: Option<u64>,
+    pub meta: TrackMetaRow,
+}
+
 /// a `paired_devices` row — see [`Db::get_paired_devices`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairedDeviceRow {
@@ -1178,9 +1285,88 @@ fn upsert_track(
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
 
-    // rewrite the track artist list entirely.
-    conn.execute("DELETE FROM track_artists WHERE track_id = ?1", [id])?;
-    for name in &meta.artist {
+    write_track_artists(conn, id, &meta.artist)?;
+
+    // rewrite the track genre list entirely (M:N via track_genres).
+    write_track_genres(conn, id, &meta.genres)?;
+
+    Ok(hash)
+}
+
+/// a known track with `hash` whose file was rewritten at another path (the
+/// frontend chose where) moves there; a track already stored at that path
+/// is removed (cascading from playlists) — the file is not its anymore.
+/// Nothing happens for an unknown hash or the same path.
+fn follow_hash(conn: &Connection, track: &TrackVirtual, hash: &str) -> Result<(), Box<dyn Error>> {
+    let Some(path) = track.get_path() else {
+        return Ok(());
+    };
+    let path = path.to_string_lossy();
+    let known: Option<(i64, String)> = conn
+        .query_row("SELECT id, path FROM tracks WHERE hash = ?1", [hash], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .optional()?;
+    let Some((id, _)) = known.filter(|(_, old)| *old != path) else {
+        return Ok(());
+    };
+    conn.execute(
+        "DELETE FROM playlist_tracks \
+         WHERE song_hash IN (SELECT hash FROM tracks WHERE path = ?1 AND id != ?2)",
+        params![path, id],
+    )?;
+    conn.execute("DELETE FROM tracks WHERE path = ?1 AND id != ?2", params![path, id])?;
+    conn.execute("UPDATE tracks SET path = ?2 WHERE id = ?1", params![id, path])?;
+    Ok(())
+}
+
+/// writes imported metadata and dates over the known track `row.hash`.
+fn apply_track_meta(conn: &Connection, row: &TrackSyncRow) -> Result<(), Box<dyn Error>> {
+    let id: Option<i64> = conn
+        .query_row("SELECT id FROM tracks WHERE hash = ?1", [&row.hash], |r| r.get(0))
+        .optional()?;
+    let Some(id) = id else {
+        return Ok(());
+    };
+    let m = &row.meta;
+    let album_id = upsert_album(conn, m.album.as_deref())?;
+    conn.execute(
+        "UPDATE tracks SET title = ?2, album_id = ?3, color = ?4, user_label = ?5, volume = ?6, \
+            updated_at = ?7, updated_at_file = COALESCE(?8, updated_at_file) \
+         WHERE id = ?1",
+        params![
+            id,
+            m.title,
+            album_id,
+            m.color,
+            m.user_label,
+            m.volume as f64,
+            row.updated_at.map(|t| t as i64),
+            row.updated_at_file.map(|t| t as i64),
+        ],
+    )?;
+    write_track_artists(conn, id, &m.artists)?;
+    write_track_genres(conn, id, &m.genres)?;
+    Ok(())
+}
+
+/// dates a change of the db record of track `id` now.
+fn touch_track(conn: &Connection, id: i64) -> Result<(), Box<dyn Error>> {
+    conn.execute(
+        "UPDATE tracks SET updated_at = ?2 WHERE id = ?1",
+        params![id, unix_now() as i64],
+    )?;
+    Ok(())
+}
+
+/// rewrites the track artists entirely.
+fn write_track_artists(
+    conn: &Connection,
+    track_id: i64,
+    artists: &[String],
+) -> Result<(), Box<dyn Error>> {
+    conn.execute("DELETE FROM track_artists WHERE track_id = ?1", [track_id])?;
+    for name in artists {
         conn.execute(
             "INSERT INTO artists (name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
             [name],
@@ -1191,14 +1377,10 @@ fn upsert_track(
             })?;
         conn.execute(
             "INSERT OR IGNORE INTO track_artists (track_id, artist_id) VALUES (?1, ?2)",
-            params![id, artist_id],
+            params![track_id, artist_id],
         )?;
     }
-
-    // rewrite the track genre list entirely (M:N via track_genres).
-    write_track_genres(conn, id, &meta.genres)?;
-
-    Ok(hash)
+    Ok(())
 }
 
 /// a track already stored at the path of `track` takes `hash` (its file was
@@ -1410,6 +1592,7 @@ mod tests {
         db.save_import(
             &[],
             &[],
+            &[],
             &[gone("older", 300), gone("newer", 300), gone("unknown", 42), gone("already", 1)],
         )
         .unwrap();
@@ -1442,7 +1625,7 @@ mod tests {
             updated_at: Some(u64::from(u32::MAX)),
             hashes: Vec::new(),
         };
-        db.save_import(&[], &[pl], &[]).unwrap();
+        db.save_import(&[], &[], &[pl], &[]).unwrap();
         assert_eq!(live_names(&db), vec!["mix".to_string()]);
         assert!(deleted(&db).is_empty());
     }
@@ -1552,6 +1735,8 @@ mod tests {
                 "DROP TABLE paired_devices; \
                  ALTER TABLE playlists DROP COLUMN deleted_at; \
                  ALTER TABLE tracks DROP COLUMN ignore_orphan; \
+                 ALTER TABLE tracks DROP COLUMN updated_at; \
+                 ALTER TABLE tracks DROP COLUMN updated_at_file; \
                  PRAGMA user_version = 0;",
             )
             .unwrap();
@@ -1565,6 +1750,106 @@ mod tests {
         assert!(!db.get_tracks(None, None, None, None).unwrap()[0].ignore_orphan);
         let id = db.save_paired_device(&[7; 32]).unwrap();
         assert_eq!(db.get_paired_device_id(&[7; 32]).unwrap(), Some(id));
+        // migration 3: the track has no change dates yet.
+        let hash = db.get_track_hashes(None).unwrap()[0].1.clone();
+        let row = &db.get_track_sync(&[hash]).unwrap()[0];
+        assert_eq!((row.updated_at, row.updated_at_file), (None, None));
+    }
+
+    #[test]
+    fn metadata_edits_date_the_track() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        db.save_track(fixture_track(dir.path(), "a.mp3", "Hello", "World"))
+            .unwrap();
+        let (id, hash, _) = db.get_track_hashes(None).unwrap()[0].clone();
+        let dates = |db: &Db| {
+            let r = &db.get_track_sync(std::slice::from_ref(&hash)).unwrap()[0];
+            (r.updated_at, r.updated_at_file)
+        };
+        // a new track and a cover path (local only) are not changes.
+        db.set_track_cover(id, Some(&dir.path().join("c.png"))).unwrap();
+        assert_eq!(dates(&db), (None, None));
+
+        db.set_track_meta(id, Some("New"), None).unwrap();
+        let (updated, file) = dates(&db);
+        assert!(updated.unwrap() > 1_600_000_000);
+        assert_eq!(file, None);
+
+        db.set_track_file_changed(id).unwrap();
+        assert!(dates(&db).1.unwrap() > 1_600_000_000);
+
+        db.set_track_album(id, Some("Album")).unwrap();
+        db.set_track_genres(id, &["rock".into()]).unwrap();
+        db.set_track_color(id, Some("#fff")).unwrap();
+        db.set_track_label(id, Some("fav")).unwrap();
+        db.set_track_volume_id(id, 0.5).unwrap();
+        let row = &db.get_track_sync(std::slice::from_ref(&hash)).unwrap()[0];
+        assert_eq!(
+            row.meta,
+            TrackMetaRow {
+                title: "New".into(),
+                album: Some("Album".into()),
+                artists: vec!["World".into()],
+                genres: vec!["rock".into()],
+                color: Some("#fff".into()),
+                user_label: Some("fav".into()),
+                volume: 0.5,
+            }
+        );
+    }
+
+    #[test]
+    fn save_import_applies_metadata_and_follows_moved_file() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        db.save_track(fixture_track(dir.path(), "a.mp3", "Hello", "World"))
+            .unwrap();
+        db.save_track(fixture_track(dir.path(), "b.mp3", "Other", "X"))
+            .unwrap();
+        let hash = db.get_track_hashes(None).unwrap()[0].1.clone();
+        db.set_track_file_changed(db.get_track_hashes(None).unwrap()[0].0)
+            .unwrap();
+        let local_file = db.get_track_sync(std::slice::from_ref(&hash)).unwrap()[0].updated_at_file;
+
+        // metadata only: the local file date stays.
+        let mut row = db.get_track_sync(std::slice::from_ref(&hash)).unwrap()[0].clone();
+        row.meta.title = "Imported".into();
+        row.meta.artists = vec!["B".into(), "A".into()];
+        row.meta.album = None;
+        row.updated_at = Some(77);
+        row.updated_at_file = None;
+        db.save_import(&[], &[row.clone()], &[], &[]).unwrap();
+        let got = &db.get_track_sync(std::slice::from_ref(&hash)).unwrap()[0];
+        assert_eq!(got.meta.title, "Imported");
+        assert_eq!(got.meta.artists, vec!["A".to_string(), "B".to_string()]);
+        assert_eq!((got.updated_at, got.updated_at_file), (Some(77), local_file));
+
+        // the rewritten file landed over b.mp3: the track moves there, the
+        // track of b.mp3 is gone.
+        let moved = fixture_track(dir.path(), "b.mp3", "Other", "X");
+        row.updated_at_file = Some(88);
+        db.save_import(&[(moved, hash.clone())], &[row], &[], &[]).unwrap();
+        let tracks = db.get_track_hashes(None).unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!((&tracks[0].1, tracks[0].2.file_name().unwrap()), (&hash, "b.mp3".as_ref()));
+        let got = &db.get_track_sync(std::slice::from_ref(&hash)).unwrap()[0];
+        assert_eq!((got.meta.title.as_str(), got.updated_at_file), ("Imported", Some(88)));
+    }
+
+    #[test]
+    fn playlist_cover_is_a_change() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        save_named(&db, "mix", vec![], 100);
+        let cover = dir.path().join("mix.png");
+        assert!(db.set_playlist_cover("mix", Some(&cover)).unwrap());
+        let pl = &db.get_playlist_hashes(None).unwrap()[0];
+        assert_eq!(pl.cover_art.as_deref(), Some(cover.as_path()));
+        assert!(pl.updated_at.unwrap() > 100);
+        assert!(!db.set_playlist_cover("nope", None).unwrap());
+        db.remove_playlist("mix").unwrap();
+        assert!(!db.set_playlist_cover("mix", None).unwrap());
     }
 
     #[test]
@@ -1801,7 +2086,7 @@ mod tests {
             updated_at: Some(20),
             hashes: vec![hash.clone(), "ffffffffffffffffffffffffffffffff".into()],
         };
-        db.save_import(&[(track, hash.clone())], &[pl], &[]).unwrap();
+        db.save_import(&[(track, hash.clone())], &[], &[pl], &[]).unwrap();
 
         // the track is saved with the hash from the packet.
         assert!(db.hash_exist(hash.clone()));
@@ -1826,7 +2111,7 @@ mod tests {
         // the imported file was written over the local one.
         let track = fixture_track(dir.path(), "song.mp3", "Song", "A");
         let new = "0123456789abcdef0123456789abcdef".to_string();
-        db.save_import(&[(track, new.clone())], &[], &[]).unwrap();
+        db.save_import(&[(track, new.clone())], &[], &[], &[]).unwrap();
 
         let tracks = db.get_track_hashes(None).unwrap();
         assert_eq!(tracks.len(), 1, "replaced, not duplicated");

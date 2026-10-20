@@ -27,6 +27,16 @@ pub(crate) fn put_blob(out: &mut Vec<u8>, data: &[u8]) -> Result<(), CodecError>
     Ok(())
 }
 
+/// `u16` count + that many names.
+pub(crate) fn put_names(out: &mut Vec<u8>, names: &[String]) -> Result<(), CodecError> {
+    let n = u16::try_from(names.len()).map_err(|_| CodecError::TooManyRows)?;
+    out.extend_from_slice(&n.to_le_bytes());
+    for name in names {
+        put_name(out, name)?;
+    }
+    Ok(())
+}
+
 /// `u128` hash.
 pub(crate) fn put_hash(out: &mut Vec<u8>, hash: u128) {
     out.extend_from_slice(&hash.to_le_bytes());
@@ -79,6 +89,10 @@ impl<'a> Reader<'a> {
         self.array().map(u32::from_le_bytes)
     }
 
+    pub(crate) fn f32(&mut self) -> Result<f32, CodecError> {
+        self.array().map(f32::from_le_bytes)
+    }
+
     pub(crate) fn u64(&mut self) -> Result<u64, CodecError> {
         self.array().map(u64::from_le_bytes)
     }
@@ -100,6 +114,17 @@ impl<'a> Reader<'a> {
         let raw = self.take(len)?;
         let s = std::str::from_utf8(raw).map_err(|_| CodecError::InvalidUtf8)?;
         Ok(s.to_owned())
+    }
+
+    /// `u16` count + that many names; every name takes at least 2 bytes, so
+    /// a corrupted count can't reserve more than the input holds.
+    pub(crate) fn names(&mut self) -> Result<Vec<String>, CodecError> {
+        let n = u16::from_le_bytes(self.array()?) as usize;
+        let mut out = Vec::with_capacity(n.min(self.remaining() / 2));
+        for _ in 0..n {
+            out.push(self.name()?);
+        }
+        Ok(out)
     }
 
     /// `u32` length + raw payload.

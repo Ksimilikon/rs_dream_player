@@ -144,6 +144,13 @@ object Native {
     @JvmStatic external fun idxAddTracks(paths: Array<String>): CoreResult<Long>
 
     @JvmStatic external fun idxSetTrackVolume(id: Long, volume: Float): Int
+
+    /**
+     * dates a change of the song file itself (tags, embedded cover, ...) made
+     * by the frontend: sync sends the file again and writes it over the copy
+     * on the other device. Call it after changing a file.
+     */
+    @JvmStatic external fun idxSetTrackFileChanged(id: Long): Int
     @JvmStatic external fun idxRemoveTrack(id: Long): Int
 
     /** removes every invalid track; `value` — the number removed. */
@@ -154,6 +161,13 @@ object Native {
      * missing from the library are skipped).
      */
     @JvmStatic external fun idxSavePlaylist(name: String, trackIds: LongArray, cover: String?): Int
+
+    /**
+     * cover of playlist [name] without touching its tracks (null clears it);
+     * dates the playlist as changed, so the cover syncs. `NOT_FOUND` — no
+     * such playlist.
+     */
+    @JvmStatic external fun idxSetPlaylistCover(name: String, cover: String?): Int
 
     /**
      * deletes a playlist softly: it disappears, its deletion mark syncs to

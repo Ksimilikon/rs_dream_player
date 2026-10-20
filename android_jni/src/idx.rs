@@ -394,6 +394,16 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSetTrackVolume<'c>(
     run(&mut env, |_| Ok(code(idx::idx_set_track_volume(id, volume))))
 }
 
+/// dates a change of the track file made by the frontend (sync resends it).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSetTrackFileChanged<'c>(
+    mut env: EnvUnowned<'c>,
+    _class: JClass<'c>,
+    id: i64,
+) -> i32 {
+    run(&mut env, |_| Ok(code(idx::idx_set_track_file_changed(id))))
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_dreamplayer_core_Native_idxRemoveTrack<'c>(
     mut env: EnvUnowned<'c>,
@@ -436,6 +446,21 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSavePlaylist<'c>(
         Ok(code(unsafe {
             idx::idx_save_playlist(opt_ptr(&name), ids.as_ptr(), ids.len(), opt_ptr(&cover))
         }))
+    })
+}
+
+/// cover of playlist `name` without touching its tracks (null clears it).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSetPlaylistCover<'c>(
+    mut env: EnvUnowned<'c>,
+    _class: JClass<'c>,
+    name: JString<'c>,
+    cover: JString<'c>,
+) -> i32 {
+    run(&mut env, |env| {
+        let name = opt_string(env, &name)?.map(|n| cstring(&n));
+        let cover = opt_string(env, &cover)?.map(|c| cstring(&c));
+        Ok(code(unsafe { idx::idx_set_playlist_cover(opt_ptr(&name), opt_ptr(&cover)) }))
     })
 }
 

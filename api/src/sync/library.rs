@@ -1,11 +1,15 @@
 //! what the sync protocol carries, built from / compared with the db. Every
 //! payload is a codec packet:
-//! - index: every playlist (name, dates, song hashes) and the hashes of the
-//!   songs that are in some playlist and exist locally — no files;
-//! - want: song hashes and playlist names (empty track lists);
-//! - data: a portion of songs with names and files; the last portion — the
+//! - index: every playlist (name, dates, song hashes) and the songs that are
+//!   in some playlist and exist locally: hashes and change dates — no files,
+//!   no metadata;
+//! - want: song hashes and playlist names (empty track lists). A song with
+//!   (empty) metadata is wanted for its metadata only, without one — whole;
+//! - data: a portion of songs with names, files, dates and metadata; then a
+//!   portion of songs with dates and metadata only; the last portion — the
 //!   playlists with covers. A one-way send ([`Selection`]) chooses what and
-//!   with which [`Flags`], like an export.
+//!   with which [`Flags`], like an export (without audio — the metadata of
+//!   the songs only).
 //!
 //! only songs that are in some playlist are synced. A playlist is wanted if
 //! it is missing locally or the remote one is newer (`updated_at`, an unset
@@ -13,24 +17,27 @@
 //! remote deletion is wanted if the local playlist changed at or before it, an
 //! older local deletion or no local playlist at all (it travels on). A song is
 //! wanted if a wanted remote playlist or a local playlist refers to it, the
-//! remote side has it and the local side doesn't.
+//! remote side has it and the local side doesn't. A song both sides have is
+//! wanted whole if the remote file changed later (`updated_at_file`, an
+//! unset date counts as 0) — it is written over the local file — or for its
+//! metadata only if the remote db record changed later (`updated_at`).
 
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
 };
 
-use codec::{DeletedPlaylist, Playlist, Song, Version};
+use codec::{DeletedPlaylist, Playlist, Song, SongMeta, Version};
 use storage::{
     Db,
-    db::{DeletedPlaylistRow, PlaylistHashRow},
+    db::{DeletedPlaylistRow, PlaylistHashRow, TrackSyncRow},
 };
 
 use super::frame::WireStatus;
-use crate::cdc::{deleted_from_db, hex, parse_hash, read_cover};
+use crate::cdc::{deleted_from_db, hex, parse_hash, read_cover, with_info};
 
 /// the codec version of every sync payload.
-const VERSION: Version = Version::V0_11;
+const VERSION: Version = Version::V0_12;
 /// a data portion is cut once its files reach this size (one song is never
 /// split, so a single larger song makes a larger portion).
 pub const PORTION_BYTES: u64 = 16 << 20;
@@ -54,13 +61,16 @@ pub fn index(db: &Db) -> Result<Vec<u8>, WireStatus> {
         .cloned()
         .collect();
     let songs = db
-        .get_track_hashes_by_hash(&refs)
+        .get_track_sync(&refs)
         .map_err(internal)?
         .iter()
-        .filter_map(|(_, hash, _)| parse_hash(hash))
-        .map(|hash| Song {
-            hash,
-            ..Song::default()
+        .filter_map(|row| {
+            Some(Song {
+                hash: parse_hash(&row.hash)?,
+                updated_at: row.updated_at,
+                updated_at_file: row.updated_at_file,
+                ..Song::default()
+            })
         })
         .collect::<Vec<_>>();
     let playlists = playlists
@@ -85,24 +95,29 @@ pub fn index(db: &Db) -> Result<Vec<u8>, WireStatus> {
 /// what the local side lacks compared to a remote index.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Want {
+    /// songs wanted whole: the file and the metadata.
     pub songs: Vec<u128>,
+    /// songs wanted for their metadata only (the local file is up to date).
+    pub metas: Vec<u128>,
     pub playlists: Vec<String>,
 }
 
 impl Want {
     pub fn is_empty(&self) -> bool {
-        self.songs.is_empty() && self.playlists.is_empty()
+        self.songs.is_empty() && self.metas.is_empty() && self.playlists.is_empty()
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, WireStatus> {
-        let songs: Vec<Song> = self
-            .songs
-            .iter()
-            .map(|&hash| Song {
-                hash,
-                ..Song::default()
-            })
-            .collect();
+        let whole = self.songs.iter().map(|&hash| Song {
+            hash,
+            ..Song::default()
+        });
+        let metas = self.metas.iter().map(|&hash| Song {
+            hash,
+            meta: Some(SongMeta::default()),
+            ..Song::default()
+        });
+        let songs: Vec<Song> = whole.chain(metas).collect();
         let playlists: Vec<Playlist> = self
             .playlists
             .iter()
@@ -116,8 +131,11 @@ impl Want {
 
     pub fn decode(bytes: &[u8]) -> Result<Self, WireStatus> {
         let packet = codec::decode(bytes).map_err(invalid)?;
+        let (metas, songs): (Vec<&Song>, Vec<&Song>) =
+            packet.songs.iter().partition(|s| s.meta.is_some());
         Ok(Self {
-            songs: packet.songs.iter().map(|s| s.hash).collect(),
+            songs: songs.iter().map(|s| s.hash).collect(),
+            metas: metas.iter().map(|s| s.hash).collect(),
             playlists: packet.playlists.into_iter().map(|p| p.name).collect(),
         })
     }
@@ -127,11 +145,13 @@ impl Want {
 pub fn want(db: &Db, remote_index: &[u8]) -> Result<Want, WireStatus> {
     let remote = codec::decode(remote_index).map_err(invalid)?;
     let local_playlists = db.get_playlist_hashes(None).map_err(internal)?;
-    let local_songs: HashSet<u128> = db
-        .get_track_hashes(None)
+    // the remote songs this side has, with their dates.
+    let remote_hashes: Vec<String> = remote.songs.iter().map(|s| hex(s.hash)).collect();
+    let local_songs: HashMap<u128, TrackSyncRow> = db
+        .get_track_sync(&remote_hashes)
         .map_err(internal)?
-        .iter()
-        .filter_map(|(_, hash, _)| parse_hash(hash))
+        .into_iter()
+        .filter_map(|row| Some((parse_hash(&row.hash)?, row)))
         .collect();
     let local_deleted = db.get_deleted_playlists(None).map_err(internal)?;
     // the time of the last local change: an update or the deletion.
@@ -173,15 +193,32 @@ pub fn want(db: &Db, remote_index: &[u8]) -> Result<Want, WireStatus> {
         .flat_map(|p| &p.hashes)
         .filter_map(|h| parse_hash(h));
     let mut seen = HashSet::new();
-    let songs = wanted
+    let mut songs: Vec<u128> = wanted
         .iter()
         .flat_map(|p| p.tracks.iter().copied())
         .chain(local_refs)
-        .filter(|h| remote_songs.contains(h) && !local_songs.contains(h) && seen.insert(*h))
+        .filter(|h| remote_songs.contains(h) && !local_songs.contains_key(h) && seen.insert(*h))
         .collect();
+    // songs both sides have: a newer file — whole, newer metadata — only it.
+    let newer = |remote: Option<u64>, local: Option<u64>| remote.unwrap_or(0) > local.unwrap_or(0);
+    let mut metas = Vec::new();
+    for s in &remote.songs {
+        let Some(local) = local_songs.get(&s.hash) else {
+            continue;
+        };
+        if !seen.insert(s.hash) {
+            continue;
+        }
+        if newer(s.updated_at_file, local.updated_at_file) {
+            songs.push(s.hash);
+        } else if newer(s.updated_at, local.updated_at) {
+            metas.push(s.hash);
+        }
+    }
 
     Ok(Want {
         songs,
+        metas,
         playlists: wanted
             .into_iter()
             .map(|p| p.name.clone())
@@ -237,9 +274,13 @@ pub enum PlanError {
 
 /// songs and playlists to send, cut into data portions as they are sent.
 pub struct Plan {
-    /// (hash, local path) — songs not sent yet, in order.
-    songs: Vec<(u128, PathBuf)>,
+    /// (local path, the song without its file: hash, dates, metadata) —
+    /// songs to send with their files, in order.
+    songs: Vec<(PathBuf, Song)>,
     next: usize,
+    /// songs to send without files (metadata only), in one portion.
+    metas: Vec<Song>,
+    metas_sent: bool,
     playlists: Vec<PlaylistHashRow>,
     /// deleted playlists, sent with the playlists.
     deleted: Vec<DeletedPlaylistRow>,
@@ -249,7 +290,8 @@ pub struct Plan {
 
 impl Plan {
     fn with(
-        songs: Vec<(u128, PathBuf)>,
+        songs: Vec<(PathBuf, Song)>,
+        metas: Vec<Song>,
         playlists: Vec<PlaylistHashRow>,
         deleted: Vec<DeletedPlaylistRow>,
         flags: Flags,
@@ -257,6 +299,8 @@ impl Plan {
         Self {
             songs,
             next: 0,
+            metas,
+            metas_sent: false,
             playlists,
             deleted,
             playlists_sent: false,
@@ -267,8 +311,12 @@ impl Plan {
     /// resolves a want against the local library; what is gone meanwhile is
     /// skipped.
     pub fn new(db: &Db, want: &Want) -> Result<Self, WireStatus> {
-        let hashes: Vec<String> = want.songs.iter().map(|&h| hex(h)).collect();
-        let songs = songs_of(&db.get_track_hashes_by_hash(&hashes).map_err(internal)?);
+        let rows = |hashes: &[u128]| {
+            let hashes: Vec<String> = hashes.iter().map(|&h| hex(h)).collect();
+            db.get_track_sync(&hashes).map_err(internal)
+        };
+        let songs = songs_of(rows(&want.songs)?);
+        let metas = songs_of(rows(&want.metas)?).into_iter().map(|(_, s)| s).collect();
         // a wanted name is a playlist here or a deletion here.
         let playlists = db
             .get_playlist_hashes(Some(&want.playlists))
@@ -276,7 +324,7 @@ impl Plan {
         let deleted = db
             .get_deleted_playlists(Some(&want.playlists))
             .map_err(internal)?;
-        Ok(Self::with(songs, playlists, deleted, Flags::ALL))
+        Ok(Self::with(songs, metas, playlists, deleted, Flags::ALL))
     }
 
     /// a selection to send one way (like an export).
@@ -315,12 +363,15 @@ impl Plan {
                 (tracks, Vec::new(), Vec::new())
             }
         };
-        // a song without its file is skipped by the receiver anyway.
-        let songs = match flags.audio {
-            true => songs_of(&songs),
-            false => Vec::new(),
+        let hashes: Vec<String> = songs.iter().map(|(_, h, _)| h.clone()).collect();
+        let songs = songs_of(db.get_track_sync(&hashes).map_err(db_err)?);
+        // without audio only the metadata goes: a new song without its file
+        // is skipped by the receiver, a known one gets the newer metadata.
+        let (songs, metas) = match flags.audio {
+            true => (songs, Vec::new()),
+            false => (Vec::new(), songs.into_iter().map(|(_, s)| s).collect()),
         };
-        Ok(Self::with(songs, playlists, deleted, flags))
+        Ok(Self::with(songs, metas, playlists, deleted, flags))
     }
 
     /// the next data portion; `None` — everything is sent. Reads files, so it
@@ -330,9 +381,9 @@ impl Plan {
             let mut songs = Vec::new();
             let mut size = 0;
             while self.next < self.songs.len() && (songs.is_empty() || size < PORTION_BYTES) {
-                let (hash, path) = &self.songs[self.next];
+                let (path, song) = &self.songs[self.next];
                 self.next += 1;
-                // a plan without audio has no songs at all.
+                // a plan without audio has no songs with files at all.
                 let Ok(data) = std::fs::read(path) else {
                     continue;
                 };
@@ -345,9 +396,9 @@ impl Plan {
                 };
                 size += data.len() as u64;
                 songs.push(Song {
-                    hash: *hash,
                     name,
                     data,
+                    ..song.clone()
                 });
             }
             if !songs.is_empty() {
@@ -361,6 +412,18 @@ impl Plan {
                         .map_err(internal),
                 );
             }
+        }
+        if !self.metas_sent && !self.metas.is_empty() {
+            self.metas_sent = true;
+            let stats = PortionStats {
+                songs: self.metas.len() as u32,
+                playlists: 0,
+            };
+            return Some(
+                codec::encode(VERSION, &self.metas, &[])
+                    .map(|p| (p, stats))
+                    .map_err(internal),
+            );
         }
         if self.playlists_sent || (self.playlists.is_empty() && self.deleted.is_empty()) {
             return None;
@@ -397,9 +460,16 @@ impl Plan {
     }
 }
 
-/// db track rows -> (hash, path); a malformed hash is skipped.
-fn songs_of(rows: &[storage::db::TrackHashRow]) -> Vec<(u128, PathBuf)> {
-    rows.iter()
-        .filter_map(|(_, hash, path)| Some((parse_hash(hash)?, path.clone())))
+/// db track rows -> (path, song without its file); a malformed hash is
+/// skipped.
+fn songs_of(rows: Vec<TrackSyncRow>) -> Vec<(PathBuf, Song)> {
+    rows.into_iter()
+        .filter_map(|row| {
+            let song = Song {
+                hash: parse_hash(&row.hash)?,
+                ..Song::default()
+            };
+            Some((row.path.clone(), with_info(song, &row)))
+        })
         .collect()
 }

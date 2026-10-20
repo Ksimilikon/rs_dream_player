@@ -5,10 +5,11 @@
 package dev.dreamplayer.core
 
 /**
- * packet format version written by default (`codec::Version::V0_11`: v0.1 +
- * deleted playlists). `1` — v0.1, without them.
+ * packet format version written by default (`codec::Version::V0_12`: v0.1 +
+ * deleted playlists + song change dates and metadata). `2` — v0.11, without
+ * the song info; `1` — v0.1, without deleted playlists too.
  */
-const val PACKET_VERSION: Int = 2
+const val PACKET_VERSION: Int = 3
 
 /**
  * result of a call that returns a value: [value] is set only when [status] is

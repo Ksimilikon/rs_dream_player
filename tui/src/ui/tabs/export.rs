@@ -112,12 +112,10 @@ impl ExportTab {
         }
     }
 
-    /// the mode changed: the selection is reset, covers are unavailable
-    /// without playlists.
+    /// the mode changed: the selection is reset.
     fn on_what_changed(&mut self) {
         self.checked.clear();
         self.list = ListView::default();
-        self.form.fields[F_COVERS].disabled = self.what() == 2;
     }
 
     /// the final file path: a directory -> a file named by the time.
@@ -172,8 +170,8 @@ impl ExportTab {
         let flags = Flags {
             audio: self.form.toggle(F_AUDIO),
             names: self.form.toggle(F_NAMES),
-            // no playlists — no covers (the field is disabled then).
-            covers: self.form.toggle(F_COVERS) && self.what() != 2,
+            // song and playlist covers: tracks have their covers too.
+            covers: self.form.toggle(F_COVERS),
         };
         Some((what, flags))
     }

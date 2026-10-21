@@ -460,12 +460,13 @@ impl Db {
         Ok(())
     }
 
-    /// sets (or clears with `None`) the track cover path by its id.
+    /// sets (or clears with `None`) the track cover path by its id. The
+    /// cover file travels on sync, so it dates the track (`updated_at`).
     pub fn set_track_cover(&self, id: i64, cover: Option<&Path>) -> Result<(), Box<dyn Error>> {
         let cover = cover.map(|p| p.to_string_lossy().into_owned());
         self.conn.execute(
-            "UPDATE tracks SET cover_art = ?2 WHERE id = ?1",
-            params![id, cover],
+            "UPDATE tracks SET cover_art = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, cover, unix_now() as i64],
         )?;
         Ok(())
     }
@@ -668,13 +669,14 @@ impl Db {
         Ok(out)
     }
 
-    /// tracks by their hashes with what sync carries: change dates and the
-    /// metadata the db keeps, in `hashes` order; hashes not found are
-    /// skipped.
+    /// tracks by their hashes with what sync carries: change dates, the
+    /// metadata the db keeps and the cover file, in `hashes` order; hashes
+    /// not found are skipped.
     pub fn get_track_sync(&self, hashes: &[String]) -> Result<Vec<TrackSyncRow>, Box<dyn Error>> {
         let mut stmt = self.conn.prepare(
             "SELECT t.id, t.hash, t.path, t.updated_at, t.updated_at_file, t.title, \
-                (SELECT name FROM albums WHERE id = t.album_id), t.color, t.user_label, t.volume \
+                (SELECT name FROM albums WHERE id = t.album_id), t.color, t.user_label, t.volume, \
+                t.cover_art \
              FROM tracks t WHERE t.hash = ?1",
         )?;
         let mut artists = self.conn.prepare(
@@ -693,6 +695,7 @@ impl Db {
                         id: r.get(0)?,
                         hash: r.get(1)?,
                         path: PathBuf::from(r.get::<_, String>(2)?),
+                        cover_art: r.get::<_, Option<String>>(10)?.map(PathBuf::from),
                         updated_at: r.get::<_, Option<i64>>(3)?.map(|v| v as u64),
                         updated_at_file: r.get::<_, Option<i64>>(4)?.map(|v| v as u64),
                         meta: TrackMetaRow {
@@ -787,11 +790,14 @@ impl Db {
     /// the known track follows the new path (another track there is
     /// replaced). `metas` — metadata and dates of known tracks (applied
     /// after `tracks`, by hash; `id`/`path` are ignored, unknown hashes are
-    /// skipped). A `None` `updated_at_file` keeps the local one.
+    /// skipped). A `None` `updated_at_file` keeps the local one. `covers` —
+    /// (hash, cover file) of tracks that got a cover file (after `tracks`;
+    /// unknown hashes are skipped, the dates come with `metas`).
     pub fn save_import(
         &self,
         tracks: &[(TrackVirtual, String)],
         metas: &[TrackSyncRow],
+        covers: &[(String, PathBuf)],
         playlists: &[PlaylistHashRow],
         deleted: &[DeletedPlaylistRow],
     ) -> Result<(), Box<dyn Error>> {
@@ -803,6 +809,12 @@ impl Db {
         }
         for meta in metas {
             apply_track_meta(&tx, meta)?;
+        }
+        for (hash, cover) in covers {
+            tx.execute(
+                "UPDATE tracks SET cover_art = ?2 WHERE hash = ?1",
+                params![hash, cover.to_string_lossy()],
+            )?;
         }
         for pl in playlists {
             tx.execute(
@@ -1142,6 +1154,9 @@ pub struct TrackSyncRow {
     pub hash: String,
     /// local file (ignored by `save_import`).
     pub path: PathBuf,
+    /// local cover file, not embedded one (ignored by `save_import`: the
+    /// imported covers go separately).
+    pub cover_art: Option<PathBuf>,
     /// last change of the db record (unix seconds).
     pub updated_at: Option<u64>,
     /// last change of the file itself (unix seconds).
@@ -1593,6 +1608,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             &[gone("older", 300), gone("newer", 300), gone("unknown", 42), gone("already", 1)],
         )
         .unwrap();
@@ -1625,7 +1641,7 @@ mod tests {
             updated_at: Some(u64::from(u32::MAX)),
             hashes: Vec::new(),
         };
-        db.save_import(&[], &[], &[pl], &[]).unwrap();
+        db.save_import(&[], &[], &[], &[pl], &[]).unwrap();
         assert_eq!(live_names(&db), vec!["mix".to_string()]);
         assert!(deleted(&db).is_empty());
     }
@@ -1767,14 +1783,19 @@ mod tests {
             let r = &db.get_track_sync(std::slice::from_ref(&hash)).unwrap()[0];
             (r.updated_at, r.updated_at_file)
         };
-        // a new track and a cover path (local only) are not changes.
-        db.set_track_cover(id, Some(&dir.path().join("c.png"))).unwrap();
+        // a new track is not a change.
         assert_eq!(dates(&db), (None, None));
 
-        db.set_track_meta(id, Some("New"), None).unwrap();
+        // a cover file travels on sync: a change of the record.
+        db.set_track_cover(id, Some(&dir.path().join("c.png"))).unwrap();
         let (updated, file) = dates(&db);
         assert!(updated.unwrap() > 1_600_000_000);
         assert_eq!(file, None);
+        let row = &db.get_track_sync(std::slice::from_ref(&hash)).unwrap()[0];
+        assert_eq!(row.cover_art, Some(dir.path().join("c.png")));
+
+        db.set_track_meta(id, Some("New"), None).unwrap();
+        assert_eq!(dates(&db).1, None);
 
         db.set_track_file_changed(id).unwrap();
         assert!(dates(&db).1.unwrap() > 1_600_000_000);
@@ -1819,17 +1840,25 @@ mod tests {
         row.meta.album = None;
         row.updated_at = Some(77);
         row.updated_at_file = None;
-        db.save_import(&[], &[row.clone()], &[], &[]).unwrap();
+        db.save_import(&[], &[row.clone()], &[], &[], &[]).unwrap();
         let got = &db.get_track_sync(std::slice::from_ref(&hash)).unwrap()[0];
         assert_eq!(got.meta.title, "Imported");
         assert_eq!(got.meta.artists, vec!["A".to_string(), "B".to_string()]);
+        assert_eq!((got.updated_at, got.updated_at_file), (Some(77), local_file));
+
+        // an imported cover file: only the path, the dates come with metas.
+        let cover = dir.path().join("front.gif");
+        db.save_import(&[], &[], &[(hash.clone(), cover.clone()), ("ff".repeat(16), cover.clone())], &[], &[])
+            .unwrap();
+        let got = &db.get_track_sync(std::slice::from_ref(&hash)).unwrap()[0];
+        assert_eq!(got.cover_art, Some(cover));
         assert_eq!((got.updated_at, got.updated_at_file), (Some(77), local_file));
 
         // the rewritten file landed over b.mp3: the track moves there, the
         // track of b.mp3 is gone.
         let moved = fixture_track(dir.path(), "b.mp3", "Other", "X");
         row.updated_at_file = Some(88);
-        db.save_import(&[(moved, hash.clone())], &[row], &[], &[]).unwrap();
+        db.save_import(&[(moved, hash.clone())], &[row], &[], &[], &[]).unwrap();
         let tracks = db.get_track_hashes(None).unwrap();
         assert_eq!(tracks.len(), 1);
         assert_eq!((&tracks[0].1, tracks[0].2.file_name().unwrap()), (&hash, "b.mp3".as_ref()));
@@ -2086,7 +2115,7 @@ mod tests {
             updated_at: Some(20),
             hashes: vec![hash.clone(), "ffffffffffffffffffffffffffffffff".into()],
         };
-        db.save_import(&[(track, hash.clone())], &[], &[pl], &[]).unwrap();
+        db.save_import(&[(track, hash.clone())], &[], &[], &[pl], &[]).unwrap();
 
         // the track is saved with the hash from the packet.
         assert!(db.hash_exist(hash.clone()));
@@ -2111,7 +2140,7 @@ mod tests {
         // the imported file was written over the local one.
         let track = fixture_track(dir.path(), "song.mp3", "Song", "A");
         let new = "0123456789abcdef0123456789abcdef".to_string();
-        db.save_import(&[(track, new.clone())], &[], &[], &[]).unwrap();
+        db.save_import(&[(track, new.clone())], &[], &[], &[], &[]).unwrap();
 
         let tracks = db.get_track_hashes(None).unwrap();
         assert_eq!(tracks.len(), 1, "replaced, not duplicated");

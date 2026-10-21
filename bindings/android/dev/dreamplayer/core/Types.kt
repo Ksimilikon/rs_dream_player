@@ -6,8 +6,10 @@ package dev.dreamplayer.core
 
 /**
  * packet format version written by default (`codec::Version::V0_12`: v0.1 +
- * deleted playlists + song change dates and metadata). `2` — v0.11, without
- * the song info; `1` — v0.1, without deleted playlists too.
+ * deleted playlists; the songs section carries the song change dates,
+ * metadata and cover files, the playlists section — the playlist covers).
+ * `2` — v0.11, without the song dates, metadata and covers; `1` — v0.1,
+ * without deleted playlists too.
  */
 const val PACKET_VERSION: Int = 3
 
@@ -71,6 +73,10 @@ data class PacketSong(
     val hash: ByteArray,
     val name: String?,
     val data: ByteArray?,
+    /** cover file name (v0.12+); null without a cover / `withCovers = false`. */
+    val coverName: String?,
+    /** cover file not embedded into [data]'s file (v0.12+). */
+    val cover: ByteArray?,
 )
 
 /** a playlist of an unpacked packet. */
@@ -114,7 +120,10 @@ data class ImportPrepared(
 
 object ImportFileKind {
     const val SONG = 1
+    /** playlist cover. */
     const val COVER = 2
+    /** song cover (not embedded into the audio file), v0.12+. */
+    const val SONG_COVER = 3
 }
 
 /** status codes of the `cdc*` functions (`api::cdc::FFICdcStatus`). */

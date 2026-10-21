@@ -187,12 +187,13 @@ object Native {
         fd: Int,
     ): Int
 
-    /** tracks by id (without playlists) into [fd]. */
+    /** tracks by id (without playlists, with their covers) into [fd]. */
     @JvmStatic external fun cdcPackTracks(
         version: Int,
         ids: LongArray,
         withAudio: Boolean,
         withNames: Boolean,
+        withCovers: Boolean,
         fd: Int,
     ): Int
 

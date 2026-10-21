@@ -67,7 +67,7 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_cdcPackLibrary<'c>(
     })
 }
 
-/// tracks by id (without playlists) into `fd`.
+/// tracks by id (without playlists, with their covers) into `fd`.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_dreamplayer_core_Native_cdcPackTracks<'c>(
     mut env: EnvUnowned<'c>,
@@ -76,6 +76,7 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_cdcPackTracks<'c>(
     ids: JLongArray<'c>,
     with_audio: bool,
     with_names: bool,
+    with_covers: bool,
     fd: i32,
 ) -> i32 {
     run(&mut env, |env| {
@@ -88,7 +89,16 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_cdcPackTracks<'c>(
             }
         };
         Ok(pack_to_fd(fd, |p, l| unsafe {
-            cdc::cdc_pack_tracks(version as u32, ids.as_ptr(), ids.len(), with_audio, with_names, p, l)
+            cdc::cdc_pack_tracks(
+                version as u32,
+                ids.as_ptr(),
+                ids.len(),
+                with_audio,
+                with_names,
+                with_covers,
+                p,
+                l,
+            )
         }))
     })
 }
@@ -155,10 +165,18 @@ fn packet<'l>(env: &mut Env<'l>, pk: &FFIPacket) -> Result<JObject<'l>> {
         let h = hash(env, &s.hash)?;
         let name = new_string(env, unsafe { c_string(s.name) }.as_deref())?;
         let data = opt_bytes(env, s.data, s.data_len)?;
+        let cover_name = new_string(env, unsafe { c_string(s.cover_name) }.as_deref())?;
+        let cover = opt_bytes(env, s.cover, s.cover_len)?;
         song_objs.push(env.new_object(
             jni_str!("dev/dreamplayer/core/PacketSong"),
-            jni_sig!("([BLjava/lang/String;[B)V"),
-            &[JValue::Object(&h), JValue::Object(&name), JValue::Object(&data)],
+            jni_sig!("([BLjava/lang/String;[BLjava/lang/String;[B)V"),
+            &[
+                JValue::Object(&h),
+                JValue::Object(&name),
+                JValue::Object(&data),
+                JValue::Object(&cover_name),
+                JValue::Object(&cover),
+            ],
         )?);
     }
 

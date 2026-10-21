@@ -15,43 +15,58 @@
 //!
 //! ## songs section ([`SectionTag::Songs`])
 //!
+//! everything about the music; the other sections refer to songs by hash.
+//!
 //! 1. count rows: `u32`, number of songs `N`
 //! 2. hashes: `N` × `u128`, fixed size
 //! 3. file names: `N` × (`u16` length + UTF-8 payload), can be 0 length
 //! 4. music files: `N` × (`u32` length + raw payload), can be 0 length
 //!
-//! song `i` is `(hashes[i], names[i], files[i])`.
+//! v0.12+ only:
 //!
-//! ## song info section ([`SectionTag::SongInfo`])
-//!
-//! v0.12+, written right after the songs and only if some song has a date
-//! or metadata. Song `i` of this section is song `i` of the songs section.
-//!
-//! 1. count rows: `u32`, must equal `N`
-//! 2. dates: `N` × (flags `u8` + `updated_at` `u64` + `updated_at_file`
+//! 5. info: `N` × (flags `u8` + `updated_at` `u64` + `updated_at_file`
 //!    `u64`), fixed size. Flag bit 0: `updated_at` (the db record changed) is
 //!    set, bit 1: `updated_at_file` (the file itself changed) is set, bit 2:
-//!    the song has metadata in 3. An unset date is written as 0 and must be
-//!    ignored. Other bits are reserved (written as 0, ignored on read).
-//! 3. metadata: for every song with flag bit 2, in song order: title
+//!    the song has metadata in 6, bit 3: the song has a cover in 7 / 8. An
+//!    unset date is written as 0 and must be ignored. Other bits are reserved
+//!    (written as 0, ignored on read).
+//! 6. metadata: for every song with flag bit 2, in song order: title
 //!    (`u16` length + UTF-8), album (same, 0 length = none), artists (`u16`
 //!    count + that many names), genres (same), color (name, 0 length =
 //!    none), user label (same), volume (`f32`).
+//! 7. cover file names: for every song with flag bit 3, in song order
+//!    (`u16` length + UTF-8 payload), can be 0 length
+//! 8. covers: for every song with flag bit 3, in song order (`u32` length +
+//!    raw image). Only a cover that is not embedded into the music file
+//!    travels here.
+//!
+//! song `i` is `(hashes[i], names[i], files[i], info[i], ...)`.
 //!
 //! ## playlists section ([`SectionTag::Playlists`])
+//!
+//! playlists only: songs are listed by hash, their files and data are in the
+//! songs section.
 //!
 //! 1. count rows: `u32`, number of playlists `M`
 //! 2. names: `M` × (`u16` length + UTF-8 payload), can be 0 length
 //! 3. dates: `M` × (flags `u8` + `created_at` `u64` + `updated_at` `u64`),
 //!    fixed size. Flag bit 0: `created_at` is set, bit 1: `updated_at` is
-//!    set; an unset date is written as 0 and must be ignored. Other bits are
-//!    reserved (written as 0, ignored on read).
+//!    set, bit 2 (v0.12+): the playlist has a cover in 5 / 6; an unset date
+//!    is written as 0 and must be ignored. Other bits are reserved (written as
+//!    0, ignored on read).
 //! 4. track lists: `M` × (`u32` count `K` + `K` × `u128` song hash), in
 //!    playlist order. Hashes may point to songs that are not in the packet.
 //!
+//! v0.12+ only:
+//!
+//! 5. cover file names: for every playlist with flag bit 2, in playlist
+//!    order (`u16` length + UTF-8 payload), can be 0 length
+//! 6. covers: for every playlist with flag bit 2, in playlist order (`u32`
+//!    length + raw image)
+//!
 //! ## deleted playlists section ([`SectionTag::Deleted`])
 //!
-//! v0.11+, written before the covers and only if some playlist is deleted.
+//! v0.11+, written after the playlists and only if some playlist is deleted.
 //! A deleted playlist is soft-deleted: only its name (the identifier) and
 //! when it was deleted travel, so the receiver deletes its copy too unless
 //! that copy was changed later.
@@ -62,7 +77,8 @@
 //!
 //! ## covers section ([`SectionTag::Covers`])
 //!
-//! written last and only if at least one playlist has a cover.
+//! v0.1 / v0.11 only (v0.12+ keeps the covers in the songs and playlists
+//! sections): written last and only if at least one playlist has a cover.
 //!
 //! 1. count rows: `u32`, must equal `M`
 //! 2. file names: `M` × (`u16` length + UTF-8 payload), can be 0 length
@@ -117,13 +133,12 @@ pub struct Song {
     pub updated_at_file: Option<u64>,
     /// metadata from the db, v0.12+; `None` — not carried.
     pub meta: Option<SongMeta>,
-}
-
-impl Song {
-    /// the song has something for the song info section.
-    fn has_info(&self) -> bool {
-        self.updated_at.is_some() || self.updated_at_file.is_some() || self.meta.is_some()
-    }
+    /// cover file name (format hint for the receiver), v0.12+; travels only
+    /// together with `cover`.
+    pub cover_name: String,
+    /// raw cover image that is not embedded into the music file, v0.12+,
+    /// max `u32::MAX` bytes; empty = no cover.
+    pub cover: Vec<u8>,
 }
 
 /// song metadata as the db keeps it (v0.12+). Names are max `u16::MAX`
@@ -191,23 +206,24 @@ pub fn encode(
 
 /// encodes `songs`, `playlists` and the `deleted` playlists into a packet of
 /// the given `version`. v0.1 has no deleted playlists section: `deleted` is
-/// left out there; before v0.12 the song dates and metadata are left out.
+/// left out there; before v0.12 the song dates, metadata and covers are left
+/// out.
 pub fn encode_with(
     version: Version,
     songs: &[Song],
     playlists: &[Playlist],
     deleted: &[DeletedPlaylist],
 ) -> Result<Vec<u8>, CodecError> {
-    let with_covers = playlists.iter().any(|p| !p.cover.is_empty());
+    let full = version.full_sections();
+    let with_covers = !full && playlists.iter().any(|p| !p.cover.is_empty());
     let with_deleted = version.has_deleted() && !deleted.is_empty();
-    let with_info = version.has_song_info() && songs.iter().any(Song::has_info);
 
     // reserve close to the final size: audio dominates, and growing a
     // multi-gigabyte `Vec` by doubling would briefly need twice the memory.
     let size = 64
         + songs
             .iter()
-            .map(|s| 39 + s.name.len() + s.data.len())
+            .map(|s| 45 + s.name.len() + s.data.len() + s.cover_name.len() + s.cover.len())
             .sum::<usize>()
         + playlists
             .iter()
@@ -223,14 +239,11 @@ pub fn encode_with(
     // 2) version
     out.extend_from_slice(&u32::from(version).to_le_bytes());
     // 3) count sections
-    out.push(2 + u8::from(with_info) + u8::from(with_deleted) + u8::from(with_covers));
+    out.push(2 + u8::from(with_deleted) + u8::from(with_covers));
     // 4) sections
-    section(&mut out, SectionTag::Songs, |out| write_songs(out, songs))?;
-    if with_info {
-        section(&mut out, SectionTag::SongInfo, |out| write_song_info(out, songs))?;
-    }
+    section(&mut out, SectionTag::Songs, |out| write_songs(out, songs, full))?;
     section(&mut out, SectionTag::Playlists, |out| {
-        write_playlists(out, playlists)
+        write_playlists(out, playlists, full)
     })?;
     if with_deleted {
         section(&mut out, SectionTag::Deleted, |out| write_deleted(out, deleted))?;
@@ -252,6 +265,7 @@ pub fn decode(bytes: &[u8]) -> Result<Packet, CodecError> {
     }
     // 2) version
     let version = Version::try_from(r.u32()?)?;
+    let full = version.full_sections();
     // 3) count sections
     let count = r.u8()?;
 
@@ -260,35 +274,23 @@ pub fn decode(bytes: &[u8]) -> Result<Packet, CodecError> {
     let mut playlists = None;
     let mut covers = None;
     let mut deleted = None;
-    let mut info = None;
     for _ in 0..count {
         let tag = r.u8()?;
         let len = usize::try_from(r.u64()?).map_err(|_| CodecError::UnexpectedEof)?;
         let mut s = Reader::new(r.take(len)?);
         match SectionTag::try_from(tag) {
-            Ok(SectionTag::Songs) => set_once(&mut songs, read_songs(&mut s)?)?,
-            Ok(SectionTag::Playlists) => set_once(&mut playlists, read_playlists(&mut s)?)?,
+            Ok(SectionTag::Songs) => set_once(&mut songs, read_songs(&mut s, full)?)?,
+            Ok(SectionTag::Playlists) => {
+                set_once(&mut playlists, read_playlists(&mut s, full)?)?
+            }
             Ok(SectionTag::Covers) => set_once(&mut covers, read_covers(&mut s)?)?,
             Ok(SectionTag::Deleted) => set_once(&mut deleted, read_deleted(&mut s)?)?,
-            Ok(SectionTag::SongInfo) => set_once(&mut info, read_song_info(&mut s)?)?,
             // unknown section: already skipped by `take(len)`.
             Err(_) => continue,
         }
         s.finish()?;
     }
     r.finish()?;
-
-    let mut songs = songs.unwrap_or_default();
-    if let Some(info) = info {
-        if info.len() != songs.len() {
-            return Err(CodecError::CountMismatch);
-        }
-        for (s, (updated_at, updated_at_file, meta)) in songs.iter_mut().zip(info) {
-            s.updated_at = updated_at;
-            s.updated_at_file = updated_at_file;
-            s.meta = meta;
-        }
-    }
 
     let mut playlists = playlists.unwrap_or_default();
     if let Some(covers) = covers {
@@ -303,7 +305,7 @@ pub fn decode(bytes: &[u8]) -> Result<Packet, CodecError> {
 
     Ok(Packet {
         version,
-        songs,
+        songs: songs.unwrap_or_default(),
         playlists,
         deleted: deleted.unwrap_or_default(),
     })
@@ -336,7 +338,13 @@ fn set_once<T>(slot: &mut Option<T>, value: T) -> Result<(), CodecError> {
     }
 }
 
-fn write_songs(out: &mut Vec<u8>, songs: &[Song]) -> Result<(), CodecError> {
+/// the items whose flag is set.
+fn flagged<'a, T>(items: &'a mut [T], flags: &'a [bool]) -> impl Iterator<Item = &'a mut T> {
+    items.iter_mut().zip(flags).filter(|(_, f)| **f).map(|(t, _)| t)
+}
+
+/// `full` — v0.12+: with the song dates, metadata and covers.
+fn write_songs(out: &mut Vec<u8>, songs: &[Song], full: bool) -> Result<(), CodecError> {
     // songs 1. count rows
     put_count(out, songs.len())?;
     // songs 2. hashes
@@ -351,12 +359,46 @@ fn write_songs(out: &mut Vec<u8>, songs: &[Song]) -> Result<(), CodecError> {
     for song in songs {
         put_blob(out, &song.data)?;
     }
+    if !full {
+        return Ok(());
+    }
+    // songs 5. info
+    for s in songs {
+        let flags = u8::from(s.updated_at.is_some())
+            | u8::from(s.updated_at_file.is_some()) << 1
+            | u8::from(s.meta.is_some()) << 2
+            | u8::from(!s.cover.is_empty()) << 3;
+        out.push(flags);
+        out.extend_from_slice(&s.updated_at.unwrap_or(0).to_le_bytes());
+        out.extend_from_slice(&s.updated_at_file.unwrap_or(0).to_le_bytes());
+    }
+    // songs 6. metadata
+    for m in songs.iter().filter_map(|s| s.meta.as_ref()) {
+        put_name(out, &m.title)?;
+        put_name(out, &m.album)?;
+        put_names(out, &m.artists)?;
+        put_names(out, &m.genres)?;
+        put_name(out, &m.color)?;
+        put_name(out, &m.label)?;
+        out.extend_from_slice(&m.volume.to_le_bytes());
+    }
+    let covered = || songs.iter().filter(|s| !s.cover.is_empty());
+    // songs 7. cover file names
+    for s in covered() {
+        put_name(out, &s.cover_name)?;
+    }
+    // songs 8. covers
+    for s in covered() {
+        put_blob(out, &s.cover)?;
+    }
     Ok(())
 }
 
-fn read_songs(r: &mut Reader<'_>) -> Result<Vec<Song>, CodecError> {
-    // songs 1. count rows: every song takes at least 16 + 2 + 4 bytes.
-    let (count, cap) = r.count(22)?;
+/// `full` — v0.12+: with the song dates, metadata and covers.
+fn read_songs(r: &mut Reader<'_>, full: bool) -> Result<Vec<Song>, CodecError> {
+    // songs 1. count rows: every song takes at least 16 + 2 + 4 bytes
+    // (+ 17 of info in v0.12+).
+    let (count, cap) = r.count(if full { 39 } else { 22 })?;
     // songs 2. hashes
     let mut songs = Vec::with_capacity(cap);
     for _ in 0..count {
@@ -373,54 +415,21 @@ fn read_songs(r: &mut Reader<'_>) -> Result<Vec<Song>, CodecError> {
     for song in &mut songs {
         song.data = r.blob()?;
     }
-    Ok(songs)
-}
-
-fn write_song_info(out: &mut Vec<u8>, songs: &[Song]) -> Result<(), CodecError> {
-    // song info 1. count rows
-    put_count(out, songs.len())?;
-    // song info 2. dates
-    for s in songs {
-        let flags = u8::from(s.updated_at.is_some())
-            | u8::from(s.updated_at_file.is_some()) << 1
-            | u8::from(s.meta.is_some()) << 2;
-        out.push(flags);
-        out.extend_from_slice(&s.updated_at.unwrap_or(0).to_le_bytes());
-        out.extend_from_slice(&s.updated_at_file.unwrap_or(0).to_le_bytes());
+    if !full {
+        return Ok(songs);
     }
-    // song info 3. metadata
-    for m in songs.iter().filter_map(|s| s.meta.as_ref()) {
-        put_name(out, &m.title)?;
-        put_name(out, &m.album)?;
-        put_names(out, &m.artists)?;
-        put_names(out, &m.genres)?;
-        put_name(out, &m.color)?;
-        put_name(out, &m.label)?;
-        out.extend_from_slice(&m.volume.to_le_bytes());
-    }
-    Ok(())
-}
-
-/// `(updated_at, updated_at_file, meta)` per song.
-type SongInfo = (Option<u64>, Option<u64>, Option<SongMeta>);
-
-fn read_song_info(r: &mut Reader<'_>) -> Result<Vec<SongInfo>, CodecError> {
-    // song info 1. count rows: every song takes at least 1 + 8 + 8 bytes.
-    let (count, cap) = r.count(17)?;
-    // song info 2. dates
-    let mut info = Vec::with_capacity(cap);
-    for _ in 0..count {
+    // songs 5. info
+    let mut covered = Vec::with_capacity(songs.len());
+    for s in &mut songs {
         let flags = r.u8()?;
         let (updated, updated_file) = (r.u64()?, r.u64()?);
-        let meta = (flags & 4 != 0).then(SongMeta::default);
-        info.push((
-            (flags & 1 != 0).then_some(updated),
-            (flags & 2 != 0).then_some(updated_file),
-            meta,
-        ));
+        s.updated_at = (flags & 1 != 0).then_some(updated);
+        s.updated_at_file = (flags & 2 != 0).then_some(updated_file);
+        s.meta = (flags & 4 != 0).then(SongMeta::default);
+        covered.push(flags & 8 != 0);
     }
-    // song info 3. metadata
-    for m in info.iter_mut().filter_map(|(_, _, m)| m.as_mut()) {
+    // songs 6. metadata
+    for m in songs.iter_mut().filter_map(|s| s.meta.as_mut()) {
         m.title = r.name()?;
         m.album = r.name()?;
         m.artists = r.names()?;
@@ -429,10 +438,23 @@ fn read_song_info(r: &mut Reader<'_>) -> Result<Vec<SongInfo>, CodecError> {
         m.label = r.name()?;
         m.volume = r.f32()?;
     }
-    Ok(info)
+    // songs 7. cover file names
+    for s in flagged(&mut songs, &covered) {
+        s.cover_name = r.name()?;
+    }
+    // songs 8. covers
+    for s in flagged(&mut songs, &covered) {
+        s.cover = r.blob()?;
+    }
+    Ok(songs)
 }
 
-fn write_playlists(out: &mut Vec<u8>, playlists: &[Playlist]) -> Result<(), CodecError> {
+/// `full` — v0.12+: with the playlist covers.
+fn write_playlists(
+    out: &mut Vec<u8>,
+    playlists: &[Playlist],
+    full: bool,
+) -> Result<(), CodecError> {
     // playlists 1. count rows
     put_count(out, playlists.len())?;
     // playlists 2. names
@@ -441,7 +463,9 @@ fn write_playlists(out: &mut Vec<u8>, playlists: &[Playlist]) -> Result<(), Code
     }
     // playlists 3. dates
     for p in playlists {
-        let flags = u8::from(p.created_at.is_some()) | u8::from(p.updated_at.is_some()) << 1;
+        let flags = u8::from(p.created_at.is_some())
+            | u8::from(p.updated_at.is_some()) << 1
+            | u8::from(full && !p.cover.is_empty()) << 2;
         out.push(flags);
         out.extend_from_slice(&p.created_at.unwrap_or(0).to_le_bytes());
         out.extend_from_slice(&p.updated_at.unwrap_or(0).to_le_bytes());
@@ -453,10 +477,23 @@ fn write_playlists(out: &mut Vec<u8>, playlists: &[Playlist]) -> Result<(), Code
             put_hash(out, hash);
         }
     }
+    if !full {
+        return Ok(());
+    }
+    let covered = || playlists.iter().filter(|p| !p.cover.is_empty());
+    // playlists 5. cover file names
+    for p in covered() {
+        put_name(out, &p.cover_name)?;
+    }
+    // playlists 6. covers
+    for p in covered() {
+        put_blob(out, &p.cover)?;
+    }
     Ok(())
 }
 
-fn read_playlists(r: &mut Reader<'_>) -> Result<Vec<Playlist>, CodecError> {
+/// `full` — v0.12+: with the playlist covers.
+fn read_playlists(r: &mut Reader<'_>, full: bool) -> Result<Vec<Playlist>, CodecError> {
     // playlists 1. count rows: every playlist takes at least 2 + 17 + 4 bytes.
     let (count, cap) = r.count(23)?;
     // playlists 2. names
@@ -468,11 +505,14 @@ fn read_playlists(r: &mut Reader<'_>) -> Result<Vec<Playlist>, CodecError> {
         });
     }
     // playlists 3. dates
+    let mut covered = Vec::with_capacity(playlists.len());
     for p in &mut playlists {
         let flags = r.u8()?;
         let (created, updated) = (r.u64()?, r.u64()?);
         p.created_at = (flags & 1 != 0).then_some(created);
         p.updated_at = (flags & 2 != 0).then_some(updated);
+        // bit 2 is reserved before v0.12.
+        covered.push(full && flags & 4 != 0);
     }
     // playlists 4. track lists
     for p in &mut playlists {
@@ -481,6 +521,14 @@ fn read_playlists(r: &mut Reader<'_>) -> Result<Vec<Playlist>, CodecError> {
         for _ in 0..len {
             p.tracks.push(r.hash()?);
         }
+    }
+    // playlists 5. cover file names
+    for p in flagged(&mut playlists, &covered) {
+        p.cover_name = r.name()?;
+    }
+    // playlists 6. covers
+    for p in flagged(&mut playlists, &covered) {
+        p.cover = r.blob()?;
     }
     Ok(playlists)
 }
@@ -574,9 +622,9 @@ mod tests {
         ]
     }
 
-    /// `songs()` with dates and metadata: one with everything, one with a
-    /// file date only, one without info.
-    fn songs_with_info() -> Vec<Song> {
+    /// `songs()` with the v0.12 extras: one with everything, one with a
+    /// file date only, one with a cover only.
+    fn songs_full() -> Vec<Song> {
         let mut songs = songs();
         songs[0].updated_at = Some(1_700_000_000);
         songs[0].updated_at_file = Some(1_700_000_500);
@@ -589,7 +637,10 @@ mod tests {
             label: String::new(),
             volume: 0.75,
         });
+        songs[0].cover_name = "front.webp".into();
+        songs[0].cover = b"RIFF\0\0\0\0WEBP".to_vec();
         songs[1].updated_at_file = Some(0);
+        songs[2].cover = vec![0xFF, 0xD8, 0xFF];
         songs
     }
 
@@ -659,66 +710,103 @@ mod tests {
     }
 
     #[test]
-    fn song_info_roundtrip_v0_12() {
-        let bytes = encode_with(Version::V0_12, &songs_with_info(), &playlists(), &deleted()).unwrap();
+    fn full_roundtrip_v0_12() {
+        let bytes = encode_with(Version::V0_12, &songs_full(), &playlists(), &deleted()).unwrap();
         let packet = decode(&bytes).unwrap();
         assert_eq!(packet.version, Version::V0_12);
-        assert_eq!(packet.songs, songs_with_info());
+        assert_eq!(packet.songs, songs_full());
         assert_eq!(packet.playlists, playlists());
         assert_eq!(packet.deleted, deleted());
-        // the song info follows the songs.
+        // the covers live in their sections: no covers section.
+        assert_eq!(bytes[8], 3, "songs, playlists, deleted");
         let s = section_at(&bytes, SectionTag::Songs);
-        let i = section_at(&bytes, SectionTag::SongInfo);
-        assert!(s < i && i < section_at(&bytes, SectionTag::Playlists));
-        assert_eq!(bytes[8], 5, "songs, info, playlists, deleted, covers");
+        let p = section_at(&bytes, SectionTag::Playlists);
+        assert!(s < p && p < section_at(&bytes, SectionTag::Deleted));
     }
 
     #[test]
-    fn song_info_dates_flags_layout() {
+    fn playlists_section_has_no_song_files() {
+        let bytes = encode(Version::V0_12, &songs_full(), &playlists()).unwrap();
+        let p = section_at(&bytes, SectionTag::Playlists);
+        let len = u64::from_le_bytes(bytes[p + 1..p + 9].try_into().unwrap()) as usize;
+        // count 4 + names + dates 2 × 17 + track lists (4 + 3 × 16, 4) +
+        // the cover of the first playlist (name + image).
+        let pls = playlists();
+        let expected = 4
+            + (2 + pls[0].name.len()) + (2 + pls[1].name.len())
+            + 2 * 17
+            + (4 + 3 * 16) + 4
+            + (2 + pls[0].cover_name.len()) + (4 + pls[0].cover.len());
+        assert_eq!(len, expected);
+    }
+
+    #[test]
+    fn songs_info_flags_layout_v0_12() {
         let one = [Song {
             updated_at_file: Some(9),
+            cover_name: "c.png".into(),
+            cover: vec![1, 2],
             ..Song::default()
         }];
         let bytes = encode(Version::V0_12, &one, &[]).unwrap();
-        // section header 9 + count 4 -> flags.
-        let d = section_at(&bytes, SectionTag::SongInfo) + 9 + 4;
-        assert_eq!(bytes[d], 0b010);
+        // section header 9 + count 4 + hash 16 + empty name 2 + empty file 4
+        // -> flags.
+        let d = section_at(&bytes, SectionTag::Songs) + 9 + 4 + 16 + 2 + 4;
+        assert_eq!(bytes[d], 0b1010);
         assert_eq!(&bytes[d + 1..d + 9], &0u64.to_le_bytes());
         assert_eq!(&bytes[d + 9..d + 17], &9u64.to_le_bytes());
-        // no metadata follows.
-        assert_eq!(d + 17, section_at(&bytes, SectionTag::Playlists));
+        // no metadata: the cover name and the image follow.
+        assert_eq!(&bytes[d + 17..d + 19], &5u16.to_le_bytes());
+        assert_eq!(&bytes[d + 19..d + 24], b"c.png");
+        assert_eq!(&bytes[d + 24..d + 28], &2u32.to_le_bytes());
+        assert_eq!(&bytes[d + 28..d + 30], &[1, 2]);
+        assert_eq!(d + 30, section_at(&bytes, SectionTag::Playlists));
         assert_eq!(decode(&bytes).unwrap().songs, one);
     }
 
     #[test]
-    fn no_song_info_without_info_or_before_v0_12() {
-        let bytes = encode(Version::V0_12, &songs(), &[]).unwrap();
-        assert_eq!(bytes[8], 2, "songs, playlists");
-        let bytes = encode(Version::V0_11, &songs_with_info(), &[]).unwrap();
+    fn playlist_cover_flag_layout_v0_12() {
+        let pls = [Playlist {
+            cover_name: "p.gif".into(),
+            cover: vec![7],
+            ..Playlist::default()
+        }];
+        let bytes = encode(Version::V0_12, &[], &pls).unwrap();
+        // section header 9 + count 4 + empty name 2 -> flags.
+        let d = section_at(&bytes, SectionTag::Playlists) + 9 + 4 + 2;
+        assert_eq!(bytes[d], 0b100);
+        // dates 17 + empty track list 4 -> the cover name and the image.
+        assert_eq!(&bytes[d + 21..d + 23], &5u16.to_le_bytes());
+        assert_eq!(&bytes[d + 28..d + 32], &1u32.to_le_bytes());
+        assert_eq!(bytes[d + 32], 7);
+        assert_eq!(d + 33, bytes.len());
+        assert_eq!(decode(&bytes).unwrap().playlists, pls);
+    }
+
+    #[test]
+    fn a_cover_name_without_an_image_is_not_carried() {
+        let one = [Song {
+            cover_name: "c.png".into(),
+            ..Song::default()
+        }];
+        let bytes = encode(Version::V0_12, &one, &[]).unwrap();
+        assert_eq!(decode(&bytes).unwrap().songs, [Song::default()]);
+    }
+
+    #[test]
+    fn older_versions_leave_out_the_v0_12_extras() {
+        let bytes = encode(Version::V0_11, &songs_full(), &[]).unwrap();
         assert_eq!(bytes[8], 2, "songs, playlists");
         assert_eq!(decode(&bytes).unwrap().songs, songs());
+        // the playlist covers still travel in the covers section.
+        let bytes = encode(Version::V0_11, &[], &playlists()).unwrap();
+        assert_eq!(bytes[8], 3, "songs, playlists, covers");
+        assert_eq!(decode(&bytes).unwrap().playlists, playlists());
     }
 
     #[test]
-    fn song_info_count_mismatch() {
-        let mut bytes = encode(Version::V0_12, &songs_with_info(), &[]).unwrap();
-        // claim one song less in the songs section: cut the last (empty)
-        // song — hash 16, name 2, file 4 + 300.
-        let s = section_at(&bytes, SectionTag::Songs);
-        bytes[s + 9..s + 13].copy_from_slice(&2u32.to_le_bytes());
-        let files = s + 13 + 3 * 16 + 2 + "track.flac".len() + 2 + "песня.mp3".len() + 2;
-        let last_file = files + 4 + 5 + 4;
-        bytes.drain(last_file..last_file + 4 + 300);
-        bytes.drain(files - 2..files);
-        bytes.drain(s + 13 + 2 * 16..s + 13 + 3 * 16);
-        let new_len = (2 * 16 + 2 + "track.flac".len() + 2 + "песня.mp3".len() + 4 + 5 + 4 + 4) as u64;
-        bytes[s + 1..s + 9].copy_from_slice(&new_len.to_le_bytes());
-        assert_eq!(decode(&bytes), Err(CodecError::CountMismatch));
-    }
-
-    #[test]
-    fn song_info_truncated_at_every_point() {
-        let bytes = encode(Version::V0_12, &songs_with_info(), &[]).unwrap();
+    fn v0_12_truncated_at_every_point() {
+        let bytes = encode_with(Version::V0_12, &songs_full(), &playlists(), &deleted()).unwrap();
         for cut in 0..bytes.len() {
             assert!(decode(&bytes[..cut]).is_err(), "cut at {cut}");
         }
@@ -873,10 +961,12 @@ mod tests {
 
     #[test]
     fn huge_counts_do_not_allocate() {
-        let mut bytes = encode(Version::V0_1, &[], &[]).unwrap();
-        let s = section_at(&bytes, SectionTag::Songs);
-        bytes[s + 9..s + 13].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert_eq!(decode(&bytes), Err(CodecError::UnexpectedEof));
+        for version in [Version::V0_1, Version::V0_12] {
+            let mut bytes = encode(version, &[], &[]).unwrap();
+            let s = section_at(&bytes, SectionTag::Songs);
+            bytes[s + 9..s + 13].copy_from_slice(&u32::MAX.to_le_bytes());
+            assert_eq!(decode(&bytes), Err(CodecError::UnexpectedEof));
+        }
 
         let mut bytes = encode(Version::V0_1, &[], &[]).unwrap();
         let p = section_at(&bytes, SectionTag::Playlists);
@@ -922,10 +1012,10 @@ mod tests {
             SectionTag::Playlists,
             SectionTag::Covers,
             SectionTag::Deleted,
-            SectionTag::SongInfo,
         ] {
             assert_eq!(SectionTag::try_from(u8::from(tag)), Ok(tag));
         }
         assert_eq!(SectionTag::try_from(0), Err(0));
+        assert_eq!(SectionTag::try_from(5), Err(5));
     }
 }

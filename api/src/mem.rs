@@ -143,7 +143,7 @@ pub unsafe extern "C" fn cdc_free_bytes(ptr: *mut u8, len: usize) {
 }
 
 /// frees an unpacked packet (from `cdc_decode`) together with its songs
-/// (names, audio) and playlists (names, hashes, covers and their names).
+/// (names, audio, covers and their names) and playlists (names, hashes, covers and their names).
 ///
 /// # Safety
 /// `packet` comes from `cdc_decode` and wasn't freed yet.
@@ -157,6 +157,8 @@ pub unsafe extern "C" fn cdc_free_packet(packet: FFIPacket) {
                 unsafe {
                     idx_free_string(song.name);
                     cdc_free_bytes(song.data, song.data_len);
+                    idx_free_string(song.cover_name);
+                    cdc_free_bytes(song.cover, song.cover_len);
                 }
             }
         }

@@ -14,6 +14,7 @@ use api::sync::{
 
 /// one file of a received data portion.
 pub struct SyncFile<'a> {
+    /// a song / playlist cover (not a song file).
     pub cover: bool,
     pub name: String,
     pub data: &'a [u8],
@@ -166,7 +167,7 @@ impl Session {
         unsafe { std::slice::from_raw_parts(files.ptr, files.len) }
             .iter()
             .map(|f| SyncFile {
-                cover: f.kind == FFIImportFileKind::Cover,
+                cover: f.kind != FFIImportFileKind::Song,
                 name: str_of(f.name),
                 data: match f.data.is_null() {
                     true => &[],

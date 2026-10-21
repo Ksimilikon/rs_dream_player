@@ -373,7 +373,7 @@ impl SyncSession {
             .map(|((kind, name, _), known)| match (kind, known) {
                 (_, Some(path)) => Some(path.to_path_buf()),
                 (FFIImportFileKind::Song, None) => by_name.get(name).cloned(),
-                (FFIImportFileKind::Cover, None) => None,
+                (FFIImportFileKind::Cover | FFIImportFileKind::SongCover, None) => None,
             })
             .collect();
         self.import = Some(PendingImport { session, replace });

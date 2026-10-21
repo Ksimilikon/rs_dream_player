@@ -4,7 +4,8 @@
 //! platform:
 //!
 //! 1. `cdc_import_prepare` — unpack, check dates, list the files to write
-//!    (songs and covers: suggested name + bytes). The db doesn't change.
+//!    (songs, song covers and playlist covers: suggested name + bytes). The
+//!    db doesn't change.
 //! 2. the frontend writes the files wherever it can (MediaStore, SAF, a
 //!    picked folder, the sandbox, ...) and collects the resulting paths.
 //! 3. `cdc_import_commit` — re-check dates and write to the db in one
@@ -23,6 +24,10 @@
 //!   (`updated_at_file`) — over the local file (`ImportSession::replaces`);
 //!   a packet import (`cdc_import_*`) leaves a known file alone. `force`
 //!   concerns playlists only.
+//! - song covers (v0.12+, a cover file not embedded into the music file):
+//!   listed for a new song and for a known one whose metadata is applied
+//!   (the cover is a part of the dated db record). A song without a cover in
+//!   the packet keeps its local cover.
 //! - playlists are matched by name; without a name -> skipped. The song list
 //!   is rewritten entirely. If the packet has no cover / dates (or the cover
 //!   file wasn't written), the local values are kept.
@@ -59,6 +64,8 @@ pub enum FFIImportFileKind {
     Song = 1,
     /// playlist cover.
     Cover = 2,
+    /// song cover (not embedded into the audio file), v0.12+.
+    SongCover = 3,
 }
 
 /// one file the frontend has to write.
@@ -81,11 +88,13 @@ pub struct FFIImportFiles {
     pub len: usize,
 }
 
-/// a planned file: song `songs[i]` or cover `playlists[i]`.
+/// a planned file: song `songs[i]`, cover `playlists[i]` or song cover
+/// `song_covers[i]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Planned {
     Song(usize),
     Cover(usize),
+    SongCover(usize),
 }
 
 /// unpacked packet between `prepare` and `commit`. For C — an opaque
@@ -100,6 +109,8 @@ pub struct ImportSession {
     local: Vec<Option<PathBuf>>,
     /// known songs that get only the newer metadata from the packet.
     metas: Vec<TrackSyncRow>,
+    /// song covers to write: hash, cover name and image only.
+    song_covers: Vec<Song>,
     pub(crate) playlists: Vec<Playlist>,
     /// playlists deleted on the other side (v0.11+).
     pub(crate) deleted: Vec<DeletedPlaylist>,
@@ -227,11 +238,8 @@ impl ImportSession {
     /// name and bytes.
     pub(crate) fn planned(&self) -> impl Iterator<Item = (FFIImportFileKind, &str, &[u8])> {
         self.plan.iter().zip(&self._names).map(|(&planned, name)| {
-            let (kind, data) = match planned {
-                Planned::Song(i) => (FFIImportFileKind::Song, &self.songs[i].data),
-                Planned::Cover(i) => (FFIImportFileKind::Cover, &self.playlists[i].cover),
-            };
-            (kind, name.to_str().unwrap_or_default(), data.as_slice())
+            let (kind, data) = file_of(&self.songs, &self.song_covers, &self.playlists, planned);
+            (kind, name.to_str().unwrap_or_default(), data)
         })
     }
 
@@ -240,7 +248,7 @@ impl ImportSession {
     pub(crate) fn replaces(&self) -> impl Iterator<Item = Option<&Path>> {
         self.plan.iter().map(|&planned| match planned {
             Planned::Song(i) => self.local[i].as_deref(),
-            Planned::Cover(_) => None,
+            Planned::Cover(_) | Planned::SongCover(_) => None,
         })
     }
 
@@ -251,6 +259,20 @@ impl ImportSession {
 }
 
 // ─────────────────────────────── logic ───────────────────────────────
+
+/// the kind and the bytes of a planned file.
+fn file_of<'a>(
+    songs: &'a [Song],
+    song_covers: &'a [Song],
+    playlists: &'a [Playlist],
+    planned: Planned,
+) -> (FFIImportFileKind, &'a [u8]) {
+    match planned {
+        Planned::Song(i) => (FFIImportFileKind::Song, &songs[i].data),
+        Planned::Cover(i) => (FFIImportFileKind::Cover, &playlists[i].cover),
+        Planned::SongCover(i) => (FFIImportFileKind::SongCover, &song_covers[i].cover),
+    }
+}
 
 /// db access under the lock (replaced in tests).
 pub(crate) trait Store {
@@ -277,7 +299,7 @@ pub(crate) fn prepare(
 ) -> Result<ImportSession, FFICdcStatus> {
     let packet = codec::decode(bytes)?;
 
-    let (songs, local, metas) = store.with(|db| {
+    let (songs, local, metas, song_covers) = store.with(|db| {
         check_dates(db, &packet.playlists, force)?;
         let hashes: Vec<String> = packet.songs.iter().map(|s| hex(s.hash)).collect();
         let known: HashMap<String, TrackSyncRow> = db
@@ -305,6 +327,11 @@ pub(crate) fn prepare(
         plan.push(Planned::Song(i));
         names.push(file_name_or(&s.name, &hex(s.hash), audio_ext(&s.data)));
     }
+    for (i, c) in song_covers.iter().enumerate() {
+        plan.push(Planned::SongCover(i));
+        let fallback = format!("{}-cover", hex(c.hash));
+        names.push(file_name_or(&c.cover_name, &fallback, image_ext(&c.cover)));
+    }
     for (i, p) in playlists.iter().enumerate().filter(|(_, p)| !p.cover.is_empty()) {
         plan.push(Planned::Cover(i));
         names.push(file_name_or(&p.cover_name, "cover", image_ext(&p.cover)));
@@ -321,10 +348,7 @@ pub(crate) fn prepare(
         .iter()
         .zip(&names)
         .map(|(&planned, name)| {
-            let (kind, data) = match planned {
-                Planned::Song(i) => (FFIImportFileKind::Song, &songs[i].data),
-                Planned::Cover(i) => (FFIImportFileKind::Cover, &playlists[i].cover),
-            };
+            let (kind, data) = file_of(&songs, &song_covers, &playlists, planned);
             FFIImportFile {
                 kind,
                 name: name.as_ptr(),
@@ -339,6 +363,7 @@ pub(crate) fn prepare(
         songs,
         local,
         metas,
+        song_covers,
         playlists,
         deleted,
         plan,
@@ -360,6 +385,7 @@ pub(crate) fn commit(
     let mut tracks = Vec::new();
     let mut metas = session.metas.clone();
     let mut covers = HashMap::new();
+    let mut song_covers = Vec::new();
     for (planned, path) in session.plan.iter().zip(paths) {
         let Some(path) = path else { continue };
         match *planned {
@@ -377,6 +403,7 @@ pub(crate) fn commit(
                         id: 0,
                         hash: hex(song.hash),
                         path: path.clone(),
+                        cover_art: None,
                         updated_at: song.updated_at,
                         updated_at_file: song.updated_at_file,
                         meta: meta_from_packet(meta),
@@ -385,6 +412,9 @@ pub(crate) fn commit(
             }
             Planned::Cover(i) => {
                 covers.insert(i, path.clone());
+            }
+            Planned::SongCover(i) => {
+                song_covers.push((hex(session.song_covers[i].hash), path.clone()));
             }
         }
     }
@@ -412,6 +442,7 @@ pub(crate) fn commit(
             .partition(|(_, hash, known)| *known || !db.hash_exist(hash.clone()));
         let late: Vec<String> = late.into_iter().map(|(_, hash, _)| hash).collect();
         metas.retain(|m| !late.contains(&m.hash));
+        song_covers.retain(|(hash, _)| !late.contains(hash));
         let tracks: Vec<_> = tracks.into_iter().map(|(t, hash, _)| (t, hash)).collect();
         let deleted: Vec<DeletedPlaylistRow> = session
             .deleted
@@ -421,25 +452,40 @@ pub(crate) fn commit(
                 deleted_at: d.deleted_at,
             })
             .collect();
-        db.save_import(&tracks, &metas, &playlists, &deleted)
+        db.save_import(&tracks, &metas, &song_covers, &playlists, &deleted)
             .map_err(|_| FFICdcStatus::WriteFailed)
     })
 }
 
+/// what [`sort_songs`] makes of the packet songs.
+type SortedSongs = (Vec<Song>, Vec<Option<PathBuf>>, Vec<TrackSyncRow>, Vec<Song>);
+
+/// the cover of `song` taken out of it: hash, cover name and image (`None`
+/// — no cover).
+fn take_cover(song: &mut Song) -> Option<Song> {
+    (!song.cover.is_empty()).then(|| Song {
+        hash: song.hash,
+        cover_name: std::mem::take(&mut song.cover_name),
+        cover: std::mem::take(&mut song.cover),
+        ..Song::default()
+    })
+}
+
 /// packet songs against the known ones (by hex hash): `(songs with a file
-/// to write, the local file to write over for each, metadata-only updates)`
-/// — see the module rules.
+/// to write, the local file to write over for each, metadata-only updates,
+/// song covers to write)` — see the module rules.
 fn sort_songs(
     songs: Vec<Song>,
     known: &HashMap<String, TrackSyncRow>,
     rewrite_files: bool,
-) -> (Vec<Song>, Vec<Option<PathBuf>>, Vec<TrackSyncRow>) {
+) -> SortedSongs {
     let newer = |remote: Option<u64>, local: Option<u64>| remote.unwrap_or(0) > local.unwrap_or(0);
-    let (mut files, mut local, mut metas) = (Vec::new(), Vec::new(), Vec::new());
-    for song in songs {
+    let (mut files, mut local, mut metas, mut covers) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for mut song in songs {
         let music = Track::is_music(&song.data);
         match known.get(&hex(song.hash)) {
             None if music => {
+                covers.extend(take_cover(&mut song));
                 files.push(song);
                 local.push(None);
             }
@@ -452,6 +498,7 @@ fn sort_songs(
                     && song.meta.is_some()
                     && newer(song.updated_at_file, row.updated_at_file) =>
             {
+                covers.extend(take_cover(&mut song));
                 files.push(song);
                 local.push(Some(row.path.clone()));
             }
@@ -466,11 +513,12 @@ fn sort_songs(
                         meta: meta_from_packet(meta),
                         ..row.clone()
                     });
+                    covers.extend(take_cover(&mut song));
                 }
             }
         }
     }
-    (files, local, metas)
+    (files, local, metas, covers)
 }
 
 /// `Outdated` if the packet is older than the local playlists (see the
@@ -611,7 +659,7 @@ mod tests {
                     updated_at: None,
                     hashes: Vec::new(),
                 };
-                self.db.save_import(&[], &[], &[row], &[]).unwrap();
+                self.db.save_import(&[], &[], &[], &[row], &[]).unwrap();
                 return;
             };
             let mut p = DbPlaylist::from_tracks(vec![]);
@@ -906,6 +954,7 @@ mod tests {
             updated_at: Some(updated),
             updated_at_file: Some(updated_file),
             meta: Some(meta(title)),
+            ..Song::default()
         }];
         codec::encode(Version::V0_12, &songs, &[]).unwrap()
     }
@@ -968,6 +1017,56 @@ mod tests {
         assert_eq!(tracks.len(), 1);
         assert_eq!((tracks[0].1.clone(), tracks[0].2.clone()), (hex(1), moved));
         assert_eq!(title_of(&l, 1), ("v2".into(), Some(30), Some(30)));
+    }
+
+    /// `dated` with a cover file of song 1.
+    fn dated_with_cover(updated: u64, data: Vec<u8>) -> Vec<u8> {
+        let mut packet = codec::decode(&dated("t", updated, updated, data)).unwrap();
+        packet.songs[0].cover_name = "front.gif".into();
+        packet.songs[0].cover = b"GIF89a".to_vec();
+        codec::encode(Version::V0_12, &packet.songs, &[]).unwrap()
+    }
+
+    fn cover_of(l: &Local, hash: u128) -> Option<PathBuf> {
+        l.db.get_track_sync(&[hex(hash)]).unwrap()[0].cover_art.clone()
+    }
+
+    #[test]
+    fn song_cover_is_written_for_a_new_song() {
+        let l = Local::new("song-cover");
+        let session = prepare(&l, &dated_with_cover(5, mp3()), false, false).unwrap();
+        assert_eq!(
+            file_names(&session),
+            [
+                (FFIImportFileKind::Song, "one.mp3".into()),
+                (FFIImportFileKind::SongCover, "front.gif".into())
+            ]
+        );
+        let paths = l.write_all(&session);
+        assert_eq!(commit(&l, &session, &paths), Ok(()));
+        assert_eq!(cover_of(&l, 1), Some(l.root.join("front.gif")));
+    }
+
+    #[test]
+    fn song_cover_follows_newer_metadata_of_a_known_song() {
+        let l = Local::new("song-cover-known");
+        let session = prepare(&l, &dated("t", 10, 10, mp3()), false, false).unwrap();
+        let paths = l.write_all(&session);
+        commit(&l, &session, &paths).unwrap();
+
+        // older metadata: the cover is not taken either.
+        let session = prepare(&l, &dated_with_cover(9, vec![]), false, false).unwrap();
+        assert!(session.files.is_empty());
+        // newer: the cover comes with the metadata.
+        let session = prepare(&l, &dated_with_cover(20, vec![]), false, false).unwrap();
+        assert_eq!(file_names(&session), [(FFIImportFileKind::SongCover, "front.gif".into())]);
+        let paths = l.write_all(&session);
+        assert_eq!(commit(&l, &session, &paths), Ok(()));
+        assert_eq!(cover_of(&l, 1), Some(l.root.join("front.gif")));
+        // a newer packet without a cover keeps the local one.
+        let session = prepare(&l, &dated("t", 30, 30, vec![]), false, false).unwrap();
+        commit(&l, &session, &[]).unwrap();
+        assert_eq!(cover_of(&l, 1), Some(l.root.join("front.gif")));
     }
 
     #[test]

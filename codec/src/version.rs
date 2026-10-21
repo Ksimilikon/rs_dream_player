@@ -13,8 +13,10 @@ pub enum Version {
     V0_1 = 1,
     /// v0.11: v0.1 + the deleted playlists section (soft deletion).
     V0_11 = 2,
-    /// v0.12: v0.11 + the song info section (change dates and db metadata
-    /// of the songs).
+    /// v0.12: v0.11 where every section carries everything about its
+    /// entity: the songs section — the change dates, db metadata and covers
+    /// of the songs; the playlists section — the playlist covers (there is
+    /// no covers section).
     V0_12 = 3,
 }
 
@@ -27,8 +29,9 @@ impl Version {
         self != Version::V0_1
     }
 
-    /// the version carries the song info section.
-    pub fn has_song_info(self) -> bool {
+    /// the songs section carries the song dates, metadata and covers, the
+    /// playlists section — the playlist covers (no covers section).
+    pub fn full_sections(self) -> bool {
         self as u32 >= Version::V0_12 as u32
     }
 }

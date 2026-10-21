@@ -5,7 +5,9 @@
 //!   -> `UnsupportedVersion`.
 //! - v0.12+ packs from the db carry the song change dates and the metadata
 //!   the db keeps (title, album, artists, genres, labels, volume); on import
-//!   the newer metadata of a known song is applied (see [`import`]).
+//!   the newer metadata of a known song is applied (see [`import`]). The
+//!   songs section holds everything about the music, the playlists section
+//!   only refers to the songs by hash.
 //! - deleted playlists (soft deletion, v0.11+) go into a library packet so
 //!   the receiver deletes them too; v0.1 can't carry them.
 //! - every function returns [`FFICdcStatus`] (`0` = ok), results go through
@@ -16,9 +18,13 @@
 //! - the `with_audio`/`with_names` flags exist in every function: `false` ->
 //!   song audio / file names are not packed (length 0 in the packet) or not
 //!   returned on unpack (null). Playlist names are not affected.
-//! - the `with_covers` flag exists in every function that has playlists:
-//!   playlist covers are read from disk by OS path and packed as the last
-//!   section together with the file name (a format hint for the receiver).
+//! - the `with_covers` flag exists in every pack / unpack function: covers
+//!   are read from disk by OS path and packed together with the file name (a
+//!   format hint for the receiver). Playlist covers — always; song covers
+//!   (v0.12+) — only the db cover file that is not embedded into the music
+//!   file (an embedded one travels inside the file). Before v0.12 the
+//!   playlist covers are the last section, in v0.12+ every cover lies in the
+//!   section of its song / playlist.
 //! - playlist dates (`created_at`/`updated_at`, unix seconds) are always
 //!   packed — they later decide which playlist version is the genuine one
 //!   across devices.
@@ -35,6 +41,7 @@ use std::{
     ptr, slice,
 };
 
+use audio_structs::track_metadata::TrackMetadata;
 use codec::{CodecError, DeletedPlaylist, Playlist, Song, SongMeta, Version};
 use storage::db::{DeletedPlaylistRow, PlaylistHashRow, TrackMetaRow, TrackSyncRow};
 
@@ -136,6 +143,10 @@ pub struct FFIPacketSong {
     pub name: *mut c_char, // null: no name / `with_names == false`
     pub data: *mut u8,     // null: no audio / `with_audio == false`
     pub data_len: usize,
+
+    pub cover_name: *mut c_char, // null: no name / `with_covers == false`
+    pub cover: *mut u8,          // null: no cover (v0.12+) / `with_covers == false`
+    pub cover_len: usize,
 }
 
 /// one playlist of an unpacked packet.
@@ -258,6 +269,17 @@ pub(crate) fn read_cover(path: Option<&Path>) -> (String, Vec<u8>) {
         .unwrap_or_default()
 }
 
+/// song cover to pack: the db cover file `cover`, unless the music file
+/// `audio` already embeds the same picture (then it travels inside the file
+/// and there is no cover here).
+pub(crate) fn read_song_cover(cover: Option<&Path>, audio: &Path) -> (String, Vec<u8>) {
+    let (name, bytes) = read_cover(cover);
+    match !bytes.is_empty() && TrackMetadata::read_cover(audio).as_ref() == Some(&bytes) {
+        true => Default::default(),
+        false => (name, bytes),
+    }
+}
+
 /// what to pack from the db.
 enum Selection<'a> {
     /// all tracks and all playlists.
@@ -319,7 +341,7 @@ fn pack_from_db(
                 )
             }
         };
-        let infos: HashMap<String, TrackSyncRow> = match version.has_song_info() {
+        let infos: HashMap<String, TrackSyncRow> = match version.full_sections() {
             true => {
                 let hashes: Vec<String> = tracks.iter().map(|(_, h, _)| h.clone()).collect();
                 db.get_track_sync(&hashes)
@@ -338,7 +360,17 @@ fn pack_from_db(
         .map(|(_, hash, path)| {
             let song = song_from_db(&hash, &path, with_audio, with_names)?;
             Ok(match infos.get(&hash) {
-                Some(row) => with_info(song, row),
+                Some(row) => {
+                    let (cover_name, cover) = match with_covers {
+                        true => read_song_cover(row.cover_art.as_deref(), &path),
+                        false => Default::default(),
+                    };
+                    Song {
+                        cover_name,
+                        cover,
+                        ..with_info(song, row)
+                    }
+                }
                 None => song,
             })
         })
@@ -442,7 +474,7 @@ fn playlist_from_db(row: PlaylistHashRow, with_covers: bool) -> Result<Playlist,
 }
 
 /// packet song -> FFI (honouring the flags).
-fn song_to_ffi(song: Song, with_audio: bool, with_names: bool) -> FFIPacketSong {
+fn song_to_ffi(song: Song, with_audio: bool, with_names: bool, with_covers: bool) -> FFIPacketSong {
     let name = match with_names && !song.name.is_empty() {
         true => to_c(&song.name),
         false => ptr::null_mut(),
@@ -451,11 +483,18 @@ fn song_to_ffi(song: Song, with_audio: bool, with_names: bool) -> FFIPacketSong 
         true => vec_to_raw(song.data),
         false => (ptr::null_mut(), 0),
     };
+    let (cover_name, (cover, cover_len)) = match with_covers {
+        true => (non_empty_to_c(&song.cover_name), vec_to_raw(song.cover)),
+        false => (ptr::null_mut(), (ptr::null_mut(), 0)),
+    };
     FFIPacketSong {
         hash: song.hash.to_be_bytes(),
         name,
         data,
         data_len,
+        cover_name,
+        cover,
+        cover_len,
     }
 }
 
@@ -499,14 +538,17 @@ fn playlist_to_ffi(playlist: Playlist, with_covers: bool) -> FFIPacketPlaylist {
 ///
 /// # Safety
 /// see `cdc_encode`.
+#[allow(clippy::too_many_arguments)]
 unsafe fn songs_from_c(
     count: usize,
     hashes: *const [u8; 16],
     names: *const *const c_char,
     data: *const *const u8,
     data_lens: *const usize,
+    covers: *const *const c_char,
     with_audio: bool,
     with_names: bool,
+    with_covers: bool,
 ) -> Result<Vec<Song>, FFICdcStatus> {
     let hashes = unsafe { raw_slice(hashes, count) }.ok_or(FFICdcStatus::NullPointer)?;
     let names = match with_names {
@@ -518,6 +560,10 @@ unsafe fn songs_from_c(
             (Some(d), Some(l)) => Some((d, l)),
             _ => return Err(FFICdcStatus::NullPointer),
         },
+        false => None,
+    };
+    let covers = match with_covers {
+        true => Some(unsafe { raw_slice(covers, count) }.ok_or(FFICdcStatus::NullPointer)?),
         false => None,
     };
 
@@ -533,14 +579,35 @@ unsafe fn songs_from_c(
                 .to_vec(),
             None => Vec::new(),
         };
+        let (cover_name, cover) = match covers {
+            Some(c) => unsafe { cover_from_c(c[i]) }?,
+            None => Default::default(),
+        };
         songs.push(Song {
             hash: u128::from_be_bytes(*hash),
             name,
             data,
+            cover_name,
+            cover,
             ..Song::default()
         });
     }
     Ok(songs)
+}
+
+/// a cover by the OS path passed to `cdc_encode`: `(file name, bytes)`;
+/// null = no cover. The path is given explicitly, so an unreadable file is
+/// `ReadFailed`.
+///
+/// # Safety
+/// `p` is null or a nul-terminated string.
+unsafe fn cover_from_c(p: *const c_char) -> Result<(String, Vec<u8>), FFICdcStatus> {
+    if p.is_null() {
+        return Ok(Default::default());
+    }
+    let path = crate::ptr_to_path(p).map_err(|_| FFICdcStatus::InvalidUtf8)?;
+    let bytes = std::fs::read(&path).map_err(|_| FFICdcStatus::ReadFailed)?;
+    Ok((file_name(&path), bytes))
 }
 
 /// playlists from the parallel arrays of `cdc_encode`.
@@ -582,15 +649,9 @@ unsafe fn playlists_from_c(
     for i in 0..count {
         let (own, tail) = rest.split_at(lens[i]);
         rest = tail;
-        let (cover_name, cover) = match covers.map(|c| c[i]) {
-            Some(p) if !p.is_null() => match crate::ptr_to_path(p) {
-                Ok(path) => (
-                    file_name(&path),
-                    std::fs::read(&path).map_err(|_| FFICdcStatus::ReadFailed)?,
-                ),
-                Err(_) => return Err(FFICdcStatus::InvalidUtf8),
-            },
-            _ => (String::new(), Vec::new()),
+        let (cover_name, cover) = match covers {
+            Some(c) => unsafe { cover_from_c(c[i]) }?,
+            None => Default::default(),
         };
         playlists.push(Playlist {
             name: unsafe { c_to_name(names[i]) }?,
@@ -612,7 +673,11 @@ unsafe fn playlists_from_c(
 /// - `hashes` — required when `songs_len > 0`;
 /// - `names` — required with `with_names`; a null element = no name;
 /// - `data`/`data_lens` — required with `with_audio`; a null `data[i]` is
-///   allowed only when `data_lens[i] == 0`.
+///   allowed only when `data_lens[i] == 0`;
+/// - `covers` — OS paths to song covers (v0.12+), required with
+///   `with_covers`; a null element = no cover. Pass only a cover that is not
+///   embedded into the music file. The file bytes and its name go into the
+///   packet; an unreadable file is `ReadFailed`.
 ///
 /// playlists (length `playlists_len`):
 /// - `pl_names` — required when `playlists_len > 0`; a null element = no name;
@@ -640,6 +705,7 @@ pub unsafe extern "C" fn cdc_encode(
     names: *const *const c_char,
     data: *const *const u8,
     data_lens: *const usize,
+    covers: *const *const c_char,
     playlists_len: usize,
     pl_names: *const *const c_char,
     pl_tracks: *const [u8; 16],
@@ -660,7 +726,17 @@ pub unsafe extern "C" fn cdc_encode(
         let res = (|| {
             let version = Version::try_from(version)?;
             let songs = unsafe {
-                songs_from_c(songs_len, hashes, names, data, data_lens, with_audio, with_names)
+                songs_from_c(
+                    songs_len,
+                    hashes,
+                    names,
+                    data,
+                    data_lens,
+                    covers,
+                    with_audio,
+                    with_names,
+                    with_covers,
+                )
             }?;
             let playlists = unsafe {
                 playlists_from_c(
@@ -712,7 +788,7 @@ pub unsafe extern "C" fn cdc_decode(
             packet
                 .songs
                 .into_iter()
-                .map(|s| song_to_ffi(s, with_audio, with_names))
+                .map(|s| song_to_ffi(s, with_audio, with_names, with_covers))
                 .collect::<Vec<_>>(),
         );
         let (playlists, playlists_len) = vec_to_raw(
@@ -759,8 +835,8 @@ pub unsafe extern "C" fn cdc_pack_library(
 }
 
 /// packet of db tracks by their ids (`ids[..ids_len]`, order is kept),
-/// without playlists. Any id not found -> `TrackNotFound`. Free it with
-/// `cdc_free_bytes`.
+/// without playlists (`with_covers` — the song covers, v0.12+). Any id not
+/// found -> `TrackNotFound`. Free it with `cdc_free_bytes`.
 ///
 /// # Safety
 /// `ids` is valid for `ids_len` elements (null is allowed when
@@ -772,6 +848,7 @@ pub unsafe extern "C" fn cdc_pack_tracks(
     ids_len: usize,
     with_audio: bool,
     with_names: bool,
+    with_covers: bool,
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
 ) -> FFICdcStatus {
@@ -782,7 +859,7 @@ pub unsafe extern "C" fn cdc_pack_tracks(
         let Some(ids) = (unsafe { raw_slice(ids, ids_len) }) else {
             return FFICdcStatus::NullPointer;
         };
-        let res = pack_from_db(version, Selection::Tracks(ids), with_audio, with_names, false);
+        let res = pack_from_db(version, Selection::Tracks(ids), with_audio, with_names, with_covers);
         unsafe { finish_bytes(res, out_ptr, out_len) }
     })
 }
@@ -852,6 +929,7 @@ mod tests {
                 names,
                 data,
                 lens,
+                ptr::null(),
                 0,
                 ptr::null(),
                 ptr::null(),
@@ -952,6 +1030,7 @@ mod tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
+                ptr::null(),
                 2,
                 pl_names.as_ptr(),
                 pl_tracks.as_ptr(),
@@ -1000,6 +1079,70 @@ mod tests {
         let pls = unsafe { slice::from_raw_parts(pk.playlists, pk.playlists_len) };
         assert!(pls[0].cover.is_null() && pls[0].cover_name.is_null());
         assert!(pls[0].has_created_at);
+        unsafe { cdc_free_packet(pk) };
+
+        unsafe { cdc_free_bytes(p, l) };
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn song_covers_roundtrip_v0_12() {
+        let dir = std::env::temp_dir().join(format!("cdc_song_cover_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cover_path = dir.join("front.gif");
+        std::fs::write(&cover_path, b"GIF89a").unwrap();
+        let cover_c = std::ffi::CString::new(cover_path.to_str().unwrap()).unwrap();
+
+        let hashes = [[1u8; 16], [2u8; 16]];
+        let covers = [cover_c.as_ptr(), ptr::null()];
+        let (mut p, mut l) = (ptr::null_mut(), 0);
+        let st = unsafe {
+            cdc_encode(
+                3,
+                2,
+                hashes.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                covers.as_ptr(),
+                0,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                false,
+                false,
+                true,
+                &mut p,
+                &mut l,
+            )
+        };
+        assert_eq!(st, FFICdcStatus::Ok);
+
+        let mut pk = FFIPacket::empty();
+        assert_eq!(
+            unsafe { cdc_decode(p, l, false, false, true, &mut pk) },
+            FFICdcStatus::Ok
+        );
+        let songs = unsafe { slice::from_raw_parts(pk.songs, pk.songs_len) };
+        assert_eq!(unsafe { CStr::from_ptr(songs[0].cover_name) }, c"front.gif");
+        assert_eq!(
+            unsafe { slice::from_raw_parts(songs[0].cover, songs[0].cover_len) },
+            b"GIF89a"
+        );
+        assert!(songs[1].cover.is_null() && songs[1].cover_name.is_null());
+        unsafe { cdc_free_packet(pk) };
+
+        // without covers on unpack.
+        let mut pk = FFIPacket::empty();
+        assert_eq!(
+            unsafe { cdc_decode(p, l, false, false, false, &mut pk) },
+            FFICdcStatus::Ok
+        );
+        let songs = unsafe { slice::from_raw_parts(pk.songs, pk.songs_len) };
+        assert!(songs[0].cover.is_null() && songs[0].cover_name.is_null());
         unsafe { cdc_free_packet(pk) };
 
         unsafe { cdc_free_bytes(p, l) };

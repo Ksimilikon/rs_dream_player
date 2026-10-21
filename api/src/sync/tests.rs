@@ -549,6 +549,7 @@ fn a_later_change_beats_a_deletion() {
             &[],
             &[],
             &[],
+            &[],
             &[storage::db::DeletedPlaylistRow {
                 name: "mix".into(),
                 deleted_at: 100,
@@ -655,4 +656,56 @@ fn a_newer_playlist_cover_syncs() {
     let got = client.db.get_playlist_hashes(None).unwrap().remove(0);
     let got = got.cover_art.expect("the cover reached the client");
     assert_eq!(fs::read(got).unwrap(), fs::read(&cover).unwrap());
+}
+
+/// a valid 1×1 PNG — an image lofty can embed.
+const PNG_1X1: &[u8] = &[
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0,
+    0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 0, 0, 3, 1,
+    1, 0, 201, 254, 146, 239, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
+
+#[test]
+fn a_song_cover_file_syncs_an_embedded_one_stays_in_the_file() {
+    let host = Device::new();
+    let client = Device::new();
+    host.playlist(
+        "mix",
+        10,
+        &[("a.mp3", "2.mp3"), ("b.mp3", "was_wallen_wir_trinken.mp3")],
+    );
+    let (mut hs, mut cs) = sessions(&host, &client);
+    pump(&host, &mut hs, &client, &mut cs);
+
+    // a: a cover file only (gif can't be embedded); b: the same picture as
+    // a cover file and embedded into the music file.
+    let covers = host.dir.path().join("covers");
+    fs::create_dir_all(&covers).unwrap();
+    let gif = covers.join("front.gif");
+    fs::write(&gif, b"GIF89a\x01\x00\x01\x00").unwrap();
+    let png = covers.join("b.png");
+    fs::write(&png, PNG_1X1).unwrap();
+    let (a, b) = (song_row(&host, "a.mp3"), song_row(&host, "b.mp3"));
+    host.db.set_track_cover(a.id, Some(&gif)).unwrap();
+    audio_structs::track_metadata::TrackMetadata::write_cover(&b.path, PNG_1X1).unwrap();
+    host.db.set_track_cover(b.id, Some(&png)).unwrap();
+    host.db.set_track_file_changed(b.id).unwrap();
+
+    let (mut hs, mut cs) = again(&host, &client);
+    let (he, _) = pump(&host, &mut hs, &client, &mut cs);
+    assert_eq!(he.last(), Some(&Event::Done), "{he:?}");
+
+    // a: the metadata update brought the cover file.
+    let ca = song_row(&client, "a.mp3");
+    let got = ca.cover_art.expect("the cover file reached the client");
+    assert_eq!(fs::read(got).unwrap(), fs::read(&gif).unwrap());
+    assert_eq!(ca.updated_at, song_row(&host, "a.mp3").updated_at);
+    // b: the newer file carries the picture; no separate cover file.
+    let cb = song_row(&client, "b.mp3");
+    assert_eq!(cb.cover_art, None);
+    assert_eq!(
+        audio_structs::track_metadata::TrackMetadata::read_cover(&cb.path).as_deref(),
+        Some(PNG_1X1)
+    );
+    assert!(!client.music().join("b.png").exists());
 }

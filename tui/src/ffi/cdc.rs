@@ -10,7 +10,8 @@ use api::cdc::{self, FFICdcStatus, FFIImportFileKind, FFIImportFiles, ImportSess
 use api::mem;
 
 /// packet format version the frontend writes (`codec::Version::V0_12`:
-/// v0.1 + deleted playlists + song change dates and metadata).
+/// v0.1 + deleted playlists; the songs section carries the song dates,
+/// metadata and cover files, the playlists section — the playlist covers).
 const PACKET_VERSION: u32 = 3;
 
 /// what to put into the packet.
@@ -45,7 +46,7 @@ pub fn describe(st: FFICdcStatus) -> &'static str {
         S::NameTooLong => "a name is too long for the packet",
         S::DataTooLong => "a file is too large for the packet (> 4 GiB)",
         S::DuplicateSection => "packet has a duplicate section",
-        S::CountMismatch => "packet covers don't match playlists",
+        S::CountMismatch => "packet covers don't match playlists (v0.1 / v0.11 packet)",
         S::Outdated => "packet is outdated: local playlists are newer (enable force to override)",
         S::NullPointer => "internal error: null pointer",
         S::NoDatabase => "core runs without a database",
@@ -97,6 +98,7 @@ pub fn pack(what: Export<'_>, flags: Flags) -> Result<Vec<u8>, FFICdcStatus> {
                 ids.len(),
                 flags.audio,
                 flags.names,
+                flags.covers,
                 &mut p,
                 &mut l,
             ),
@@ -115,6 +117,7 @@ pub fn pack(what: Export<'_>, flags: Flags) -> Result<Vec<u8>, FFICdcStatus> {
 
 /// one file that has to be written for the import.
 pub struct ImportFile<'a> {
+    /// a song / playlist cover (not a song file).
     pub cover: bool,
     pub name: String,
     pub data: &'a [u8],
@@ -152,7 +155,7 @@ impl PreparedImport {
         unsafe { std::slice::from_raw_parts(self.files.ptr, self.files.len) }
             .iter()
             .map(|f| ImportFile {
-                cover: f.kind == FFIImportFileKind::Cover,
+                cover: f.kind != FFIImportFileKind::Song,
                 name: unsafe { CStr::from_ptr(f.name) }
                     .to_string_lossy()
                     .into_owned(),

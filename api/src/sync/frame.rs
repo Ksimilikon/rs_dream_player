@@ -38,8 +38,8 @@ pub enum Tag {
     /// encrypted codec packet: what the receiver lacks — song hashes and
     /// playlist names.
     Want = 3,
-    /// encrypted codec packet: a portion of the wanted songs (with files),
-    /// the last portion — the wanted playlists with covers.
+    /// encrypted codec packet: a portion of the wanted songs (with files
+    /// and covers), the last portion — the wanted playlists with covers.
     Data = 4,
     /// the sender has no more `Data` in this round (no payload).
     Done = 5,

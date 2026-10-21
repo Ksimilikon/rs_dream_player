@@ -129,6 +129,15 @@ object Native {
     @JvmStatic external fun idxSetTrackColor(id: Long, color: String?): Int
     @JvmStatic external fun idxSetTrackLabel(id: Long, label: String?): Int
 
+    /**
+     * embeds the picture at [imagePath] (png / jpg only) as the front cover
+     * into the tags of the track's audio file; the db is not changed (call
+     * [idxSetTrackFileChanged] after). `NOT_FOUND` — no such track / no file,
+     * `INVALID_ARGUMENT` — the picture is unreadable or of another format,
+     * `WRITE_FAILED` — the audio file couldn't be written.
+     */
+    @JvmStatic external fun idxEmbedTrackCover(id: Long, imagePath: String): Int
+
     /** new file path after a rename on disk. */
     @JvmStatic external fun idxSetTrackPath(id: Long, path: String): Int
 

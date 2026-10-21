@@ -326,6 +326,20 @@ string_setter! {
     Java_dev_dreamplayer_core_Native_idxSetTrackLabel => idx::idx_set_track_label;
 }
 
+/// embeds the picture at `imagePath` (png / jpg) into the track's audio file tags.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_dreamplayer_core_Native_idxEmbedTrackCover<'c>(
+    mut env: EnvUnowned<'c>,
+    _class: JClass<'c>,
+    id: i64,
+    image_path: JString<'c>,
+) -> i32 {
+    run(&mut env, |env| {
+        let image = opt_string(env, &image_path)?.map(|p| cstring(&p));
+        Ok(code(unsafe { idx::idx_embed_track_cover(id, opt_ptr(&image)) }))
+    })
+}
+
 /// new file path of a track (after a rename on disk).
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSetTrackPath<'c>(

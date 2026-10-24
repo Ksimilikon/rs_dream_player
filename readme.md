@@ -16,6 +16,8 @@ The core provides an API for third-party library integration (app mods), allowin
 
 # Interface Architecture / Архитектура взаимодействия
 
+WARNING: now core is beta version and UNSTABLE. FFI may change a lot. 
+
 [ENG]
 The core is strictly designed as a headless system component. Any communication 
 with the core (both from Frontends and Plugins/Mods) is strictly limited to **FFI 

@@ -29,6 +29,24 @@ pub struct TrackMetadata {
     pub params: Option<TrackMetadataParams>,
 }
 
+/// a partial edit of the tag fields (file tags and the db mirror them):
+/// `None` — leave the field as is. Lists are rewritten entirely (an empty
+/// list clears them); `album: Some(None)` clears the album.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TagEdit<'a> {
+    pub title: Option<&'a str>,
+    pub artists: Option<&'a [String]>,
+    pub album: Option<Option<&'a str>>,
+    pub genres: Option<&'a [String]>,
+}
+
+impl TagEdit<'_> {
+    /// no field to change.
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none() && self.artists.is_none() && self.album.is_none() && self.genres.is_none()
+    }
+}
+
 /// init for loaded track
 #[derive(Debug)]
 pub struct TrackMetadataParams {
@@ -95,45 +113,49 @@ impl TrackMetadata {
         })
     }
 
-    /// writes `title`, the `artists` list, `album` and the `genres` list into the
-    /// file's tags at `path`. Creates a primary tag of the file's native type if
-    /// one doesn't exist yet, so even an untagged file becomes editable.
-    /// `album == None` clears the album tag.
-    pub fn write_tags(
-        path: &Path,
-        title: &str,
-        artists: &[String],
-        album: Option<&str>,
-        genres: &[String],
-    ) -> Result<(), Box<dyn Error>> {
+    /// writes the fields of `edit` into the file's tags at `path`; a `None`
+    /// field is left as is (an empty edit doesn't touch the file). Creates a
+    /// primary tag of the file's native type if one doesn't exist yet, so
+    /// even an untagged file becomes editable.
+    pub fn write_tags(path: &Path, edit: &TagEdit) -> Result<(), Box<dyn Error>> {
+        if edit.is_empty() {
+            return Ok(());
+        }
         let mut tagged_file = Probe::open(path)?.guess_file_type()?.read()?;
         ensure_primary_tag(&mut tagged_file);
         let tag = tagged_file
             .primary_tag_mut()
             .ok_or("no writable tag for this file type")?;
 
-        tag.insert_text(ItemKey::TrackTitle, title.to_string());
+        if let Some(title) = edit.title {
+            tag.insert_text(ItemKey::TrackTitle, title.to_string());
+        }
         // rewrite the whole artist list: drop existing items, then push each one.
-        tag.remove_key(ItemKey::TrackArtist);
-        for artist in artists {
-            tag.push(TagItem::new(
-                ItemKey::TrackArtist,
-                ItemValue::Text(artist.clone()),
-            ));
+        if let Some(artists) = edit.artists {
+            tag.remove_key(ItemKey::TrackArtist);
+            for artist in artists {
+                tag.push(TagItem::new(
+                    ItemKey::TrackArtist,
+                    ItemValue::Text(artist.clone()),
+                ));
+            }
         }
 
         // album: set or clear.
-        match album {
-            Some(a) => {
+        match edit.album {
+            Some(Some(a)) => {
                 tag.insert_text(ItemKey::AlbumTitle, a.to_string());
             }
-            None => tag.remove_key(ItemKey::AlbumTitle),
+            Some(None) => tag.remove_key(ItemKey::AlbumTitle),
+            None => {}
         }
 
         // rewrite the whole genre list.
-        tag.remove_key(ItemKey::Genre);
-        for genre in genres {
-            tag.push(TagItem::new(ItemKey::Genre, ItemValue::Text(genre.clone())));
+        if let Some(genres) = edit.genres {
+            tag.remove_key(ItemKey::Genre);
+            for genre in genres {
+                tag.push(TagItem::new(ItemKey::Genre, ItemValue::Text(genre.clone())));
+            }
         }
 
         tag.save_to_path(path, WriteOptions::default())?;
@@ -219,12 +241,16 @@ mod tests {
         let path = dir.path().join("copy.mp3");
         fs::copy(&src, &path).unwrap();
 
+        let artists = ["Alice".to_string(), "Bob".to_string()];
+        let genres = ["Rock".to_string(), "Pop".to_string()];
         TrackMetadata::write_tags(
             &path,
-            "My New Title",
-            &["Alice".into(), "Bob".into()],
-            Some("Greatest Hits"),
-            &["Rock".into(), "Pop".into()],
+            &TagEdit {
+                title: Some("My New Title"),
+                artists: Some(&artists),
+                album: Some(Some("Greatest Hits")),
+                genres: Some(&genres),
+            },
         )
         .unwrap();
 
@@ -233,6 +259,42 @@ mod tests {
         assert_eq!(meta.artist, vec!["Alice".to_string(), "Bob".to_string()]);
         assert_eq!(meta.album.as_deref(), Some("Greatest Hits"));
         assert_eq!(meta.genres, vec!["Rock".to_string(), "Pop".to_string()]);
+    }
+
+    #[test]
+    fn write_tags_leaves_none_fields_alone() {
+        let src = fixture();
+        if !src.exists() {
+            eprintln!("skipping: fixture missing at {}", src.display());
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("copy.mp3");
+        fs::copy(&src, &path).unwrap();
+
+        let artists = ["Alice".to_string()];
+        let genres = ["Rock".to_string()];
+        let full = TagEdit {
+            title: Some("Title"),
+            artists: Some(&artists),
+            album: Some(Some("Album")),
+            genres: Some(&genres),
+        };
+        TrackMetadata::write_tags(&path, &full).unwrap();
+
+        // only the title changes; the album is cleared explicitly.
+        let partial = TagEdit {
+            title: Some("Other"),
+            album: Some(None),
+            ..TagEdit::default()
+        };
+        TrackMetadata::write_tags(&path, &partial).unwrap();
+
+        let meta = TrackMetadata::from_path(&path).unwrap();
+        assert_eq!(meta.title, "Other");
+        assert_eq!(meta.artist, vec!["Alice".to_string()]);
+        assert_eq!(meta.album, None);
+        assert_eq!(meta.genres, vec!["Rock".to_string()]);
     }
 
     /// a valid 1×1 PNG (a red pixel) — to check cover writing / reading.

@@ -141,32 +141,46 @@ pub fn index_dir(dir: Option<&str>) -> bool {
     ok(unsafe { idx::idx_index_dir(as_ptr(&c)) })
 }
 
-/// edits the title and/or the artist list (None — leave the field alone).
-pub fn set_track_meta(id: i64, title: Option<&str>, artists: Option<&[String]>) -> bool {
+/// edits the tags in the file and the db; a `None` field is left alone.
+/// An empty album / genre list clears it.
+pub fn set_track_meta(
+    id: i64,
+    title: Option<&str>,
+    artists: Option<&[String]>,
+    album: Option<&str>,
+    genres: Option<&[String]>,
+) -> bool {
     let title_c = opt_cstr(title);
-    // keep the artist array alive together with the pointers into it.
-    let artist_cs: Option<Vec<CString>> =
-        artists.map(|a| a.iter().map(|s| cstr(s)).collect());
-    let artist_ptrs: Option<Vec<*const std::os::raw::c_char>> =
-        artist_cs.as_ref().map(|v| v.iter().map(|c| c.as_ptr()).collect());
-    let (aptr, alen) = match &artist_ptrs {
-        Some(v) => (v.as_ptr(), v.len()),
-        None => (ptr::null(), 0),
-    };
-    ok(unsafe { idx::idx_set_track_meta(id, as_ptr(&title_c), aptr, alen) })
+    let album_c = opt_cstr(album);
+    // keep the string arrays alive together with the pointers into them.
+    let artists = opt_cstr_array(artists);
+    let genres = opt_cstr_array(genres);
+    let (aptr, alen) = artists.ptrs();
+    let (gptr, glen) = genres.ptrs();
+    ok(unsafe {
+        idx::idx_set_track_meta(id, as_ptr(&title_c), aptr, alen, as_ptr(&album_c), gptr, glen)
+    })
 }
 
-/// album (None -> clear).
-pub fn set_track_album(id: i64, album: Option<&str>) -> bool {
-    let c = opt_cstr(album);
-    ok(unsafe { idx::idx_set_track_album(id, as_ptr(&c)) })
+/// an optional C string array with the pointers into it (None -> null).
+struct CStrArray {
+    _strings: Vec<CString>,
+    ptrs: Option<Vec<*const std::os::raw::c_char>>,
 }
 
-/// genres (rewrite entirely; empty -> clear).
-pub fn set_track_genres(id: i64, genres: &[String]) -> bool {
-    let cs: Vec<CString> = genres.iter().map(|s| cstr(s)).collect();
-    let ptrs: Vec<*const std::os::raw::c_char> = cs.iter().map(|c| c.as_ptr()).collect();
-    ok(unsafe { idx::idx_set_track_genres(id, ptrs.as_ptr(), ptrs.len()) })
+impl CStrArray {
+    fn ptrs(&self) -> (*const *const std::os::raw::c_char, usize) {
+        match &self.ptrs {
+            Some(v) => (v.as_ptr(), v.len()),
+            None => (ptr::null(), 0),
+        }
+    }
+}
+
+fn opt_cstr_array(list: Option<&[String]>) -> CStrArray {
+    let strings: Vec<CString> = list.unwrap_or_default().iter().map(|s| cstr(s)).collect();
+    let ptrs = list.map(|_| strings.iter().map(|c| c.as_ptr()).collect());
+    CStrArray { _strings: strings, ptrs }
 }
 
 /// cover path (None -> clear).

@@ -560,12 +560,14 @@ impl App {
     /// expanded) and must point to an existing file; with `embed_cover` the
     /// picture is also written into the audio file tags. Err — what failed.
     fn apply_meta(&self, e: MetaEdit) -> Result<(), String> {
-        ffi::db::set_track_meta(e.id, e.title.as_deref(), e.artists.as_deref());
-        if let Some(a) = &e.album {
-            ffi::db::set_track_album(e.id, (!a.is_empty()).then_some(a.as_str()));
-        }
-        if let Some(g) = &e.genres {
-            ffi::db::set_track_genres(e.id, g);
+        if !ffi::db::set_track_meta(
+            e.id,
+            e.title.as_deref(),
+            e.artists.as_deref(),
+            e.album.as_deref(),
+            e.genres.as_deref(),
+        ) {
+            return Err("failed to write tags (file missing / read-only / unsupported format?)".into());
         }
         if let Some(c) = &e.color {
             ffi::db::set_track_color(e.id, (!c.is_empty()).then_some(c.as_str()));

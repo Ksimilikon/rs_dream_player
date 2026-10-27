@@ -261,7 +261,8 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxIndexDir<'c>(
     })
 }
 
-/// title and/or artists (null -> leave as is; artists are rewritten entirely).
+/// tags in the file and the db; every argument: null -> leave as is. Lists
+/// are rewritten entirely (empty -> cleared), an empty album clears it.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSetTrackMeta<'c>(
     mut env: EnvUnowned<'c>,
@@ -269,21 +270,41 @@ pub extern "system" fn Java_dev_dreamplayer_core_Native_idxSetTrackMeta<'c>(
     id: i64,
     title: JString<'c>,
     artists: JObjectArray<'c, JString<'c>>,
+    album: JString<'c>,
+    genres: JObjectArray<'c, JString<'c>>,
 ) -> i32 {
     run(&mut env, |env| {
         let title = opt_string(env, &title)?.map(|t| cstring(&t));
+        let album = opt_string(env, &album)?.map(|a| cstring(&a));
         let artists = match artists.is_null() {
             true => None,
             false => Some(c_string_array(env, &artists)?),
         };
-        let ptrs: Option<Vec<*const c_char>> =
-            artists.as_ref().map(|a| a.iter().map(|c| c.as_ptr()).collect());
-        let (aptr, alen) = match &ptrs {
-            Some(p) => (p.as_ptr(), p.len()),
-            None => (ptr::null(), 0),
+        let genres = match genres.is_null() {
+            true => None,
+            false => Some(c_string_array(env, &genres)?),
         };
-        Ok(code(unsafe { idx::idx_set_track_meta(id, opt_ptr(&title), aptr, alen) }))
+        let aptrs = opt_ptrs(&artists);
+        let gptrs = opt_ptrs(&genres);
+        let (aptr, alen) = slice_or_null(&aptrs);
+        let (gptr, glen) = slice_or_null(&gptrs);
+        Ok(code(unsafe {
+            idx::idx_set_track_meta(id, opt_ptr(&title), aptr, alen, opt_ptr(&album), gptr, glen)
+        }))
     })
+}
+
+/// pointers into an optional C string array (kept alive by the caller).
+fn opt_ptrs(list: &Option<Vec<CString>>) -> Option<Vec<*const c_char>> {
+    list.as_ref().map(|a| a.iter().map(|c| c.as_ptr()).collect())
+}
+
+/// (ptr, len) of an optional pointer array; None -> (null, 0).
+fn slice_or_null(ptrs: &Option<Vec<*const c_char>>) -> (*const *const c_char, usize) {
+    match ptrs {
+        Some(p) => (p.as_ptr(), p.len()),
+        None => (ptr::null(), 0),
+    }
 }
 
 /// genres (rewritten entirely; empty / null -> cleared).

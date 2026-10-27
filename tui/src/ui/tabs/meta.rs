@@ -24,6 +24,8 @@ const LABEL_W: usize = 11;
 struct Field {
     label: &'static str,
     value: TextField,
+    /// the text the editor opened with (an unchanged field isn't sent).
+    initial: String,
 }
 
 pub struct SongEditor {
@@ -42,6 +44,7 @@ impl SongEditor {
         let field = |label, v: &str| Field {
             label,
             value: TextField::new(v),
+            initial: v.to_string(),
         };
         let fields = vec![
             field("TITLE", &track.title),
@@ -71,10 +74,15 @@ impl SongEditor {
         }
     }
 
-    /// builds the edit set (an empty title/artists/cover/color/label field —
-    /// "don't change"; album/genres are always applied, empty clears them).
+    /// builds the edit set: an unchanged field — "don't change" (not sent);
+    /// an empty title/artists/cover/color/label field — "don't change" too;
+    /// an emptied album/genres field clears them.
     fn to_edit(&self) -> MetaEdit {
-        let get = |i: usize| self.fields[i].value.text();
+        let get = |i: usize| {
+            let f = &self.fields[i];
+            let text = f.value.text();
+            (text != f.initial).then_some(text)
+        };
         let split = |s: String| {
             s.split(',')
                 .map(str::trim)
@@ -82,14 +90,18 @@ impl SongEditor {
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         };
-        let non_empty = |s: String| (!s.is_empty()).then_some(s);
+        let non_empty = |s: Option<String>| s.filter(|s| !s.is_empty());
         MetaEdit {
             id: self.id,
             title: non_empty(get(0)),
             artists: non_empty(get(1)).map(split),
-            album: Some(get(2)),
-            genres: Some(split(get(3))),
-            cover: non_empty(get(4)),
+            album: get(2),
+            genres: get(3).map(split),
+            // embedding needs the path even if it wasn't changed.
+            cover: match self.embed_cover {
+                true => non_empty(Some(self.fields[4].value.text())),
+                false => non_empty(get(4)),
+            },
             embed_cover: self.embed_cover,
             color: non_empty(get(5)),
             label: non_empty(get(6)),

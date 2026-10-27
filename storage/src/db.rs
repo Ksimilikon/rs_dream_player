@@ -21,7 +21,7 @@ use std::{
 
 use audio_structs::{
     playlist::Playlist,
-    track_metadata::{TrackMetadata, TrackMetadataParams},
+    track_metadata::{TagEdit, TrackMetadata, TrackMetadataParams},
     track_virtual::TrackVirtual,
 };
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
@@ -456,6 +456,41 @@ impl Db {
         if title.is_some() || artists.is_some() {
             touch_track(&tx, id)?;
         }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// mirrors a tag edit already written into the track file (see
+    /// [`TrackMetadata::write_tags`]) by its id, in one transaction. `None`
+    /// fields are left as is; an empty edit changes nothing. Dates both the
+    /// metadata (`updated_at`) and the file (`updated_at_file`), so the new
+    /// tags and the rewritten file both go out on sync.
+    pub fn set_track_tags(&self, id: i64, edit: &TagEdit) -> Result<(), Box<dyn Error>> {
+        if edit.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        if let Some(t) = edit.title {
+            tx.execute("UPDATE tracks SET title = ?2 WHERE id = ?1", params![id, t])?;
+        }
+        if let Some(list) = edit.artists {
+            write_track_artists(&tx, id, list)?;
+        }
+        if let Some(album) = edit.album {
+            let album_id = upsert_album(&tx, album)?;
+            tx.execute(
+                "UPDATE tracks SET album_id = ?2 WHERE id = ?1",
+                params![id, album_id],
+            )?;
+        }
+        if let Some(list) = edit.genres {
+            write_track_genres(&tx, id, list)?;
+        }
+        let now = unix_now() as i64;
+        tx.execute(
+            "UPDATE tracks SET updated_at = ?2, updated_at_file = ?2 WHERE id = ?1",
+            params![id, now],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -2201,6 +2236,52 @@ mod tests {
         let track = &db.get_tracks(None, None, Some(id), None).unwrap()[0];
         assert_eq!(track.get_metadata().unwrap().title, "New");
         assert_eq!(track.get_metadata().unwrap().artist, vec!["Z".to_string()]);
+    }
+
+    #[test]
+    fn tag_edit_changes_only_given_fields_and_dates_the_file() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        db.save_track(fixture_track(dir.path(), "a.mp3", "Old", "A"))
+            .unwrap();
+        let id = only_track_id(&db);
+        let hash = db.get_track_hashes(None).unwrap()[0].1.clone();
+
+        // an empty edit changes nothing, not even the dates.
+        db.set_track_tags(id, &TagEdit::default()).unwrap();
+        let row = &db.get_track_sync(std::slice::from_ref(&hash)).unwrap()[0];
+        assert_eq!((row.updated_at, row.updated_at_file), (None, None));
+
+        let genres = ["Rock".to_string()];
+        db.set_track_tags(
+            id,
+            &TagEdit {
+                title: Some("New"),
+                album: Some(Some("LP")),
+                genres: Some(&genres),
+                ..TagEdit::default()
+            },
+        )
+        .unwrap();
+        let meta = db.get_tracks(None, None, Some(id), None).unwrap()[0]
+            .get_metadata()
+            .unwrap();
+        assert_eq!(meta.title, "New");
+        assert_eq!(meta.artist, vec!["A".to_string()]);
+        assert_eq!(meta.album.as_deref(), Some("LP"));
+        assert_eq!(meta.genres, genres.to_vec());
+        let row = &db.get_track_sync(std::slice::from_ref(&hash)).unwrap()[0];
+        assert!(row.updated_at.is_some() && row.updated_at_file.is_some());
+
+        // `Some(None)` clears the album, the rest stays.
+        db.set_track_tags(id, &TagEdit { album: Some(None), ..TagEdit::default() })
+            .unwrap();
+        let meta = db.get_tracks(None, None, Some(id), None).unwrap()[0]
+            .get_metadata()
+            .unwrap();
+        assert_eq!(meta.album, None);
+        assert_eq!(meta.title, "New");
+        assert_eq!(meta.genres, genres.to_vec());
     }
 
     #[test]

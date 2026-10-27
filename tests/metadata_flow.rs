@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use audio_structs::track_metadata::TrackMetadata;
+use audio_structs::track_metadata::{TagEdit, TrackMetadata};
 use storage::{DB_FILE_NAME, Db};
 use tempfile::tempdir;
 
@@ -46,19 +46,16 @@ fn scan_edit_and_check_flow() {
         .expect("indexed track has an id");
 
     // --- task 1: metadata editing (file tag + db), including album and genres ---
-    TrackMetadata::write_tags(
-        &a,
-        "Edited Title",
-        &["New Artist".into()],
-        Some("New Album"),
-        &["Rock".into(), "Indie".into()],
-    )
-    .unwrap();
-    db.set_track_meta(id, Some("Edited Title"), Some(&["New Artist".to_string()]))
-        .unwrap();
-    db.set_track_album(id, Some("New Album")).unwrap();
-    db.set_track_genres(id, &["Rock".into(), "Indie".into()])
-        .unwrap();
+    let artists = ["New Artist".to_string()];
+    let genres = ["Rock".to_string(), "Indie".to_string()];
+    let edit = TagEdit {
+        title: Some("Edited Title"),
+        artists: Some(&artists),
+        album: Some(Some("New Album")),
+        genres: Some(&genres),
+    };
+    TrackMetadata::write_tags(&a, &edit).unwrap();
+    db.set_track_tags(id, &edit).unwrap();
 
     // the tag in the file really changed...
     let on_disk = TrackMetadata::from_path(&a).unwrap();
@@ -72,6 +69,15 @@ fn scan_edit_and_check_flow() {
     assert_eq!(meta.title, "Edited Title");
     assert_eq!(meta.album.as_deref(), Some("New Album"));
     assert_eq!(meta.genres, vec!["Indie".to_string(), "Rock".to_string()]);
+
+    // a re-index (every start) reads the edit back from the file, not the old tags.
+    db.index_dir(work.path()).unwrap();
+    let meta = db.get_tracks(None, None, Some(id), None).unwrap()[0]
+        .get_metadata()
+        .unwrap();
+    assert_eq!(meta.title, "Edited Title");
+    assert_eq!(meta.artist, vec!["New Artist".to_string()]);
+    assert_eq!(meta.album.as_deref(), Some("New Album"));
 
     // db-only labels: color and text label.
     db.set_track_color(id, Some("red")).unwrap();

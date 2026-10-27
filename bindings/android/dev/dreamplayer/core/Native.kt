@@ -117,14 +117,30 @@ object Native {
      */
     @JvmStatic external fun idxIndexDir(dir: String?): Int
 
-    /** null field — leave as is; artists are rewritten entirely. */
-    @JvmStatic external fun idxSetTrackMeta(id: Long, title: String?, artists: Array<String>?): Int
+    /**
+     * edits the song tags: writes them into the audio file, then into the db
+     * (the file is dated as changed — no [idxSetTrackFileChanged] needed).
+     * Every null argument — leave the field as is (all null — nothing is
+     * touched). [artists] / [genres] are rewritten entirely, an empty array
+     * clears them; an empty [album] clears it; an empty [title] —
+     * `INVALID_ARGUMENT`. `NOT_FOUND` — no such track / no file,
+     * `WRITE_FAILED` — the file couldn't be written (the db is not changed).
+     */
+    @JvmStatic external fun idxSetTrackMeta(
+        id: Long,
+        title: String?,
+        artists: Array<String>?,
+        album: String?,
+        genres: Array<String>?,
+    ): Int
 
-    /** genres are rewritten entirely; null / empty — cleared. */
+    /** genres only, as in [idxSetTrackMeta]; null / empty — cleared. */
     @JvmStatic external fun idxSetTrackGenres(id: Long, genres: Array<String>?): Int
 
-    // null clears the field.
+    /** album only, as in [idxSetTrackMeta]; null / empty — cleared. */
     @JvmStatic external fun idxSetTrackAlbum(id: Long, album: String?): Int
+
+    // null clears the field.
     @JvmStatic external fun idxSetTrackCover(id: Long, coverPath: String?): Int
     @JvmStatic external fun idxSetTrackColor(id: Long, color: String?): Int
     @JvmStatic external fun idxSetTrackLabel(id: Long, label: String?): Int

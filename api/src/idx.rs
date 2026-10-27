@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 
 use audio_structs::{
-    playlist::Playlist, track_metadata::TrackMetadata, track_virtual::TrackVirtual,
+    playlist::Playlist,
+    track_metadata::{TagEdit, TrackMetadata},
+    track_virtual::TrackVirtual,
 };
 use storage::db::OrphanFilter;
 use storage::traits::indexator::Indexator;
@@ -571,6 +573,18 @@ unsafe fn c_to_strings(ptr: *const *const c_char, len: usize) -> Result<Vec<Stri
         .collect()
 }
 
+/// reads an optional array of C strings: null -> `None` (`len` is ignored),
+/// otherwise as in [`c_to_strings`] (len 0 -> an empty list).
+unsafe fn c_to_opt_strings(
+    ptr: *const *const c_char,
+    len: usize,
+) -> Result<Option<Vec<String>>, CStrError> {
+    match ptr.is_null() {
+        true => Ok(None),
+        false => unsafe { c_to_strings(ptr, len) }.map(Some),
+    }
+}
+
 /// indexes directory `dir` into the library. `dir` == null -> the music
 /// directory from the configuration.
 ///
@@ -600,37 +614,63 @@ pub unsafe extern "C" fn idx_index_dir(dir: *const c_char) -> FFIIdxStatus {
     })
 }
 
-/// edits track metadata: `title` and/or the artist list. A null field is left
-/// alone (for artists: `artists` == null -> don't change; otherwise rewrite
-/// entirely).
+/// edits the track tags: writes the given fields into the audio file of
+/// track `id`, then mirrors them into the db (and dates the file, so it goes
+/// out on sync again) — so a re-index reads the edit back from the file.
+/// Every argument is optional: a null pointer -> the field is left as is.
+/// - `title`: an empty string -> `InvalidArgument`;
+/// - `artists` / `genres`: the list is rewritten entirely; non-null with
+///   `*_len` == 0 clears it (`*_len` is ignored for a null pointer);
+/// - `album`: an empty string clears it.
+///
+/// All null -> `Ok`, nothing is touched. An unknown `id` or a track without
+/// a file -> `NotFound`; a failed tag write (missing / read-only file,
+/// unsupported format) -> `WriteFailed`, the db is left as is. The file is
+/// written without the db lock.
 ///
 /// # Safety
-/// `title` is null or a C string; `artists` is null or an array of
-/// `artists_len` C strings.
+/// `title` / `album` are null or C strings; `artists` / `genres` are null or
+/// arrays of `artists_len` / `genres_len` C strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn idx_set_track_meta(
     id: i64,
     title: *const c_char,
     artists: *const *const c_char,
     artists_len: usize,
+    album: *const c_char,
+    genres: *const *const c_char,
+    genres_len: usize,
 ) -> FFIIdxStatus {
     crate::panic::guard(|| {
-        let title = match unsafe { c_to_opt_string(title) } {
-            Ok(t) => t,
+        let parsed = (|| {
+            Ok::<_, CStrError>((
+                unsafe { c_to_opt_string(title) }?,
+                unsafe { c_to_opt_strings(artists, artists_len) }?,
+                unsafe { c_to_opt_string(album) }?,
+                unsafe { c_to_opt_strings(genres, genres_len) }?,
+            ))
+        })();
+        let (title, artists, album, genres) = match parsed {
+            Ok(v) => v,
             Err(e) => return e.into(),
         };
-        let artists = match artists.is_null() {
-            true => None,
-            false => match unsafe { c_to_strings(artists, artists_len) } {
-                Ok(a) => Some(a),
-                Err(e) => return e.into(),
+        if title.as_deref() == Some("") {
+            return FFIIdxStatus::InvalidArgument;
+        }
+        set_tags(
+            id,
+            &TagEdit {
+                title: title.as_deref(),
+                artists: artists.as_deref(),
+                album: album.as_deref().map(|a| (!a.is_empty()).then_some(a)),
+                genres: genres.as_deref(),
             },
-        };
-        write(|db| db.set_track_meta(id, title.as_deref(), artists.as_deref()))
+        )
     })
 }
 
-/// track album (null -> clear).
+/// track album (null or empty -> clear); written into the file tags as in
+/// `idx_set_track_meta` (same statuses).
 ///
 /// # Safety
 /// `album` is null or a C string.
@@ -638,13 +678,17 @@ pub unsafe extern "C" fn idx_set_track_meta(
 pub unsafe extern "C" fn idx_set_track_album(id: i64, album: *const c_char) -> FFIIdxStatus {
     crate::panic::guard(|| {
         match unsafe { c_to_opt_string(album) } {
-            Ok(album) => write(|db| db.set_track_album(id, album.as_deref())),
+            Ok(album) => {
+                let album = album.as_deref().filter(|a| !a.is_empty());
+                set_tags(id, &TagEdit { album: Some(album), ..TagEdit::default() })
+            }
             Err(e) => e.into(),
         }
     })
 }
 
-/// track genres (rewrite entirely; null/0 -> clear).
+/// track genres (rewrite entirely; null/0 -> clear); written into the file
+/// tags as in `idx_set_track_meta` (same statuses).
 ///
 /// # Safety
 /// `genres` is null or an array of `genres_len` C strings.
@@ -656,10 +700,30 @@ pub unsafe extern "C" fn idx_set_track_genres(
 ) -> FFIIdxStatus {
     crate::panic::guard(|| {
         match unsafe { c_to_strings(genres, genres_len) } {
-            Ok(genres) => write(|db| db.set_track_genres(id, &genres)),
+            Ok(genres) => set_tags(id, &TagEdit { genres: Some(&genres), ..TagEdit::default() }),
             Err(e) => e.into(),
         }
     })
+}
+
+/// a tag edit of track `id`: the audio file first (without the db lock),
+/// then the db. An empty edit touches nothing.
+fn set_tags(id: i64, edit: &TagEdit) -> FFIIdxStatus {
+    if edit.is_empty() {
+        return FFIIdxStatus::Ok;
+    }
+    let audio = match find_track(id, None) {
+        Ok(Some(t)) => match t.get_path() {
+            Some(p) => p.to_path_buf(),
+            None => return FFIIdxStatus::NotFound,
+        },
+        Ok(None) => return FFIIdxStatus::NotFound,
+        Err(e) => return e,
+    };
+    match TrackMetadata::write_tags(&audio, edit) {
+        Ok(()) => write(|db| db.set_track_tags(id, edit)),
+        Err(_) => FFIIdxStatus::WriteFailed,
+    }
 }
 
 /// track cover path (null -> clear).

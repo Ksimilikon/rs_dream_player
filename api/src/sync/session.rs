@@ -99,7 +99,8 @@ pub enum Kind {
     Sync,
     /// send this plan one way.
     Send(Plan),
-    /// accept a one-way send; `force` — import even outdated playlists.
+    /// accept a one-way send; `force` — bring back playlists deleted here
+    /// later too.
     Receive { force: bool },
 }
 
@@ -116,7 +117,7 @@ pub struct SyncSession {
     con: u64,
     host: bool,
     mode: Mode,
-    /// import outdated playlists too (`Receive` only).
+    /// bring back playlists deleted here later too (`Receive` only).
     force: bool,
     /// the selection of a one-way send, until it starts.
     push: Option<Plan>,
@@ -347,7 +348,10 @@ impl SyncSession {
     }
 
     fn on_data(&mut self, env: &impl Env, header: &[u8], payload: &[u8]) {
-        let packet = match self.open(env, header, payload) {
+        let packet = match self
+            .open(env, header, payload)
+            .and_then(|p| library::check_version(&p).map(|()| p))
+        {
             Ok(p) => p,
             Err(st) => return self.reject_fatal(env, st),
         };

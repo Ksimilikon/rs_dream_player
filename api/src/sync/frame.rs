@@ -78,7 +78,7 @@ pub enum WireStatus {
     DecryptFailed = 3,
     /// pairing failed (e.g. the key differs from the saved one).
     PairFailed = 4,
-    /// a data portion was not accepted (e.g. its playlists are older).
+    /// a data portion was not accepted (no longer sent: playlists merge).
     Rejected = 5,
     /// the receiver failed to store the data.
     WriteFailed = 6,
@@ -90,6 +90,9 @@ pub enum WireStatus {
     Internal = 9,
     /// the session modes of the two sides don't fit (e.g. sync against send).
     ModeMismatch = 10,
+    /// the payloads of the two sides are of different packet versions: one
+    /// of the apps is older and has to be updated.
+    VersionMismatch = 11,
 }
 
 impl WireStatus {
@@ -106,6 +109,7 @@ impl WireStatus {
             8 => Self::Cancelled,
             9 => Self::Internal,
             10 => Self::ModeMismatch,
+            11 => Self::VersionMismatch,
             _ => return None,
         })
     }

@@ -23,21 +23,25 @@
 //!   rewrites the file of a known song if the packet file changed later
 //!   (`updated_at_file`) — over the local file (`ImportSession::replaces`);
 //!   a packet import (`cdc_import_*`) leaves a known file alone. `force`
-//!   concerns playlists only.
+//!   concerns deleted playlists only.
 //! - song covers (v0.12+, a cover file not embedded into the music file):
 //!   listed for a new song and for a known one whose metadata is applied
 //!   (the cover is a part of the dated db record). A song without a cover in
 //!   the packet keeps its local cover.
-//! - playlists are matched by name; without a name -> skipped. The song list
-//!   is rewritten entirely. If the packet has no cover / dates (or the cover
-//!   file wasn't written), the local values are kept.
-//! - dates (without `force`): the whole packet is rejected (`Outdated`) if at
-//!   least one playlist has a local `updated_at` and the packet one is either
-//!   unset or smaller, or was deleted here at or after the packet one changed.
-//!   Without a local date there is nothing to compare — accept.
+//! - playlists are matched by name; without a name -> skipped. A known
+//!   playlist is merged with the packet one entry by entry (see
+//!   `storage::entries`): the entries of both, minus the ones removed in
+//!   either (v0.13+ carries them), in the order of the copy changed later; a
+//!   packet without entry ids (before v0.13) gets the derived ones. The
+//!   cover (listed to be written only then) and the creation date come from
+//!   the packet if it changed later (`updated_at`, an unset date counts as
+//!   0) or the playlist isn't here; a packet without them keeps the local
+//!   values. A packet is never rejected for its dates.
+//! - a playlist deleted here at or after the packet one changed is skipped
+//!   (the deletion wins); with `force` it comes back.
 //! - deleted playlists (v0.11+): a local playlist changed at or before the
 //!   deletion is soft-deleted, one changed later is kept; an unknown name is
-//!   remembered as deleted. They never make a packet `Outdated`.
+//!   remembered as deleted.
 
 use std::{
     collections::HashMap,
@@ -122,13 +126,12 @@ pub struct ImportSession {
 
 // ───────────────────────────────── API ─────────────────────────────────────
 
-/// step 1: unpacks the packet `bytes[..len]`, checks dates and returns the
-/// list of files to write (`out_files`) and the session (`out_session`). The
-/// db doesn't change. `force` — accept even if the packet is outdated
-/// (`false` by default).
+/// step 1: unpacks the packet `bytes[..len]` and returns the list of files to
+/// write (`out_files`) and the session (`out_session`). The db doesn't
+/// change. `force` — a playlist deleted here after the packet one changed
+/// comes back too (`false` by default; see the module rules).
 ///
-/// returns `Ok`, `Outdated` (the packet is older than local data), a decode
-/// error code (1..=99) or a core error (200..). On error there is no session
+/// returns `Ok`, a decode error code (1..=99) or a core error (200..). On error there is no session
 /// (`*out_session == null`). An empty file list is a normal case too:
 /// `cdc_import_commit` is still needed (playlists).
 ///
@@ -299,8 +302,8 @@ pub(crate) fn prepare(
 ) -> Result<ImportSession, FFICdcStatus> {
     let packet = codec::decode(bytes)?;
 
-    let (songs, local, metas, song_covers) = store.with(|db| {
-        check_dates(db, &packet.playlists, force)?;
+    let (songs, local, metas, song_covers, sorted) = store.with(|db| {
+        let sorted = sort_playlists(db, &packet.playlists, force)?;
         let hashes: Vec<String> = packet.songs.iter().map(|s| hex(s.hash)).collect();
         let known: HashMap<String, TrackSyncRow> = db
             .get_track_sync(&hashes)
@@ -308,12 +311,24 @@ pub(crate) fn prepare(
             .into_iter()
             .map(|r| (r.hash.clone(), r))
             .collect();
-        Ok(sort_songs(packet.songs, &known, rewrite_files))
+        let (songs, local, metas, covers) = sort_songs(packet.songs, &known, rewrite_files);
+        Ok((songs, local, metas, covers, sorted))
     })?;
     let playlists: Vec<Playlist> = packet
         .playlists
         .into_iter()
-        .filter(|p| !p.name.is_empty())
+        .zip(sorted)
+        .filter_map(|(mut p, sorted)| {
+            match sorted {
+                PlaylistFate::Skip => return None,
+                PlaylistFate::Merge => {
+                    p.cover.clear();
+                    p.cover_name.clear();
+                }
+                PlaylistFate::Take => {}
+            }
+            Some(p)
+        })
         .collect();
     let deleted: Vec<DeletedPlaylist> = packet
         .deleted
@@ -418,7 +433,7 @@ pub(crate) fn commit(
             }
         }
     }
-    let playlists: Vec<PlaylistHashRow> = session
+    let rows: Vec<PlaylistHashRow> = session
         .playlists
         .iter()
         .enumerate()
@@ -429,12 +444,21 @@ pub(crate) fn commit(
             created_at: p.created_at,
             updated_at: p.updated_at,
             hashes: p.tracks.iter().map(|&h| hex(h)).collect(),
+            entries: p.entries.iter().map(|e| (e.id, e.added_at)).collect(),
+            removed: p.removed.iter().map(|e| (e.entry_id, e.removed_at)).collect(),
         })
         .collect();
 
     store.with(|db| {
-        // the db may have changed while the frontend was writing files.
-        check_dates(db, &session.playlists, session.force)?;
+        // the db may have changed while the frontend was writing files: a
+        // playlist deleted here meanwhile is skipped.
+        let fates = sort_playlists(db, &session.playlists, session.force)?;
+        let playlists: Vec<PlaylistHashRow> = rows
+            .into_iter()
+            .zip(fates)
+            .filter(|(_, fate)| *fate != PlaylistFate::Skip)
+            .map(|(row, _)| row)
+            .collect();
         // a new song may have appeared meanwhile — there will be no second
         // insert with the same hash (nor its metadata over the local one).
         let (tracks, late): (Vec<_>, Vec<_>) = tracks
@@ -521,12 +545,20 @@ fn sort_songs(
     (files, local, metas, covers)
 }
 
-/// `Outdated` if the packet is older than the local playlists (see the
-/// module rules).
-fn check_dates(db: &Db, playlists: &[Playlist], force: bool) -> Result<(), FFICdcStatus> {
-    if force {
-        return Ok(());
-    }
+/// what becomes of a packet playlist (see the module rules).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaylistFate {
+    /// new here, deleted here earlier or the packet one changed later: merged,
+    /// its cover is taken.
+    Take,
+    /// merged, the local cover stays.
+    Merge,
+    /// no name, or deleted here at or after the packet one changed.
+    Skip,
+}
+
+/// the fate of every packet playlist, in order.
+fn sort_playlists(db: &Db, playlists: &[Playlist], force: bool) -> Result<Vec<PlaylistFate>, FFICdcStatus> {
     let local: HashMap<String, Option<u64>> = db
         .get_playlist_hashes(None)
         .map_err(|_| FFICdcStatus::ReadFailed)?
@@ -539,21 +571,17 @@ fn check_dates(db: &Db, playlists: &[Playlist], force: bool) -> Result<(), FFICd
         .into_iter()
         .map(|d| (d.name, d.deleted_at))
         .collect();
-    for p in playlists {
-        if let Some(Some(local)) = local.get(&p.name) {
-            match p.updated_at {
-                Some(remote) if remote >= *local => {}
-                _ => return Err(FFICdcStatus::Outdated),
-            }
-        }
-        // deleted here after (or when) the packet one changed.
-        if let Some(&at) = deleted.get(&p.name)
-            && p.updated_at.unwrap_or(0) <= at
-        {
-            return Err(FFICdcStatus::Outdated);
-        }
-    }
-    Ok(())
+    let remote_at = |p: &Playlist| p.updated_at.unwrap_or(0);
+    Ok(playlists
+        .iter()
+        .map(|p| match (local.get(&p.name), deleted.get(&p.name)) {
+            _ if p.name.is_empty() => PlaylistFate::Skip,
+            (Some(local), _) if remote_at(p) <= local.unwrap_or(0) => PlaylistFate::Merge,
+            (Some(_), _) => PlaylistFate::Take,
+            (None, Some(&at)) if remote_at(p) <= at && !force => PlaylistFate::Skip,
+            (None, _) => PlaylistFate::Take,
+        })
+        .collect())
 }
 
 /// hash -> hex string in the db format.
@@ -658,6 +686,8 @@ mod tests {
                     created_at: None,
                     updated_at: None,
                     hashes: Vec::new(),
+                    entries: Vec::new(),
+                    removed: Vec::new(),
                 };
                 self.db.save_import(&[], &[], &[], &[row], &[]).unwrap();
                 return;
@@ -793,12 +823,13 @@ mod tests {
         assert_eq!(pls[0].updated_at, Some(5));
         assert_eq!(pls[0].cover_art, Some(l.root.join("c.png")));
 
-        // repeated import: the song already exists — only the cover is listed.
+        // repeated import: the song already exists, the playlist didn't
+        // change since — nothing to write, the playlist isn't doubled.
         let session = prepare(&l, &bytes, false, false).unwrap();
-        assert_eq!(
-            file_names(&session),
-            [(FFIImportFileKind::Cover, "c.png".into())]
-        );
+        assert!(file_names(&session).is_empty());
+        assert_eq!(commit(&l, &session, &[]), Ok(()));
+        let pls = l.db.get_playlist_hashes(None).unwrap();
+        assert_eq!(pls[0].hashes, [hex(1), hex(2)]);
     }
 
     #[test]
@@ -823,40 +854,47 @@ mod tests {
     }
 
     #[test]
-    fn outdated_is_rejected_in_prepare() {
-        let l = Local::new("outdated");
+    fn an_older_packet_merges_and_keeps_the_local_cover() {
+        let l = Local::new("older");
         l.local_playlist("mix", Some(10));
         for remote in [Some(9), None] {
-            let bytes = packet(vec![playlist("mix", remote)]);
-            assert_eq!(
-                prepare(&l, &bytes, false, false).err(),
-                Some(FFICdcStatus::Outdated)
-            );
+            let session = prepare(&l, &packet(vec![playlist("mix", remote)]), false, false).unwrap();
+            // the local copy changed later: its cover stays, none is listed.
+            assert_eq!(file_names(&session), [(FFIImportFileKind::Song, "one.mp3".into())]);
+            assert_eq!(commit(&l, &session, &[None]), Ok(()));
+            let pls = l.db.get_playlist_hashes(None).unwrap();
+            assert_eq!(pls[0].hashes, [hex(1), hex(2)], "the packet songs are merged in");
+            assert_eq!(pls[0].updated_at, Some(10));
+            assert!(pls[0].cover_art.is_none());
         }
-        // an equal or newer date — ok.
-        assert!(prepare(&l, &packet(vec![playlist("mix", Some(10))]), false, false).is_ok());
     }
 
     #[test]
-    fn outdated_is_rechecked_in_commit() {
+    fn a_playlist_deleted_meanwhile_is_skipped_in_commit() {
         let l = Local::new("recheck");
         let session = prepare(&l, &packet(vec![playlist("mix", Some(5))]), false, false).unwrap();
-        // the local playlist got updated while the frontend was writing files.
-        l.local_playlist("mix", Some(10));
+        // the playlist appeared and got deleted here while the frontend was
+        // writing files: the deletion is later than the packet change.
+        l.local_playlist("mix", Some(6));
+        l.db.remove_playlist("mix").unwrap();
         let paths = l.write_all(&session);
-        assert_eq!(commit(&l, &session, &paths), Err(FFICdcStatus::Outdated));
-        assert!(!l.db.hash_exist(hex(1)));
+        assert_eq!(commit(&l, &session, &paths), Ok(()));
+        assert!(l.db.hash_exist(hex(1)), "the songs are still imported");
+        assert!(l.db.get_playlist_hashes(None).unwrap().is_empty());
     }
 
     #[test]
-    fn force_overrides_outdated() {
-        let l = Local::new("force");
-        l.local_playlist("mix", Some(10));
-        let session = prepare(&l, &packet(vec![playlist("mix", Some(1))]), true, false).unwrap();
-        let paths = l.write_all(&session);
-        assert_eq!(commit(&l, &session, &paths), Ok(()));
-        let pls = l.db.get_playlist_hashes(None).unwrap();
-        assert_eq!(pls[0].updated_at, Some(1));
+    fn force_brings_back_a_playlist_deleted_later() {
+        for force in [false, true] {
+            let l = Local::new(if force { "force" } else { "no-force" });
+            l.local_playlist("mix", Some(10));
+            l.db.remove_playlist("mix").unwrap();
+            let session = prepare(&l, &packet(vec![playlist("mix", Some(20))]), force, false).unwrap();
+            let paths = l.write_all(&session);
+            assert_eq!(commit(&l, &session, &paths), Ok(()));
+            let live = l.db.get_playlist_hashes(None).unwrap();
+            assert_eq!(live.len(), usize::from(force));
+        }
     }
 
     /// a v0.11 packet with deleted playlists only.
@@ -885,14 +923,56 @@ mod tests {
     }
 
     #[test]
-    fn a_playlist_deleted_later_here_is_outdated() {
+    fn a_playlist_deleted_later_here_is_skipped() {
         let l = Local::new("deleted-later");
         l.local_playlist("mix", Some(10));
         l.db.remove_playlist("mix").unwrap();
-        assert_eq!(
-            prepare(&l, &packet(vec![playlist("mix", Some(20))]), false, false).err(),
-            Some(FFICdcStatus::Outdated)
-        );
+        let session = prepare(&l, &packet(vec![playlist("mix", Some(20))]), false, false).unwrap();
+        // the playlist (and its cover) is left out, the song still comes.
+        assert_eq!(file_names(&session), [(FFIImportFileKind::Song, "one.mp3".into())]);
+        assert!(session.playlists.is_empty());
+    }
+
+    /// a v0.13 packet with one playlist of `entries` (entry id, song hash;
+    /// added at `updated`) and `removed` entry ids.
+    fn packet_v0_13(updated: u64, entries: &[(u64, u128)], removed: &[u64]) -> Vec<u8> {
+        let pl = Playlist {
+            name: "mix".into(),
+            tracks: entries.iter().map(|&(_, h)| h).collect(),
+            entries: entries
+                .iter()
+                .map(|&(id, _)| codec::Entry { id, added_at: updated })
+                .collect(),
+            removed: removed
+                .iter()
+                .map(|&entry_id| codec::RemovedEntry { entry_id, removed_at: updated })
+                .collect(),
+            updated_at: Some(updated),
+            ..Playlist::default()
+        };
+        codec::encode(Version::V0_13, &[], &[pl]).unwrap()
+    }
+
+    #[test]
+    fn imports_merge_entries_and_respect_removals() {
+        let l = Local::new("merge");
+        let import = |bytes: Vec<u8>| {
+            let session = prepare(&l, &bytes, false, false).unwrap();
+            assert_eq!(commit(&l, &session, &[]), Ok(()));
+            let pl = l.db.get_playlist_hashes(None).unwrap().remove(0);
+            let ids: Vec<u64> = pl.entries.iter().map(|&(id, _)| id).collect();
+            (ids, pl.hashes)
+        };
+        // the same song twice (two entries) and another one.
+        let (ids, _) = import(packet_v0_13(10, &[(1, 7), (2, 7), (3, 8)], &[]));
+        assert_eq!(ids, [1, 2, 3]);
+        // an older copy that removed entry 2 and added entry 4 after entry 1.
+        let (ids, hashes) = import(packet_v0_13(5, &[(1, 7), (4, 9), (3, 8)], &[2]));
+        assert_eq!(ids, [1, 4, 3]);
+        assert_eq!(hashes, [hex(7), hex(9), hex(8)]);
+        // an even older copy that still has entry 2: it doesn't come back.
+        let (ids, _) = import(packet_v0_13(1, &[(1, 7), (2, 7)], &[]));
+        assert_eq!(ids, [1, 4, 3]);
     }
 
     #[test]

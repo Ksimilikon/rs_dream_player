@@ -5,13 +5,15 @@
 package dev.dreamplayer.core
 
 /**
- * packet format version written by default (`codec::Version::V0_12`: v0.1 +
+ * packet format version written by default (`codec::Version::V0_13`: v0.1 +
  * deleted playlists; the songs section carries the song change dates,
- * metadata and cover files, the playlists section — the playlist covers).
- * `2` — v0.11, without the song dates, metadata and covers; `1` — v0.1,
- * without deleted playlists too.
+ * metadata and cover files, the playlists section — the playlist covers,
+ * entry ids and removed entries, so an import merges playlists exactly).
+ * `3` — v0.12, without the entry ids (an import derives them); `2` — v0.11,
+ * without the song dates, metadata and covers too; `1` — v0.1, without
+ * deleted playlists too.
  */
-const val PACKET_VERSION: Int = 3
+const val PACKET_VERSION: Int = 4
 
 /**
  * result of a call that returns a value: [value] is set only when [status] is
@@ -143,7 +145,7 @@ object CdcStatus {
     const val COUNT_MISMATCH = 10
 
     // 100..=199 — import decisions.
-    /** the packet is older than local playlists; apply only with force. */
+    /** no longer returned: playlists merge since packet v0.13. Reserved. */
     const val OUTDATED = 100
 
     // 200.. — core errors.
@@ -384,7 +386,7 @@ object WireStatus {
     const val DECRYPT_FAILED = 3
     /** e.g. the key differs from the saved one. */
     const val PAIR_FAILED = 4
-    /** a data portion was not accepted (its playlists are older). */
+    /** a data portion was not accepted (no longer sent: playlists merge). */
     const val REJECTED = 5
     const val WRITE_FAILED = 6
     const val BUSY = 7
@@ -392,4 +394,6 @@ object WireStatus {
     const val INTERNAL = 9
     /** the two sides run different modes (sync / send / receive). */
     const val MODE_MISMATCH = 10
+    /** the other side runs another app version (packet format): update both. */
+    const val VERSION_MISMATCH = 11
 }

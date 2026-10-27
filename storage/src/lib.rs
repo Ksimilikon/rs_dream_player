@@ -1,4 +1,5 @@
 pub mod db;
+pub mod entries;
 pub mod events;
 pub mod schema;
 pub mod traits;

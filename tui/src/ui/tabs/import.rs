@@ -15,7 +15,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use api::cdc::FFICdcStatus;
 use ratatui::{
     Frame,
     crossterm::event::{KeyCode, KeyEvent},
@@ -109,10 +108,6 @@ impl ImportTab {
         // step 1: the core checks the packet and the dates.
         let prepared = match PreparedImport::prepare(&bytes, force) {
             Ok(p) => p,
-            Err(FFICdcStatus::Outdated) => {
-                self.log.warn(cdc::describe(FFICdcStatus::Outdated));
-                return false;
-            }
             Err(st) => {
                 self.log.error(format!("import rejected: {}", cdc::describe(st)));
                 return false;
@@ -153,13 +148,7 @@ impl ImportTab {
             }
             Err(st) => {
                 remove_all(&written);
-                match st {
-                    FFICdcStatus::Outdated => self.log.warn(format!(
-                        "{} (library changed during import)",
-                        cdc::describe(st)
-                    )),
-                    _ => self.log.error(format!("import failed: {}", cdc::describe(st))),
-                }
+                self.log.error(format!("import failed: {}", cdc::describe(st)));
                 false
             }
         }

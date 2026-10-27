@@ -64,6 +64,18 @@
 //! 6. covers: for every playlist with flag bit 2, in playlist order (`u32`
 //!    length + raw image)
 //!
+//! v0.13+ only:
+//!
+//! 7. entries: `M` × (`u32` count `E` + `E` × (entry id `u64` + addition
+//!    time `u64`, unix seconds)), in playlist order. `E` is either `K` (every
+//!    entry of the track list 4, the same entry order) or 0 — the playlist
+//!    has no ids, the receiver derives them. An entry id is unique within
+//!    its playlist; the same song may be in a playlist several times, each
+//!    time as its own entry.
+//! 8. removed entries: `M` × (`u32` count `R` + `R` × (entry id `u64` +
+//!    removal time `u64`, unix seconds)): the entries removed from the
+//!    playlist, so the receiver removes them too and doesn't bring them back.
+//!
 //! ## deleted playlists section ([`SectionTag::Deleted`])
 //!
 //! v0.11+, written after the playlists and only if some playlist is deleted.
@@ -173,6 +185,28 @@ pub struct Playlist {
     pub cover_name: String,
     /// raw cover image, max `u32::MAX` bytes; empty = no cover.
     pub cover: Vec<u8>,
+    /// v0.13+: every entry of `tracks` (same order), or empty — no ids
+    /// (derived by the receiver).
+    pub entries: Vec<Entry>,
+    /// v0.13+: the entries removed from the playlist.
+    pub removed: Vec<RemovedEntry>,
+}
+
+/// a playlist entry (v0.13+): one song at one place of a playlist.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Entry {
+    /// unique within the playlist.
+    pub id: u64,
+    /// when the entry was added (unix seconds).
+    pub added_at: u64,
+}
+
+/// a playlist entry removed from its playlist (v0.13+).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RemovedEntry {
+    pub entry_id: u64,
+    /// removal time (unix seconds).
+    pub removed_at: u64,
 }
 
 /// a deleted playlist inside a packet (v0.11+).
@@ -228,7 +262,11 @@ pub fn encode_with(
         + playlists
             .iter()
             .map(|p| {
-                33 + p.name.len() + 16 * p.tracks.len() + p.cover_name.len() + p.cover.len()
+                41 + p.name.len()
+                    + 32 * p.tracks.len()
+                    + 16 * p.removed.len()
+                    + p.cover_name.len()
+                    + p.cover.len()
             })
             .sum::<usize>()
         + deleted.iter().map(|d| 10 + d.name.len()).sum::<usize>();
@@ -243,7 +281,7 @@ pub fn encode_with(
     // 4) sections
     section(&mut out, SectionTag::Songs, |out| write_songs(out, songs, full))?;
     section(&mut out, SectionTag::Playlists, |out| {
-        write_playlists(out, playlists, full)
+        write_playlists(out, playlists, version)
     })?;
     if with_deleted {
         section(&mut out, SectionTag::Deleted, |out| write_deleted(out, deleted))?;
@@ -253,6 +291,15 @@ pub fn encode_with(
     }
 
     Ok(out)
+}
+
+/// the version of the packet in `bytes`, without decoding the rest.
+pub fn peek_version(bytes: &[u8]) -> Result<Version, CodecError> {
+    let mut r = Reader::new(bytes);
+    if r.take(START_WORD.len())? != START_WORD {
+        return Err(CodecError::BadStartWord);
+    }
+    Version::try_from(r.u32()?)
 }
 
 /// decodes a whole packet from `bytes`.
@@ -281,7 +328,7 @@ pub fn decode(bytes: &[u8]) -> Result<Packet, CodecError> {
         match SectionTag::try_from(tag) {
             Ok(SectionTag::Songs) => set_once(&mut songs, read_songs(&mut s, full)?)?,
             Ok(SectionTag::Playlists) => {
-                set_once(&mut playlists, read_playlists(&mut s, full)?)?
+                set_once(&mut playlists, read_playlists(&mut s, version)?)?
             }
             Ok(SectionTag::Covers) => set_once(&mut covers, read_covers(&mut s)?)?,
             Ok(SectionTag::Deleted) => set_once(&mut deleted, read_deleted(&mut s)?)?,
@@ -449,12 +496,14 @@ fn read_songs(r: &mut Reader<'_>, full: bool) -> Result<Vec<Song>, CodecError> {
     Ok(songs)
 }
 
-/// `full` — v0.12+: with the playlist covers.
+/// v0.12+: with the playlist covers, v0.13+: with the entries and the
+/// removed entries.
 fn write_playlists(
     out: &mut Vec<u8>,
     playlists: &[Playlist],
-    full: bool,
+    version: Version,
 ) -> Result<(), CodecError> {
+    let full = version.full_sections();
     // playlists 1. count rows
     put_count(out, playlists.len())?;
     // playlists 2. names
@@ -489,11 +538,35 @@ fn write_playlists(
     for p in covered() {
         put_blob(out, &p.cover)?;
     }
+    if !version.has_entries() {
+        return Ok(());
+    }
+    // playlists 7. entries
+    for p in playlists {
+        if !p.entries.is_empty() && p.entries.len() != p.tracks.len() {
+            return Err(CodecError::CountMismatch);
+        }
+        put_count(out, p.entries.len())?;
+        for e in &p.entries {
+            out.extend_from_slice(&e.id.to_le_bytes());
+            out.extend_from_slice(&e.added_at.to_le_bytes());
+        }
+    }
+    // playlists 8. removed entries
+    for p in playlists {
+        put_count(out, p.removed.len())?;
+        for e in &p.removed {
+            out.extend_from_slice(&e.entry_id.to_le_bytes());
+            out.extend_from_slice(&e.removed_at.to_le_bytes());
+        }
+    }
     Ok(())
 }
 
-/// `full` — v0.12+: with the playlist covers.
-fn read_playlists(r: &mut Reader<'_>, full: bool) -> Result<Vec<Playlist>, CodecError> {
+/// v0.12+: with the playlist covers, v0.13+: with the entries and the
+/// removed entries.
+fn read_playlists(r: &mut Reader<'_>, version: Version) -> Result<Vec<Playlist>, CodecError> {
+    let full = version.full_sections();
     // playlists 1. count rows: every playlist takes at least 2 + 17 + 4 bytes.
     let (count, cap) = r.count(23)?;
     // playlists 2. names
@@ -529,6 +602,34 @@ fn read_playlists(r: &mut Reader<'_>, full: bool) -> Result<Vec<Playlist>, Codec
     // playlists 6. covers
     for p in flagged(&mut playlists, &covered) {
         p.cover = r.blob()?;
+    }
+    if !version.has_entries() {
+        return Ok(playlists);
+    }
+    // playlists 7. entries
+    for p in &mut playlists {
+        let (len, cap) = r.count(16)?;
+        if len != 0 && len != p.tracks.len() {
+            return Err(CodecError::CountMismatch);
+        }
+        p.entries.reserve_exact(cap);
+        for _ in 0..len {
+            p.entries.push(Entry {
+                id: r.u64()?,
+                added_at: r.u64()?,
+            });
+        }
+    }
+    // playlists 8. removed entries
+    for p in &mut playlists {
+        let (len, cap) = r.count(16)?;
+        p.removed.reserve_exact(cap);
+        for _ in 0..len {
+            p.removed.push(RemovedEntry {
+                entry_id: r.u64()?,
+                removed_at: r.u64()?,
+            });
+        }
     }
     Ok(playlists)
 }
@@ -653,6 +754,7 @@ mod tests {
                 updated_at: Some(1_700_000_000),
                 cover_name: "cover.png".into(),
                 cover: vec![0x89, b'P', b'N', b'G'],
+                ..Playlist::default()
             },
             Playlist {
                 name: "пустой".into(),
@@ -722,6 +824,82 @@ mod tests {
         let s = section_at(&bytes, SectionTag::Songs);
         let p = section_at(&bytes, SectionTag::Playlists);
         assert!(s < p && p < section_at(&bytes, SectionTag::Deleted));
+    }
+
+    /// `playlists()` with the v0.13 extras: ids for the first one (with a
+    /// duplicate song), removed entries for both.
+    fn playlists_v0_13() -> Vec<Playlist> {
+        let mut pls = playlists();
+        pls[0].tracks.push(0);
+        pls[0].entries = [1, u64::MAX, 3, 4]
+            .map(|id| Entry { id, added_at: id / 2 })
+            .to_vec();
+        pls[0].removed = vec![RemovedEntry { entry_id: 9, removed_at: 1_700_000_001 }];
+        pls[1].removed = vec![
+            RemovedEntry { entry_id: 7, removed_at: 1 },
+            RemovedEntry { entry_id: 8, removed_at: 2 },
+        ];
+        pls
+    }
+
+    #[test]
+    fn entries_roundtrip_v0_13() {
+        let bytes =
+            encode_with(Version::V0_13, &songs_full(), &playlists_v0_13(), &deleted()).unwrap();
+        let packet = decode(&bytes).unwrap();
+        assert_eq!(packet.version, Version::V0_13);
+        assert_eq!(packet.songs, songs_full());
+        assert_eq!(packet.playlists, playlists_v0_13());
+        assert_eq!(packet.deleted, deleted());
+        assert_eq!(peek_version(&bytes), Ok(Version::V0_13));
+    }
+
+    #[test]
+    fn older_versions_leave_out_the_entries() {
+        let bytes = encode(Version::V0_12, &[], &playlists_v0_13()).unwrap();
+        let mut expected = playlists_v0_13();
+        for p in &mut expected {
+            p.entries.clear();
+            p.removed.clear();
+        }
+        assert_eq!(decode(&bytes).unwrap().playlists, expected);
+    }
+
+    #[test]
+    fn entries_must_match_the_track_list() {
+        let mut pls = playlists_v0_13();
+        pls[0].entries.pop();
+        assert_eq!(encode(Version::V0_13, &[], &pls), Err(CodecError::CountMismatch));
+    }
+
+    #[test]
+    fn entries_layout_v0_13() {
+        let pls = [Playlist {
+            tracks: vec![5],
+            entries: vec![Entry { id: 0x0102, added_at: 6 }],
+            removed: vec![RemovedEntry { entry_id: 3, removed_at: 4 }],
+            ..Playlist::default()
+        }];
+        let bytes = encode(Version::V0_13, &[], &pls).unwrap();
+        // section header 9 + count 4 + empty name 2 + dates 17 + track list
+        // (4 + 16) -> the entries, then the removed entries.
+        let d = section_at(&bytes, SectionTag::Playlists) + 9 + 4 + 2 + 17 + 20;
+        assert_eq!(&bytes[d..d + 4], &1u32.to_le_bytes());
+        assert_eq!(&bytes[d + 4..d + 12], &0x0102u64.to_le_bytes());
+        assert_eq!(&bytes[d + 12..d + 20], &6u64.to_le_bytes());
+        assert_eq!(&bytes[d + 20..d + 24], &1u32.to_le_bytes());
+        assert_eq!(&bytes[d + 24..d + 32], &3u64.to_le_bytes());
+        assert_eq!(&bytes[d + 32..d + 40], &4u64.to_le_bytes());
+        assert_eq!(bytes.len(), d + 40);
+    }
+
+    #[test]
+    fn v0_13_truncated_at_every_point() {
+        let bytes =
+            encode_with(Version::V0_13, &songs_full(), &playlists_v0_13(), &deleted()).unwrap();
+        for cut in 0..bytes.len() {
+            assert!(decode(&bytes[..cut]).is_err(), "cut at {cut}");
+        }
     }
 
     #[test]

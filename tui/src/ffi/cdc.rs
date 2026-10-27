@@ -9,10 +9,11 @@ use std::ptr;
 use api::cdc::{self, FFICdcStatus, FFIImportFileKind, FFIImportFiles, ImportSession};
 use api::mem;
 
-/// packet format version the frontend writes (`codec::Version::V0_12`:
+/// packet format version the frontend writes (`codec::Version::V0_13`:
 /// v0.1 + deleted playlists; the songs section carries the song dates,
-/// metadata and cover files, the playlists section — the playlist covers).
-const PACKET_VERSION: u32 = 3;
+/// metadata and cover files, the playlists section — the playlist covers,
+/// entry ids and removed entries, so an import merges playlists exactly).
+const PACKET_VERSION: u32 = 4;
 
 /// what to put into the packet.
 #[derive(Debug, Clone, Copy)]
@@ -46,8 +47,8 @@ pub fn describe(st: FFICdcStatus) -> &'static str {
         S::NameTooLong => "a name is too long for the packet",
         S::DataTooLong => "a file is too large for the packet (> 4 GiB)",
         S::DuplicateSection => "packet has a duplicate section",
-        S::CountMismatch => "packet covers don't match playlists (v0.1 / v0.11 packet)",
-        S::Outdated => "packet is outdated: local playlists are newer (enable force to override)",
+        S::CountMismatch => "packet covers / entry ids don't match its playlists",
+        S::Outdated => "packet is outdated",
         S::NullPointer => "internal error: null pointer",
         S::NoDatabase => "core runs without a database",
         S::TrackNotFound => "some track is not in the library",

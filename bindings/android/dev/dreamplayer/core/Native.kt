@@ -244,8 +244,10 @@ object Native {
     ): DecodeResult
 
     /**
-     * import step 1: reads the packet from [fd], checks it and the dates.
-     * The library doesn't change. On `CdcStatus.OK` the session must end with
+     * import step 1: reads the packet from [fd] and checks it. The library
+     * doesn't change. Playlists merge with the local ones entry by entry;
+     * [force] — a playlist deleted here after the packet one changed comes
+     * back too. On `CdcStatus.OK` the session must end with
      * [cdcImportCommit] or [cdcImportCancel].
      */
     @JvmStatic external fun cdcImportPrepare(fd: Int, force: Boolean): ImportPrepared
@@ -325,7 +327,7 @@ object Native {
         withCovers: Boolean,
     ): CoreResult<Long>
 
-    /** a one-way receive; [force] — accept playlists older than the local ones. */
+    /** a one-way receive; [force] — bring back playlists deleted here later too. */
     @JvmStatic external fun syncNewReceive(con: Long, host: Boolean, force: Boolean): CoreResult<Long>
 
     /** frees the session (0 is ignored); cancel an unfinished one first. */

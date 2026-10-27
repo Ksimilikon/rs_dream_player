@@ -18,11 +18,15 @@ pub enum Version {
     /// of the songs; the playlists section — the playlist covers (there is
     /// no covers section).
     V0_12 = 3,
+    /// v0.13: v0.12 where every playlist entry has its own id and the
+    /// removed entries travel too, so playlists edited on two devices merge
+    /// entry by entry.
+    V0_13 = 4,
 }
 
 impl Version {
     /// the newest version, used for new packets.
-    pub const LATEST: Version = Version::V0_12;
+    pub const LATEST: Version = Version::V0_13;
 
     /// the version carries the deleted playlists section.
     pub fn has_deleted(self) -> bool {
@@ -33,6 +37,11 @@ impl Version {
     /// playlists section — the playlist covers (no covers section).
     pub fn full_sections(self) -> bool {
         self as u32 >= Version::V0_12 as u32
+    }
+
+    /// the playlists section carries the entries and the removed entries.
+    pub fn has_entries(self) -> bool {
+        self as u32 >= Version::V0_13 as u32
     }
 }
 
@@ -50,6 +59,7 @@ impl TryFrom<u32> for Version {
             1 => Ok(Version::V0_1),
             2 => Ok(Version::V0_11),
             3 => Ok(Version::V0_12),
+            4 => Ok(Version::V0_13),
             _ => Err(CodecError::UnsupportedVersion),
         }
     }

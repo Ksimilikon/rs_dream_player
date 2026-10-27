@@ -4,6 +4,7 @@
 //! [`crate::db::Db::init`]).
 
 use std::{
+    collections::HashMap,
     error::Error,
     fmt,
     path::{Path, PathBuf},
@@ -50,9 +51,12 @@ const REQUIRED_SCHEMA: &[(&str, &[&str])] = &[
         // `deleted_at` — added by migration 2.
         &["id", "name", "cover_art", "created_at", "updated_at", "deleted_at"],
     ),
-    ("playlist_tracks", &["playlist_id", "song_hash", "position"]),
+    // `entry_id`, `added_at` — added by migration 4.
+    ("playlist_tracks", &["playlist_id", "song_hash", "position", "entry_id", "added_at"]),
     // added by migration 1.
     ("paired_devices", &["id", "pub_key", "name"]),
+    // added by migration 4.
+    ("playlist_removed", &["playlist_id", "entry_id", "removed_at"]),
 ];
 
 /// the whole db structure. Every statement is idempotent (`IF NOT EXISTS`),
@@ -147,6 +151,22 @@ ALTER TABLE tracks ADD COLUMN ignore_orphan INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE tracks ADD COLUMN updated_at INTEGER;
 ALTER TABLE tracks ADD COLUMN updated_at_file INTEGER;
 ",
+    // 4: playlist entries for merging playlists entry by entry: every entry
+    // gets an id unique within its playlist and the time it was added (unix
+    // seconds; the existing ones are filled by `fill_entry_ids` right after),
+    // a removed entry leaves its id with the removal time so a merge doesn't
+    // bring it back.
+    "\
+ALTER TABLE playlist_tracks ADD COLUMN entry_id INTEGER;
+ALTER TABLE playlist_tracks ADD COLUMN added_at INTEGER NOT NULL DEFAULT 0;
+CREATE UNIQUE INDEX IF NOT EXISTS playlist_tracks_entry ON playlist_tracks (playlist_id, entry_id);
+CREATE TABLE IF NOT EXISTS playlist_removed (
+    playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+    entry_id    INTEGER NOT NULL,
+    removed_at  INTEGER NOT NULL,
+    PRIMARY KEY (playlist_id, entry_id)
+);
+",
 ];
 
 /// the db exists but its structure fails verification (a broken file or
@@ -180,6 +200,46 @@ pub fn migrate(conn: &Connection) -> Result<(), Box<dyn Error>> {
         tx.pragma_update(None, "user_version", (i + 1) as i64)?;
         tx.commit()?;
     }
+    fill_entry_ids(conn)
+}
+
+/// gives the playlist entries without an id (from before migration 4) their
+/// legacy ids ([`crate::entries::legacy_entry_id`]): two devices that had the
+/// same playlist get the same ids, so their first merge doesn't double it.
+/// They count as added when their playlist last changed.
+fn fill_entry_ids(conn: &Connection) -> Result<(), Box<dyn Error>> {
+    let mut stmt = conn.prepare(
+        "SELECT pt.playlist_id, pt.position, pt.song_hash, p.name, COALESCE(p.updated_at, 0) \
+         FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id \
+         WHERE pt.entry_id IS NULL ORDER BY pt.playlist_id, pt.position",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    let mut nth: HashMap<(i64, &str), u32> = HashMap::new();
+    for (playlist_id, position, hash, name, added_at) in &rows {
+        let n = nth.entry((*playlist_id, hash.as_str())).or_insert(0);
+        let id = crate::entries::legacy_entry_id(name, hash, *n);
+        *n += 1;
+        tx.execute(
+            "UPDATE playlist_tracks SET entry_id = ?3, added_at = ?4 \
+             WHERE playlist_id = ?1 AND position = ?2",
+            rusqlite::params![playlist_id, position, id as i64, added_at],
+        )?;
+    }
+    tx.commit()?;
     Ok(())
 }
 

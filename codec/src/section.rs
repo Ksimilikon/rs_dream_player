@@ -10,7 +10,7 @@ pub enum SectionTag {
     /// and covers.
     Songs = 1,
     /// playlists: names, dates, ordered lists of song hashes; v0.12+ also
-    /// covers.
+    /// covers, v0.13+ also entries and removed entries.
     Playlists = 2,
     /// playlist covers (v0.1 / v0.11 only); always the last section.
     Covers = 3,

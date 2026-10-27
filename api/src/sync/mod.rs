@@ -334,8 +334,8 @@ pub unsafe extern "C" fn sync_new_send(
 }
 
 /// a one-way receive session: accepts what the other side sends with
-/// `sync_new_send`. `force` — import even if the playlists are older than the
-/// local ones (as in `cdc_import_prepare`).
+/// `sync_new_send`. `force` — a playlist deleted here after the sent one
+/// changed comes back too (as in `cdc_import_prepare`).
 ///
 /// # Safety
 /// `out` is a valid pointer.

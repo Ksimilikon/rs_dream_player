@@ -49,12 +49,13 @@ pub fn describe_wire(status: u32) -> &'static str {
         2 => "unexpected packet",
         3 => "decryption failed (not paired with this device?)",
         4 => "pairing failed (the device key changed?)",
-        5 => "rejected (local playlists are newer)",
+        5 => "rejected",
         6 => "failed to store the data",
         7 => "device is busy",
         8 => "cancelled",
         9 => "internal error",
         10 => "the other side runs another mode (sync / send / receive)",
+        11 => "the other side runs another app version (update both)",
         _ => "unknown status",
     }
 }

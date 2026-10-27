@@ -30,7 +30,8 @@ pub enum CodecError {
     DataTooLong = 8,
     /// decode: the same section appears twice.
     DuplicateSection = 9,
-    /// decode: number of covers differs from number of playlists.
+    /// number of covers differs from number of playlists (decode), or the
+    /// number of entries from the number of playlist songs (v0.13+).
     CountMismatch = 10,
 }
 
@@ -53,7 +54,7 @@ impl fmt::Display for CodecError {
             CodecError::NameTooLong => "name too long (max u16::MAX bytes)",
             CodecError::DataTooLong => "file too long (max u32::MAX bytes)",
             CodecError::DuplicateSection => "duplicate section",
-            CodecError::CountMismatch => "covers count differs from playlists count",
+            CodecError::CountMismatch => "covers / entries count differs from playlists / songs count",
         };
         f.write_str(msg)
     }

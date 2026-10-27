@@ -42,7 +42,7 @@ use std::{
 };
 
 use audio_structs::track_metadata::TrackMetadata;
-use codec::{CodecError, DeletedPlaylist, Playlist, Song, SongMeta, Version};
+use codec::{CodecError, DeletedPlaylist, Entry, Playlist, RemovedEntry, Song, SongMeta, Version};
 use storage::db::{DeletedPlaylistRow, PlaylistHashRow, TrackMetaRow, TrackSyncRow};
 
 use crate::idx::{to_c, vec_to_raw};
@@ -84,9 +84,8 @@ pub enum FFICdcStatus {
     CountMismatch = 10,
 
     // ── import (100..=199) ──
-    /// the packet is outdated: some playlist in it is older (`updated_at`)
-    /// than the local one. The whole import is rejected, nothing is written;
-    /// it can only be applied with `force`.
+    /// no longer returned: playlists are merged since packet v0.13 instead
+    /// of being rejected as older. The number stays reserved.
     Outdated = 100,
 
     // ── core (200..) ──
@@ -384,6 +383,19 @@ fn pack_from_db(
 }
 
 /// db deletion mark -> packet entry.
+/// playlist entries (entry id, addition time) of the db -> packet.
+pub(crate) fn entries_to_packet(entries: &[(u64, u64)]) -> Vec<Entry> {
+    entries.iter().map(|&(id, added_at)| Entry { id, added_at }).collect()
+}
+
+/// removed playlist entries (entry id, removal time) of the db -> packet.
+pub(crate) fn removed_to_packet(removed: &[(u64, u64)]) -> Vec<RemovedEntry> {
+    removed
+        .iter()
+        .map(|&(entry_id, removed_at)| RemovedEntry { entry_id, removed_at })
+        .collect()
+}
+
 pub(crate) fn deleted_from_db(row: DeletedPlaylistRow) -> DeletedPlaylist {
     DeletedPlaylist {
         name: row.name,
@@ -470,6 +482,8 @@ fn playlist_from_db(row: PlaylistHashRow, with_covers: bool) -> Result<Playlist,
         updated_at: row.updated_at,
         cover_name,
         cover,
+        entries: entries_to_packet(&row.entries),
+        removed: removed_to_packet(&row.removed),
     })
 }
 
@@ -660,6 +674,7 @@ unsafe fn playlists_from_c(
             updated_at: date(updated_at, i),
             cover_name,
             cover,
+            ..Playlist::default()
         });
     }
     Ok(playlists)

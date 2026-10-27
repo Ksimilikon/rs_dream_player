@@ -239,21 +239,139 @@ fn same_file_name_replaces_the_local_song() {
 }
 
 #[test]
-fn newer_local_playlist_is_kept() {
+fn playlists_of_the_same_name_merge() {
     let host = Device::new();
     let client = Device::new();
     host.playlist("mix", 10, &[("a.mp3", "2.mp3")]);
     client.playlist("mix", 50, &[("b.mp3", "was_wallen_wir_trinken.mp3")]);
+    let (host_song, client_song) = (host.hashes()[0].clone(), client.hashes()[0].clone());
 
     let (mut hs, mut cs) = sessions(&host, &client);
     pump(&host, &mut hs, &client, &mut cs);
 
-    // the client's newer "mix" won on both sides; the host's older version
-    // (and its song) didn't reach the client.
+    // nothing is lost: both songs on both sides. The host's song is first in
+    // its copy (nothing before it), so it goes first into the newer
+    // (client's) one.
     let client_mix = client.playlists();
     assert_eq!(host.playlists(), client_mix);
-    assert_eq!(client.hashes().len(), 1);
-    assert_eq!(client_mix[0].1, client.hashes());
+    assert_eq!(client_mix[0].1, vec![host_song, client_song]);
+    assert_eq!(client.hashes(), host.hashes());
+    assert_eq!(client.hashes().len(), 2);
+}
+
+/// a fresh connection for the next session between `devices`.
+fn reconnect(devices: &[&Device]) {
+    for dev in devices {
+        let mut mgr = dev.mgr.borrow_mut();
+        mgr.disconnect(dev.con).unwrap();
+        mgr.connect(dev.con).unwrap();
+    }
+}
+
+#[test]
+fn edits_made_on_both_devices_merge() {
+    let host = Device::new();
+    let client = Device::new();
+    host.playlist("mix", 10, &[("a.mp3", "2.mp3"), ("b.mp3", "2.mp3")]);
+    let (mut hs, mut cs) = sessions(&host, &client);
+    pump(&host, &mut hs, &client, &mut cs);
+    assert_eq!(client.playlists(), host.playlists());
+    let [a, b]: [String; 2] = host.playlists()[0].1.clone().try_into().unwrap();
+
+    // meanwhile: the host adds c, the client removes a and adds d (later).
+    let edit = |dev: &Device, updated: u64, drop: Option<&str>, add: (&str, &str)| {
+        let mut p = dev.db.get_playlists(None, None).unwrap().remove(0);
+        if let Some(drop) = drop {
+            let i = p.tracks().iter().position(|t| {
+                t.get_path().and_then(|p| p.file_name()).and_then(|n| n.to_str()) == Some(drop)
+            });
+            p.remove_track(i.unwrap());
+        }
+        let path = dev.music().join(add.0);
+        fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("../test_data").join(add.1), &path)
+            .unwrap();
+        p.add_track_back(TrackVirtual::from_file(path, false).unwrap());
+        p.set_updated_at(updated);
+        dev.db.save_playlist(p).unwrap();
+    };
+    edit(&host, 20, None, ("c.mp3", "2.mp3"));
+    edit(&client, 30, Some("a.mp3"), ("d.mp3", "was_wallen_wir_trinken.mp3"));
+
+    reconnect(&[&host, &client]);
+    let (mut hs, mut cs) = sessions(&host, &client);
+    let (he, ce) = pump(&host, &mut hs, &client, &mut cs);
+    assert_eq!(he.last(), Some(&Event::Done), "{he:?}");
+    assert_eq!(ce.last(), Some(&Event::Done), "{ce:?}");
+
+    let mix = host.playlists()[0].1.clone();
+    assert_eq!(client.playlists()[0].1, mix, "both devices end up with the same playlist");
+    assert_eq!(mix.len(), 3, "{mix:?}");
+    assert!(!mix.contains(&a), "the removed song doesn't come back");
+    assert_eq!(mix[0], b);
+
+    // one more sync changes nothing (no cycling back).
+    reconnect(&[&host, &client]);
+    let (mut hs, mut cs) = sessions(&host, &client);
+    pump(&host, &mut hs, &client, &mut cs);
+    assert_eq!(host.playlists()[0].1, mix);
+    assert_eq!(client.playlists()[0].1, mix);
+}
+
+#[test]
+fn the_same_song_added_on_both_devices_is_kept_once() {
+    let host = Device::new();
+    let client = Device::new();
+    host.playlist("mix", 10, &[("a.mp3", "2.mp3")]);
+    host.playlist("other", 10, &[("x.mp3", "was_wallen_wir_trinken.mp3")]);
+    let (mut hs, mut cs) = sessions(&host, &client);
+    pump(&host, &mut hs, &client, &mut cs);
+
+    // both put x into mix: the host at the end, the client at the front
+    // later.
+    let add_x = |dev: &Device, updated: u64, front: bool| {
+        let (mut mixes, mut others): (Vec<_>, Vec<_>) = dev
+            .db
+            .get_playlists(None, None)
+            .unwrap()
+            .into_iter()
+            .partition(|p| p.get_name().as_deref() == Some("mix"));
+        let (mut mix, other) = (mixes.remove(0), others.remove(0));
+        let x = other.into_tracks().remove(0);
+        match front {
+            true => mix.add_track(x, 0),
+            false => mix.add_track_back(x),
+        }
+        mix.set_updated_at(updated);
+        dev.db.save_playlist(mix).unwrap();
+    };
+    add_x(&host, 20, false);
+    add_x(&client, 30, true);
+
+    reconnect(&[&host, &client]);
+    let (mut hs, mut cs) = sessions(&host, &client);
+    pump(&host, &mut hs, &client, &mut cs);
+
+    let mix = |dev: &Device| dev.playlists().into_iter().find(|(n, _)| n == "mix").unwrap().1;
+    let x = client.playlists().into_iter().find(|(n, _)| n == "other").unwrap().1[0].clone();
+    assert_eq!(mix(&host), mix(&client));
+    assert_eq!(mix(&client)[0], x, "x stays once, at the client's (later) place");
+    assert_eq!(mix(&client).len(), 2);
+}
+
+#[test]
+fn a_peer_of_another_version_is_refused() {
+    let old = codec::encode(codec::Version::V0_12, &[], &[]).unwrap();
+    assert_eq!(library::check_version(&old), Err(WireStatus::VersionMismatch));
+    let mut future = codec::encode(library::VERSION, &[], &[]).unwrap();
+    future[4..8].copy_from_slice(&99u32.to_le_bytes());
+    assert_eq!(library::check_version(&future), Err(WireStatus::VersionMismatch));
+    assert_eq!(library::check_version(b"junk"), Err(WireStatus::InvalidPacket));
+    let ok = codec::encode(library::VERSION, &[], &[]).unwrap();
+    assert_eq!(library::check_version(&ok), Ok(()));
+
+    let dev = Device::new();
+    assert_eq!(library::want(&dev.db, &old), Err(WireStatus::VersionMismatch));
+    assert_eq!(library::Want::decode(&old), Err(WireStatus::VersionMismatch));
 }
 
 #[test]
@@ -441,31 +559,19 @@ fn send_tracks_without_playlists() {
 }
 
 #[test]
-fn receiver_force_decides_on_outdated_playlists() {
+fn a_sent_older_playlist_merges_into_the_receivers() {
     let a = Device::new();
     let b = Device::new();
     a.playlist("mix", 10, &[("a.mp3", "2.mp3")]);
     b.playlist("mix", 50, &[("b.mp3", "was_wallen_wir_trinken.mp3")]);
-    let what = || Selection::Playlists(vec!["mix".into()]);
+    let (a_song, b_song) = (a.hashes()[0].clone(), b.hashes()[0].clone());
 
-    let (se, _) = push(&a, &b, true, what(), Flags::ALL, false);
-    assert!(
-        se.contains(&Event::PeerRejected(WireStatus::Rejected)),
-        "{se:?}"
-    );
-    assert_ne!(b.playlists(), a.playlists());
-
-    for dev in [&a, &b] {
-        let mut mgr = dev.mgr.borrow_mut();
-        mgr.disconnect(dev.con).unwrap();
-        mgr.connect(dev.con).unwrap();
-    }
-    let (se, _) = push(&a, &b, true, what(), Flags::ALL, true);
-    assert!(
-        !se.iter().any(|e| matches!(e, Event::PeerRejected(_))),
-        "{se:?}"
-    );
-    assert_eq!(b.playlists(), a.playlists());
+    let (se, _) = push(&a, &b, true, Selection::Playlists(vec!["mix".into()]), Flags::ALL, false);
+    assert!(!se.iter().any(|e| matches!(e, Event::PeerRejected(_))), "{se:?}");
+    // the receiver keeps its song and gets the sender's one; a one-way send
+    // doesn't change the sender.
+    assert_eq!(b.playlists()[0].1, vec![a_song.clone(), b_song]);
+    assert_eq!(a.playlists()[0].1, vec![a_song]);
 }
 
 #[test]

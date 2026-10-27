@@ -1,8 +1,8 @@
 //! what the sync protocol carries, built from / compared with the db. Every
 //! payload is a codec packet:
-//! - index: every playlist (name, dates, song hashes) and the songs that are
-//!   in some playlist and exist locally: hashes and change dates — no files,
-//!   no metadata;
+//! - index: every playlist (name, dates, entries: song hashes with entry
+//!   ids, removed entries) and the songs that are in some playlist and exist
+//!   locally: hashes and change dates — no files, no metadata;
 //! - want: song hashes and playlist names (empty track lists). A song with
 //!   (empty) metadata is wanted for its metadata only, without one — whole;
 //! - data: portions of songs with names, files, dates, metadata and covers;
@@ -11,11 +11,18 @@
 //!   A one-way send ([`Selection`]) chooses what and with which [`Flags`],
 //!   like an export (without audio — the metadata of the songs only).
 //!
+//! every payload is a codec packet of [`VERSION`]; a peer that sends another
+//! version (an older app) is refused with [`WireStatus::VersionMismatch`].
+//!
 //! only songs that are in some playlist are synced. A playlist is wanted if
-//! it is missing locally or the remote one is newer (`updated_at`, an unset
-//! date counts as 0) than the local one — or than its local deletion. A
-//! remote deletion is wanted if the local playlist changed at or before it, an
-//! older local deletion or no local playlist at all (it travels on). A song is
+//! it is missing locally, the remote one is newer (`updated_at`, an unset
+//! date counts as 0) or has entries this side doesn't know / removed entries
+//! this side still has; a playlist deleted locally is wanted only if the
+//! remote one is newer than the deletion. A wanted playlist is merged with
+//! the local one entry by entry on import (see `cdc::import`), so edits made
+//! on both sides are both kept. A remote deletion is wanted if the local
+//! playlist changed at or before it, an older local deletion or no local
+//! playlist at all (it travels on). A song is
 //! wanted if a wanted remote playlist or a local playlist refers to it, the
 //! remote side has it and the local side doesn't. A song both sides have is
 //! wanted whole if the remote file changed later (`updated_at_file`, an
@@ -30,16 +37,20 @@ use std::{
 };
 
 use codec::{DeletedPlaylist, Playlist, Song, SongMeta, Version};
+use storage::entries;
 use storage::{
     Db,
     db::{DeletedPlaylistRow, PlaylistHashRow, TrackSyncRow},
 };
 
 use super::frame::WireStatus;
-use crate::cdc::{deleted_from_db, hex, parse_hash, read_cover, read_song_cover, with_info};
+use crate::cdc::{
+    deleted_from_db, entries_to_packet, hex, parse_hash, read_cover, read_song_cover,
+    removed_to_packet, with_info,
+};
 
-/// the codec version of every sync payload.
-const VERSION: Version = Version::V0_12;
+/// the codec version of every sync payload; both sides must use it.
+pub const VERSION: Version = Version::V0_13;
 /// a data portion is cut once its files and covers reach this size (one song
 /// is never split, so a single larger song makes a larger portion).
 pub const PORTION_BYTES: u64 = 16 << 20;
@@ -50,6 +61,29 @@ fn internal<E>(_: E) -> WireStatus {
 
 fn invalid<E>(_: E) -> WireStatus {
     WireStatus::InvalidPacket
+}
+
+/// a received payload is a packet of [`VERSION`]: another version is a
+/// peer of another app version (`VersionMismatch`), garbage — `InvalidPacket`.
+pub fn check_version(bytes: &[u8]) -> Result<(), WireStatus> {
+    match codec::peek_version(bytes) {
+        Ok(v) if v == VERSION => Ok(()),
+        Ok(_) | Err(codec::CodecError::UnsupportedVersion) => Err(WireStatus::VersionMismatch),
+        Err(_) => Err(WireStatus::InvalidPacket),
+    }
+}
+
+/// a db playlist -> a packet one: entries and removed entries, no cover.
+fn playlist_of(p: &PlaylistHashRow) -> Playlist {
+    Playlist {
+        tracks: p.hashes.iter().filter_map(|h| parse_hash(h)).collect(),
+        entries: entries_to_packet(&p.entries),
+        removed: removed_to_packet(&p.removed),
+        name: p.name.clone(),
+        created_at: p.created_at,
+        updated_at: p.updated_at,
+        ..Playlist::default()
+    }
 }
 
 /// the index of the local library.
@@ -75,16 +109,7 @@ pub fn index(db: &Db) -> Result<Vec<u8>, WireStatus> {
             })
         })
         .collect::<Vec<_>>();
-    let playlists = playlists
-        .into_iter()
-        .map(|p| Playlist {
-            tracks: p.hashes.iter().filter_map(|h| parse_hash(h)).collect(),
-            name: p.name,
-            created_at: p.created_at,
-            updated_at: p.updated_at,
-            ..Playlist::default()
-        })
-        .collect::<Vec<_>>();
+    let playlists = playlists.iter().map(playlist_of).collect::<Vec<_>>();
     let deleted: Vec<DeletedPlaylist> = db
         .get_deleted_playlists(None)
         .map_err(internal)?
@@ -132,6 +157,7 @@ impl Want {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, WireStatus> {
+        check_version(bytes)?;
         let packet = codec::decode(bytes).map_err(invalid)?;
         let (metas, songs): (Vec<&Song>, Vec<&Song>) =
             packet.songs.iter().partition(|s| s.meta.is_some());
@@ -145,6 +171,7 @@ impl Want {
 
 /// compares a remote index with the local library.
 pub fn want(db: &Db, remote_index: &[u8]) -> Result<Want, WireStatus> {
+    check_version(remote_index)?;
     let remote = codec::decode(remote_index).map_err(invalid)?;
     let local_playlists = db.get_playlist_hashes(None).map_err(internal)?;
     // the remote songs this side has, with their dates.
@@ -167,13 +194,19 @@ pub fn want(db: &Db, remote_index: &[u8]) -> Result<Want, WireStatus> {
         .map(|d| (d.name.as_str(), d.deleted_at))
         .collect();
 
+    let live: HashMap<&str, &PlaylistHashRow> =
+        local_playlists.iter().map(|p| (p.name.as_str(), p)).collect();
     let wanted: Vec<&Playlist> = remote
         .playlists
         .iter()
         .filter(|p| !p.name.is_empty())
-        .filter(|p| match local_dates.get(p.name.as_str()) {
-            None => true,
-            Some(&local) => p.updated_at.unwrap_or(0) > local,
+        .filter(|p| {
+            let remote_at = p.updated_at.unwrap_or(0);
+            match (live.get(p.name.as_str()), deleted_here.get(p.name.as_str())) {
+                (Some(local), _) => remote_at > local.updated_at.unwrap_or(0) || has_news(p, local),
+                (None, Some(&at)) => remote_at > at,
+                (None, None) => true,
+            }
         })
         .collect();
     // remote deletions this side hasn't applied: the local playlist changed
@@ -227,6 +260,23 @@ pub fn want(db: &Db, remote_index: &[u8]) -> Result<Want, WireStatus> {
             .chain(wanted_deletions)
             .collect(),
     })
+}
+
+/// the remote copy `remote` of the live local playlist `local` has an entry
+/// this side doesn't know (neither live nor removed) or has removed an entry
+/// this side still has.
+fn has_news(remote: &Playlist, local: &PlaylistHashRow) -> bool {
+    let live: HashSet<u64> = local.entries.iter().map(|&(id, _)| id).collect();
+    let removed: HashSet<u64> = local.removed.iter().map(|&(id, _)| id).collect();
+    let ids: Vec<u64> = match remote.entries.len() == remote.tracks.len() {
+        true => remote.entries.iter().map(|e| e.id).collect(),
+        false => {
+            let hashes: Vec<String> = remote.tracks.iter().map(|&h| hex(h)).collect();
+            entries::legacy_entries(&remote.name, &hashes, 0).into_iter().map(|e| e.id).collect()
+        }
+    };
+    ids.iter().any(|id| !live.contains(id) && !removed.contains(id))
+        || remote.removed.iter().any(|e| live.contains(&e.entry_id))
 }
 
 /// what one data portion carries (for progress).
@@ -418,12 +468,9 @@ impl Plan {
                     false => (String::new(), Vec::new()),
                 };
                 Playlist {
-                    name: p.name.clone(),
-                    tracks: p.hashes.iter().filter_map(|h| parse_hash(h)).collect(),
-                    created_at: p.created_at,
-                    updated_at: p.updated_at,
                     cover_name,
                     cover,
+                    ..playlist_of(p)
                 }
             })
             .collect();

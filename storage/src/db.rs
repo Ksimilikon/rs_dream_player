@@ -14,6 +14,7 @@
 //! index_*()  -> filesystem scan into the index (`index_dir`).
 
 use std::{
+    collections::{HashMap, HashSet, VecDeque},
     error::Error,
     path::{Path, PathBuf},
     sync::Arc,
@@ -26,6 +27,7 @@ use audio_structs::{
 };
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
 
+use crate::entries::{self, Entry};
 use crate::schema::{InvalidStructure, backup_path, deploy, migrate, verify_structure};
 use crate::traits::indexator::Indexator;
 
@@ -534,12 +536,9 @@ impl Db {
     /// always cascades into playlists.
     pub fn remove_track(&self, id: i64) -> Result<(), Box<dyn Error>> {
         let tx = self.conn.unchecked_transaction()?;
-        // first drop the playlist bindings by the track hash.
-        tx.execute(
-            "DELETE FROM playlist_tracks \
-             WHERE song_hash IN (SELECT hash FROM tracks WHERE id = ?1)",
-            [id],
-        )?;
+        // first remove the playlist entries of the track (a sync then removes
+        // them on the other devices too).
+        remove_song_entries(&tx, "SELECT hash FROM tracks WHERE id = ?1", [id])?;
         tx.execute("DELETE FROM tracks WHERE id = ?1", [id])?;
         tx.commit()?;
         Ok(())
@@ -774,6 +773,8 @@ impl Db {
                 created_at: r.get::<_, Option<i64>>(3)?.map(|v| v as u64),
                 updated_at: r.get::<_, Option<i64>>(4)?.map(|v| v as u64),
                 hashes: Vec::new(),
+                entries: Vec::new(),
+                removed: Vec::new(),
             })
         };
         let mut metas = match names {
@@ -796,13 +797,12 @@ impl Db {
             }
         };
 
-        let mut tracks = self.conn.prepare(
-            "SELECT song_hash FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position",
-        )?;
         for pl in &mut metas {
-            pl.hashes = tracks
-                .query_map([pl.id], |r| r.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
+            (pl.entries, pl.hashes) = live_entries(&self.conn, pl.id)?
+                .into_iter()
+                .map(|e| ((e.id, e.added_at), e.hash))
+                .unzip();
+            pl.removed = removed_entries(&self.conn, pl.id)?;
         }
         Ok(metas)
     }
@@ -812,11 +812,13 @@ impl Db {
     ///   hashes from the packet. A file written over a known track (same
     ///   path) replaces it: the track takes the packet hash, and local
     ///   playlists referring to the old hash follow it;
-    /// - `playlists` — playlists by name (`id` is ignored): created or
-    ///   rewritten entirely with the `hashes` list. `None` cover / dates don't
-    ///   overwrite an already saved value.
+    /// - `playlists` — playlists by name (`id` is ignored): created or merged
+    ///   with the local one entry by entry (see [`entries`]). The cover and
+    ///   the creation date come from the copy changed later (`None` doesn't
+    ///   overwrite a saved value), `updated_at` becomes the later of the two.
     ///
-    /// a deleted local playlist comes back with an imported one; `deleted` —
+    /// a deleted local playlist comes back with an imported one (its entries
+    /// from before the deletion don't); `deleted` —
     /// playlists deleted on the other side: a local playlist changed at or
     /// before the deletion is soft-deleted (a later local change wins), an
     /// unknown name is remembered as deleted so the deletion travels on.
@@ -852,36 +854,7 @@ impl Db {
             )?;
         }
         for pl in playlists {
-            tx.execute(
-                "INSERT INTO playlists (name, cover_art, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4) \
-                 ON CONFLICT(name) DO UPDATE SET \
-                    cover_art = COALESCE(excluded.cover_art, cover_art), \
-                    created_at = COALESCE(excluded.created_at, created_at), \
-                    updated_at = COALESCE(excluded.updated_at, updated_at), \
-                    deleted_at = NULL",
-                params![
-                    pl.name,
-                    pl.cover_art.as_ref().map(|p| p.to_string_lossy().into_owned()),
-                    pl.created_at.map(|t| t as i64),
-                    pl.updated_at.map(|t| t as i64),
-                ],
-            )?;
-            let playlist_id: i64 =
-                tx.query_row("SELECT id FROM playlists WHERE name = ?1", [&pl.name], |r| {
-                    r.get(0)
-                })?;
-            tx.execute(
-                "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
-                [playlist_id],
-            )?;
-            for (pos, hash) in pl.hashes.iter().enumerate() {
-                tx.execute(
-                    "INSERT INTO playlist_tracks (playlist_id, song_hash, position) \
-                     VALUES (?1, ?2, ?3)",
-                    params![playlist_id, hash, pos as i64],
-                )?;
-            }
+            merge_playlist(&tx, pl)?;
         }
         for d in deleted {
             apply_deletion(&tx, &d.name, d.deleted_at)?;
@@ -1025,19 +998,37 @@ impl Indexator for Db {
                 r.get(0)
             })?;
 
-        // rewrite the ordered track bindings of the playlist.
-        tx.execute(
-            "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
-            [playlist_id],
-        )?;
-        for (pos, track) in playlist.tracks().iter().enumerate() {
-            let hash = upsert_track(&tx, track, None)?;
-            tx.execute(
-                "INSERT INTO playlist_tracks (playlist_id, song_hash, position) \
-                 VALUES (?1, ?2, ?3)",
-                params![playlist_id, hash, pos as i64],
-            )?;
+        // a song still in the playlist keeps its entry (the first unused one
+        // of that song, in order), a new one gets a new entry, the entries
+        // left over are removed — so a sync merge knows what changed. An
+        // entry of a song missing here (not synced yet) is not in `playlist`
+        // (it can't be loaded) and stays where it was.
+        // A new entry is dated with the save.
+        let before = live_entries(&tx, playlist_id)?;
+        let mut old: HashMap<&str, VecDeque<&Entry>> = HashMap::new();
+        for e in &before {
+            if track_exists(&tx, &e.hash)? {
+                old.entry(e.hash.as_str()).or_default().push_back(e);
+            }
         }
+        let mut list = Vec::with_capacity(playlist.tracks().len());
+        for track in playlist.tracks() {
+            let hash = upsert_track(&tx, track, None)?;
+            let entry = match old.get_mut(hash.as_str()).and_then(VecDeque::pop_front) {
+                Some(kept) => kept.clone(),
+                None => Entry {
+                    id: entries::new_entry_id(),
+                    hash,
+                    added_at: updated,
+                },
+            };
+            list.push(entry);
+        }
+        let gone: HashSet<u64> = old.into_values().flatten().map(|e| e.id).collect();
+        // the entries of missing songs are the only ones `before` adds.
+        let list = entries::merge(&list, 1, &before, 0, &gone).entries;
+        remove_entries(&tx, playlist_id, &gone.into_iter().collect::<Vec<_>>(), now)?;
+        write_entries(&tx, playlist_id, &list)?;
 
         tx.commit()?;
         Ok(())
@@ -1105,8 +1096,182 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// the song `hash` is in the db.
+fn track_exists(conn: &Connection, hash: &str) -> Result<bool, Box<dyn Error>> {
+    let mut stmt = conn.prepare_cached("SELECT 1 FROM tracks WHERE hash = ?1")?;
+    Ok(stmt.exists([hash])?)
+}
+
+/// the live entries of playlist `playlist_id`, in order.
+fn live_entries(conn: &Connection, playlist_id: i64) -> Result<Vec<Entry>, Box<dyn Error>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT entry_id, song_hash, added_at FROM playlist_tracks \
+         WHERE playlist_id = ?1 ORDER BY position",
+    )?;
+    let rows = stmt
+        .query_map([playlist_id], |r| {
+            Ok(Entry {
+                id: r.get::<_, i64>(0)? as u64,
+                hash: r.get(1)?,
+                added_at: r.get::<_, i64>(2)? as u64,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// the removed entries (entry id, removal time) of playlist `playlist_id`.
+fn removed_entries(conn: &Connection, playlist_id: i64) -> Result<Vec<(u64, u64)>, Box<dyn Error>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT entry_id, removed_at FROM playlist_removed WHERE playlist_id = ?1 ORDER BY entry_id",
+    )?;
+    let rows = stmt
+        .query_map([playlist_id], |r| {
+            Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// rewrites the live entries of playlist `playlist_id` with `list`, in order.
+fn write_entries(conn: &Connection, playlist_id: i64, list: &[Entry]) -> Result<(), Box<dyn Error>> {
+    conn.execute("DELETE FROM playlist_tracks WHERE playlist_id = ?1", [playlist_id])?;
+    let mut stmt = conn.prepare_cached(
+        "INSERT INTO playlist_tracks (playlist_id, song_hash, position, entry_id, added_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )?;
+    for (pos, e) in list.iter().enumerate() {
+        stmt.execute(params![playlist_id, e.hash, pos as i64, e.id as i64, e.added_at as i64])?;
+    }
+    Ok(())
+}
+
+/// remembers the entries `ids` of playlist `playlist_id` as removed at `at`
+/// (an already removed one keeps its time) and drops them from the live ones.
+fn remove_entries(conn: &Connection, playlist_id: i64, ids: &[u64], at: u64) -> Result<(), Box<dyn Error>> {
+    let mut remember = conn.prepare_cached(
+        "INSERT OR IGNORE INTO playlist_removed (playlist_id, entry_id, removed_at) VALUES (?1, ?2, ?3)",
+    )?;
+    let mut drop = conn
+        .prepare_cached("DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND entry_id = ?2")?;
+    for &id in ids {
+        remember.execute(params![playlist_id, id as i64, at as i64])?;
+        drop.execute(params![playlist_id, id as i64])?;
+    }
+    Ok(())
+}
+
+/// removes (see [`remove_entries`]) every playlist entry of the songs whose
+/// hashes `hashes_sql` selects (with `params`), now.
+fn remove_song_entries(
+    conn: &Connection,
+    hashes_sql: &str,
+    params: impl rusqlite::Params + Clone,
+) -> Result<(), Box<dyn Error>> {
+    conn.execute(
+        &format!(
+            "INSERT OR IGNORE INTO playlist_removed (playlist_id, entry_id, removed_at) \
+             SELECT playlist_id, entry_id, {now} FROM playlist_tracks \
+             WHERE song_hash IN ({hashes_sql})",
+            now = unix_now()
+        ),
+        params.clone(),
+    )?;
+    conn.execute(
+        &format!("DELETE FROM playlist_tracks WHERE song_hash IN ({hashes_sql})"),
+        params,
+    )?;
+    Ok(())
+}
+
+/// merges an imported playlist into the local one (see [`Db::save_import`]).
+fn merge_playlist(conn: &Connection, pl: &PlaylistHashRow) -> Result<(), Box<dyn Error>> {
+    let local: Option<(i64, Option<i64>, Option<i64>)> = conn
+        .query_row(
+            "SELECT id, updated_at, deleted_at FROM playlists WHERE name = ?1",
+            [&pl.name],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let cover = pl.cover_art.as_ref().map(|p| p.to_string_lossy().into_owned());
+    let (playlist_id, local_at) = match local {
+        None => {
+            conn.execute(
+                "INSERT INTO playlists (name, cover_art, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    pl.name,
+                    cover,
+                    pl.created_at.map(|t| t as i64),
+                    pl.updated_at.map(|t| t as i64),
+                ],
+            )?;
+            (conn.last_insert_rowid(), None)
+        }
+        Some((id, updated, deleted)) => {
+            let local_at = updated.map(|t| t as u64);
+            // the remote copy changed later (or this one is deleted): its
+            // cover and creation date win.
+            let remote_wins = deleted.is_some() || pl.updated_at.unwrap_or(0) > local_at.unwrap_or(0);
+            let updated = local_at.max(pl.updated_at);
+            conn.execute(
+                "UPDATE playlists SET \
+                    cover_art = CASE WHEN ?2 THEN COALESCE(?3, cover_art) ELSE cover_art END, \
+                    created_at = CASE WHEN ?2 THEN COALESCE(?4, created_at) ELSE created_at END, \
+                    updated_at = ?5, deleted_at = NULL \
+                 WHERE id = ?1",
+                params![
+                    id,
+                    remote_wins,
+                    cover,
+                    pl.created_at.map(|t| t as i64),
+                    updated.map(|t| t as i64),
+                ],
+            )?;
+            (id, local_at)
+        }
+    };
+
+    let remote: Vec<Entry> = match pl.entries.len() == pl.hashes.len() {
+        true => pl
+            .entries
+            .iter()
+            .zip(&pl.hashes)
+            .map(|(&(id, added_at), hash)| Entry {
+                id,
+                hash: hash.clone(),
+                added_at,
+            })
+            .collect(),
+        false => entries::legacy_entries(&pl.name, &pl.hashes, pl.updated_at.unwrap_or(0)),
+    };
+    let mut remember = conn.prepare_cached(
+        "INSERT OR IGNORE INTO playlist_removed (playlist_id, entry_id, removed_at) VALUES (?1, ?2, ?3)",
+    )?;
+    for &(id, at) in &pl.removed {
+        remember.execute(params![playlist_id, id as i64, at as i64])?;
+    }
+    let removed: HashSet<u64> = removed_entries(conn, playlist_id)?
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    let merged = entries::merge(
+        &live_entries(conn, playlist_id)?,
+        local_at.unwrap_or(0),
+        &remote,
+        pl.updated_at.unwrap_or(0),
+        &removed,
+    );
+    // the same song added here too, but earlier: remembered as removed so it
+    // doesn't come back from a copy that still has it.
+    remove_entries(conn, playlist_id, &merged.dropped, unix_now())?;
+    write_entries(conn, playlist_id, &merged.entries)
+}
+
 /// soft-deletes `name` at `at`: the row keeps its name and dates, gets
-/// `deleted_at`, loses its track list. Unknown / already deleted — no-op.
+/// `deleted_at`, loses its track list (the removed entries stay, so a
+/// playlist that comes back with a later change doesn't bring them back).
+/// Unknown / already deleted — no-op.
 fn soft_delete(conn: &Connection, name: &str, at: u64) -> Result<(), Box<dyn Error>> {
     let changed = conn.execute(
         "UPDATE playlists SET deleted_at = ?2 WHERE name = ?1 AND deleted_at IS NULL",
@@ -1166,6 +1331,11 @@ pub struct PlaylistHashRow {
     pub updated_at: Option<u64>,
     /// song hashes in playlist order.
     pub hashes: Vec<String>,
+    /// (entry id, addition time) of every song of `hashes` (same order); for
+    /// `save_import` — empty: derived ([`entries::legacy_entries`]).
+    pub entries: Vec<(u64, u64)>,
+    /// the entries removed from the playlist: (entry id, removal time).
+    pub removed: Vec<(u64, u64)>,
 }
 
 /// track metadata the db keeps and sync carries (not the file tags: the
@@ -1360,9 +1530,9 @@ fn follow_hash(conn: &Connection, track: &TrackVirtual, hash: &str) -> Result<()
     let Some((id, _)) = known.filter(|(_, old)| *old != path) else {
         return Ok(());
     };
-    conn.execute(
-        "DELETE FROM playlist_tracks \
-         WHERE song_hash IN (SELECT hash FROM tracks WHERE path = ?1 AND id != ?2)",
+    remove_song_entries(
+        conn,
+        "SELECT hash FROM tracks WHERE path = ?1 AND id != ?2",
         params![path, id],
     )?;
     conn.execute("DELETE FROM tracks WHERE path = ?1 AND id != ?2", params![path, id])?;
@@ -1675,6 +1845,8 @@ mod tests {
             created_at: Some(1),
             updated_at: Some(u64::from(u32::MAX)),
             hashes: Vec::new(),
+            entries: Vec::new(),
+            removed: Vec::new(),
         };
         db.save_import(&[], &[], &[], &[pl], &[]).unwrap();
         assert_eq!(live_names(&db), vec!["mix".to_string()]);
@@ -1779,11 +1951,16 @@ mod tests {
         let db = Db::init(path.clone()).unwrap();
         db.save_track(fixture_track(dir.path(), "a.mp3", "Hello", "World"))
             .unwrap();
-        save_named(&db, "mix", vec![], 100);
+        let song = |name| fixture_track(dir.path(), name, "S", "A");
+        save_named(&db, "mix", vec![song("a.mp3"), song("b.mp3"), song("a.mp3")], 100);
         // roll back to the pre-migration db of older app versions.
         db.conn
             .execute_batch(
                 "DROP TABLE paired_devices; \
+                 DROP TABLE playlist_removed; \
+                 DROP INDEX playlist_tracks_entry; \
+                 ALTER TABLE playlist_tracks DROP COLUMN entry_id; \
+                 ALTER TABLE playlist_tracks DROP COLUMN added_at; \
                  ALTER TABLE playlists DROP COLUMN deleted_at; \
                  ALTER TABLE tracks DROP COLUMN ignore_orphan; \
                  ALTER TABLE tracks DROP COLUMN updated_at; \
@@ -1795,7 +1972,7 @@ mod tests {
 
         let db = Db::init(path.clone()).unwrap();
         assert!(!path.with_file_name(format!("{DB_FILE_NAME}_bak")).exists());
-        assert_eq!(db.get_tracks(None, None, None, None).unwrap().len(), 1);
+        assert_eq!(db.get_tracks(None, None, None, None).unwrap().len(), 2);
         // migration 2: the playlist is live, the new marks have their defaults.
         assert_eq!(live_names(&db), vec!["mix".to_string()]);
         assert!(!db.get_tracks(None, None, None, None).unwrap()[0].ignore_orphan);
@@ -1805,6 +1982,207 @@ mod tests {
         let hash = db.get_track_hashes(None).unwrap()[0].1.clone();
         let row = &db.get_track_sync(&[hash]).unwrap()[0];
         assert_eq!((row.updated_at, row.updated_at_file), (None, None));
+        // migration 4: the entries got their legacy ids, added when the
+        // playlist changed; nothing is removed.
+        let pl = &db.get_playlist_hashes(None).unwrap()[0];
+        let legacy: Vec<(u64, u64)> = entries::legacy_entries("mix", &pl.hashes, 100)
+            .into_iter()
+            .map(|e| (e.id, e.added_at))
+            .collect();
+        assert_eq!(pl.entries, legacy);
+        assert!(pl.removed.is_empty());
+    }
+
+    /// (entry ids, hashes) of the live playlist `name`.
+    fn entries_of(db: &Db, name: &str) -> (Vec<u64>, Vec<String>) {
+        let pl = db.get_playlist_hashes(Some(&[name.to_string()])).unwrap().remove(0);
+        (pl.entries.iter().map(|&(id, _)| id).collect(), pl.hashes)
+    }
+
+    #[test]
+    fn a_local_save_keeps_the_entries_of_kept_songs() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        let song = |name| fixture_track(dir.path(), name, "S", "A");
+        save_named(&db, "mix", vec![song("a.mp3"), song("b.mp3"), song("a.mp3")], 10);
+        let (ids, hashes) = entries_of(&db, "mix");
+        assert_eq!(ids.len(), 3);
+        assert_ne!(ids[0], ids[2], "a duplicate is its own entry");
+
+        // b moves to the front, the second a goes away, c comes.
+        save_named(&db, "mix", vec![song("b.mp3"), song("a.mp3"), song("c.mp3")], 20);
+        let (new_ids, new_hashes) = entries_of(&db, "mix");
+        assert_eq!(&new_ids[..2], &[ids[1], ids[0]]);
+        assert_eq!(&new_hashes[..2], &[hashes[1].clone(), hashes[0].clone()]);
+        assert!(!ids.contains(&new_ids[2]));
+        let pl = &db.get_playlist_hashes(None).unwrap()[0];
+        assert_eq!(pl.removed.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![ids[2]]);
+    }
+
+    /// a copy of the live playlist `name` as another device would send it.
+    fn exported(db: &Db, name: &str) -> PlaylistHashRow {
+        db.get_playlist_hashes(Some(&[name.to_string()])).unwrap().remove(0)
+    }
+
+    #[test]
+    fn concurrent_edits_of_two_devices_merge() {
+        let dir = tempdir().unwrap();
+        let a = Db::init(dir.path().join("a.sqlite")).unwrap();
+        let b = Db::init(dir.path().join("b.sqlite")).unwrap();
+        let song = |name| fixture_track(dir.path(), name, "S", "A");
+        save_named(&a, "mix", vec![song("1.mp3"), song("2.mp3")], 10);
+        // b gets the songs (with a's hashes) and the playlist.
+        let tracks: Vec<(TrackVirtual, String)> = a
+            .get_track_hashes(None)
+            .unwrap()
+            .into_iter()
+            .map(|(_, hash, path)| {
+                let file = path.file_name().unwrap().to_str().unwrap();
+                (fixture_track(dir.path(), file, "S", "A"), hash)
+            })
+            .collect();
+        b.save_import(&tracks, &[], &[], &[exported(&a, "mix")], &[]).unwrap();
+        let hashes = entries_of(&a, "mix").1;
+
+        // a adds 3 and removes 1; b adds 4 (at the same time, b's save is later).
+        save_named(&a, "mix", vec![song("2.mp3"), song("3.mp3")], 20);
+        let mut on_b = b.get_playlists(None, None).unwrap().remove(0);
+        on_b.add_track_back(song("4.mp3"));
+        on_b.set_updated_at(30);
+        b.save_playlist(on_b).unwrap();
+
+        // both sides merge each other's copy.
+        let (from_a, from_b) = (exported(&a, "mix"), exported(&b, "mix"));
+        a.save_import(&[], &[], &[], &[from_b], &[]).unwrap();
+        b.save_import(&[], &[], &[], &[from_a], &[]).unwrap();
+        let (on_a, on_b) = (entries_of(&a, "mix"), entries_of(&b, "mix"));
+        assert_eq!(on_a, on_b, "both devices end up with the same playlist");
+        assert_eq!(on_a.1.len(), 3);
+        assert!(!on_a.1.contains(&hashes[0]), "the removed song doesn't come back");
+        assert_eq!(on_a.1[0], hashes[1]);
+        let pls = a.get_playlist_hashes(None).unwrap();
+        assert_eq!(pls[0].updated_at, Some(30));
+
+        // another round changes nothing.
+        let (from_a, from_b) = (exported(&a, "mix"), exported(&b, "mix"));
+        a.save_import(&[], &[], &[], &[from_b], &[]).unwrap();
+        b.save_import(&[], &[], &[], &[from_a], &[]).unwrap();
+        assert_eq!(entries_of(&a, "mix"), on_a);
+        assert_eq!(entries_of(&b, "mix"), on_a);
+    }
+
+    #[test]
+    fn the_same_song_added_on_two_devices_is_kept_once() {
+        let dir = tempdir().unwrap();
+        let a = Db::init(dir.path().join("a.sqlite")).unwrap();
+        let b = Db::init(dir.path().join("b.sqlite")).unwrap();
+        let song = |name| fixture_track(dir.path(), name, "S", "A");
+        a.save_track(song("x.mp3")).unwrap();
+        save_named(&a, "mix", vec![song("1.mp3")], 10);
+        // b gets every song (with a's hashes) and the playlist.
+        let tracks: Vec<(TrackVirtual, String)> = a
+            .get_track_hashes(None)
+            .unwrap()
+            .into_iter()
+            .map(|(_, hash, path)| {
+                let file = path.file_name().unwrap().to_str().unwrap();
+                (fixture_track(dir.path(), file, "S", "A"), hash)
+            })
+            .collect();
+        b.save_import(&tracks, &[], &[], &[exported(&a, "mix")], &[]).unwrap();
+        let one = entries_of(&a, "mix").1[0].clone();
+
+        // both add x: a at the end at 20, b at the front at 30 (later).
+        save_named(&a, "mix", vec![song("1.mp3"), song("x.mp3")], 20);
+        save_named(&b, "mix", vec![song("x.mp3"), song("1.mp3")], 30);
+        let x = entries_of(&b, "mix").1[0].clone();
+        let (from_a, from_b) = (exported(&a, "mix"), exported(&b, "mix"));
+        a.save_import(&[], &[], &[], &[from_b], &[]).unwrap();
+        b.save_import(&[], &[], &[], &[from_a], &[]).unwrap();
+
+        // x is there once, at b's (the later) place, on both devices.
+        let on_a = entries_of(&a, "mix");
+        assert_eq!(on_a, entries_of(&b, "mix"));
+        assert_eq!(on_a.1, vec![x.clone(), one.clone()]);
+        // a song added twice on one device is still there twice.
+        save_named(&a, "mix", vec![song("x.mp3"), song("1.mp3"), song("x.mp3")], 40);
+        b.save_import(&[], &[], &[], &[exported(&a, "mix")], &[]).unwrap();
+        a.save_import(&[], &[], &[], &[exported(&b, "mix")], &[]).unwrap();
+        assert_eq!(entries_of(&b, "mix").1, vec![x.clone(), one, x]);
+        assert_eq!(entries_of(&a, "mix"), entries_of(&b, "mix"));
+    }
+
+    #[test]
+    fn an_import_without_ids_matches_the_legacy_entries() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        let hashes: Vec<String> = ["a", "b", "a"].map(|h| h.repeat(32)).to_vec();
+        let old = PlaylistHashRow {
+            id: 0,
+            name: "mix".into(),
+            cover_art: None,
+            created_at: None,
+            updated_at: Some(10),
+            hashes: hashes.clone(),
+            entries: Vec::new(),
+            removed: Vec::new(),
+        };
+        db.save_import(&[], &[], &[], &[old], &[]).unwrap();
+        // the same packet again (e.g. an old export imported twice) doesn't
+        // double the playlist.
+        let again = PlaylistHashRow {
+            id: 0,
+            name: "mix".into(),
+            cover_art: None,
+            created_at: None,
+            updated_at: Some(10),
+            hashes: hashes.clone(),
+            entries: Vec::new(),
+            removed: Vec::new(),
+        };
+        db.save_import(&[], &[], &[], &[again], &[]).unwrap();
+        let legacy = entries::legacy_entries("mix", &hashes, 10).into_iter().map(|e| e.id).collect();
+        assert_eq!(entries_of(&db, "mix"), (legacy, hashes));
+    }
+
+    #[test]
+    fn a_local_save_keeps_the_entries_of_missing_songs() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        let song = |name| fixture_track(dir.path(), name, "S", "A");
+        save_named(&db, "mix", vec![song("1.mp3")], 10);
+        // another device's playlist refers to a song not synced here yet.
+        let mut pl = exported(&db, "mix");
+        pl.hashes.push("f".repeat(32));
+        pl.entries.push((77, 20));
+        pl.updated_at = Some(20);
+        db.save_import(&[], &[], &[], &[pl], &[]).unwrap();
+
+        // the frontend sees only song 1 and adds song 2.
+        let mut on_screen = db.get_playlists(None, None).unwrap().remove(0);
+        assert_eq!(on_screen.tracks().len(), 1);
+        on_screen.add_track_back(song("2.mp3"));
+        on_screen.set_updated_at(30);
+        db.save_playlist(on_screen).unwrap();
+
+        let pl = exported(&db, "mix");
+        assert_eq!(pl.hashes.len(), 3);
+        assert_eq!(pl.entries[1].0, 77, "the missing song keeps its place");
+        assert!(pl.removed.is_empty());
+    }
+
+    #[test]
+    fn removing_a_track_removes_its_entries() {
+        let dir = tempdir().unwrap();
+        let db = Db::init(dir.path().join(DB_FILE_NAME)).unwrap();
+        let song = |name| fixture_track(dir.path(), name, "S", "A");
+        save_named(&db, "mix", vec![song("1.mp3"), song("2.mp3")], 10);
+        let (ids, _) = entries_of(&db, "mix");
+        let id = db.get_track_hashes(None).unwrap()[0].0;
+        db.remove_track(id).unwrap();
+        let pl = &db.get_playlist_hashes(None).unwrap()[0];
+        assert_eq!(entries_of(&db, "mix").0, vec![ids[1]]);
+        assert_eq!(pl.removed.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![ids[0]]);
     }
 
     #[test]
@@ -2138,6 +2516,7 @@ mod tests {
         old.set_name("mix".into());
         old.set_cover_art(Some(dir.path().join("old.png")));
         old.set_created_at(10);
+        old.set_updated_at(5);
         db.save_playlist(old).unwrap();
 
         let track = fixture_track(dir.path(), "1.mp3", "First", "A");
@@ -2149,12 +2528,14 @@ mod tests {
             created_at: None,
             updated_at: Some(20),
             hashes: vec![hash.clone(), "ffffffffffffffffffffffffffffffff".into()],
+            entries: Vec::new(),
+            removed: Vec::new(),
         };
         db.save_import(&[(track, hash.clone())], &[], &[], &[pl], &[]).unwrap();
 
         // the track is saved with the hash from the packet.
         assert!(db.hash_exist(hash.clone()));
-        // the playlist is rewritten, but None didn't wipe the cover and created_at.
+        // the playlist is merged, but None didn't wipe the cover and created_at.
         let pls = db.get_playlist_hashes(None).unwrap();
         assert_eq!(pls.len(), 1);
         assert_eq!(pls[0].hashes.len(), 2);
